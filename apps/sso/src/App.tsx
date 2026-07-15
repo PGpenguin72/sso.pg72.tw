@@ -437,37 +437,30 @@ const SOCIAL_SIGN_IN_PROVIDERS: { id: string; label: string }[] = [
   { id: "apple", label: "Apple" },
 ];
 
+interface TelegramConfig {
+  enabled: boolean;
+  botUsername: string | null;
+}
+
 /**
  * Telegram Login Widget button. Telegram authenticates via its own widget, which
  * posts a signed payload; we forward it to the Worker's `/api/auth/telegram`
- * endpoint (which verifies the HMAC server-side). The widget needs the bot
- * username, fetched from the public config endpoint. When Telegram is not yet
- * configured (no bot token/username), the button renders disabled.
+ * endpoint (which verifies the HMAC server-side). The bot username comes from
+ * the public config endpoint, fetched once by the parent so the whole social
+ * section can be hidden when Telegram is not configured.
  */
-function TelegramLogin({ disabled }: { disabled: boolean }) {
+function TelegramLogin({
+  config,
+  disabled,
+}: {
+  config: TelegramConfig;
+  disabled: boolean;
+}) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [config, setConfig] = useState<
-    { enabled: boolean; botUsername: string | null } | null
-  >(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
-    fetch("/api/auth/telegram/config", { headers: { accept: "application/json" } })
-      .then((r) => (r.ok ? r.json() : { enabled: false, botUsername: null }))
-      .then((c) => {
-        if (!cancelled) setConfig(c);
-      })
-      .catch(() => {
-        if (!cancelled) setConfig({ enabled: false, botUsername: null });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!config?.enabled || !config.botUsername || !containerRef.current) return;
+    if (!config.enabled || !config.botUsername || !containerRef.current) return;
     const container = containerRef.current;
     // Telegram invokes this global with the signed auth payload.
     const cbName = "onTelegramAuth";
@@ -505,13 +498,9 @@ function TelegramLogin({ disabled }: { disabled: boolean }) {
     };
   }, [config]);
 
-  if (config && !config.enabled) {
-    return (
-      <button className="button button-secondary" type="button" disabled title="Telegram 登入尚未設定">
-        Telegram（尚未設定）
-      </button>
-    );
-  }
+  // The parent only mounts this when Telegram is configured; render nothing
+  // otherwise so a stray disabled button never appears.
+  if (!config.enabled) return null;
   return (
     <div className="telegram-login" aria-disabled={disabled}>
       <div ref={containerRef} />
@@ -524,6 +513,9 @@ function SignInView({ pending }: { pending: boolean }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [enabledSocial, setEnabledSocial] = useState<string[] | null>(null);
+  const [telegramConfig, setTelegramConfig] = useState<TelegramConfig | null>(
+    null,
+  );
   const query = new URLSearchParams(window.location.search);
   const oauthQuery = query.has("client_id") && query.has("sig");
 
@@ -542,9 +534,36 @@ function SignInView({ pending }: { pending: boolean }) {
     };
   }, []);
 
-  const visibleSocial = SOCIAL_SIGN_IN_PROVIDERS.filter(
-    (p) => enabledSocial === null || enabledSocial.includes(p.id),
-  );
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/auth/telegram/config", { headers: { accept: "application/json" } })
+      .then((r) => (r.ok ? r.json() : { enabled: false, botUsername: null }))
+      .then((c: TelegramConfig) => {
+        if (!cancelled) {
+          setTelegramConfig({
+            enabled: c.enabled === true,
+            botUsername: c.botUsername ?? null,
+          });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setTelegramConfig({ enabled: false, botUsername: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Wait for both config fetches before showing any social buttons so the row
+  // does not flash a full set and then collapse as unconfigured ones drop out.
+  const socialConfigReady = enabledSocial !== null && telegramConfig !== null;
+  const visibleSocial = enabledSocial
+    ? SOCIAL_SIGN_IN_PROVIDERS.filter((p) => enabledSocial.includes(p.id))
+    : [];
+  const telegramEnabled = telegramConfig?.enabled === true;
+  // Hide the divider + grid entirely when nothing in the section is available.
+  const showSocialSection =
+    socialConfigReady && (visibleSocial.length > 0 || telegramEnabled);
 
   const socialSignIn = async (provider: string, label: string) => {
     setBusy(provider);
@@ -603,30 +622,41 @@ function SignInView({ pending }: { pending: boolean }) {
           </button>
         </div>
 
-        <div className="auth-divider" role="separator">
-          <span>或使用其他帳號</span>
-        </div>
+        {showSocialSection ? (
+          <>
+            <div className="auth-divider" role="separator">
+              <span>或使用其他帳號</span>
+            </div>
 
-        <div className="social-grid" aria-busy={pending || busy !== null}>
-          {visibleSocial.map((provider) => (
-            <button
-              key={provider.id}
-              className="button button-secondary"
-              type="button"
-              disabled={pending || busy !== null}
-              onClick={() => void socialSignIn(provider.id, provider.label)}
-            >
-              {busy === provider.id ? "正在連線..." : provider.label}
-            </button>
-          ))}
-          <TelegramLogin disabled={pending || busy !== null} />
-        </div>
+            <div className="social-grid" aria-busy={pending || busy !== null}>
+              {visibleSocial.map((provider) => (
+                <button
+                  key={provider.id}
+                  className="button button-secondary"
+                  type="button"
+                  disabled={pending || busy !== null}
+                  onClick={() => void socialSignIn(provider.id, provider.label)}
+                >
+                  {busy === provider.id ? "正在連線..." : provider.label}
+                </button>
+              ))}
+              {telegramEnabled && telegramConfig ? (
+                <TelegramLogin
+                  config={telegramConfig}
+                  disabled={pending || busy !== null}
+                />
+              ) : null}
+            </div>
+          </>
+        ) : null}
 
         {error ? <div className="notice notice-error">{error}</div> : null}
         <p className="invite-note">
           <ShieldCheck aria-hidden="true" />
           登入即表示你同意
           <a href="/tos">服務條款</a>與<a href="/pp">隱私權政策</a>
+          <span aria-hidden="true"> · </span>
+          <a href="/about">了解 PGID</a>
         </p>
       </main>
     </>

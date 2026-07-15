@@ -640,6 +640,30 @@ svg {
   font-weight: 610;
 }
 
+.profile-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.profile-name-row form {
+  flex: 1;
+  min-width: 0;
+}
+
+.profile-name-row .icon-button {
+  flex: 0 0 auto;
+}
+
+.avatar-choice {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  object-fit: cover;
+}
+
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px !important;

@@ -12,43 +12,27 @@ export async function sha256Base64Url(value: string): Promise<string> {
     .replace(/=+$/, "");
 }
 
-export async function createAuthenticatedUser(
-  email: string,
-  role: "admin" | "user" = "user",
-) {
-  const userId = crypto.randomUUID();
+export type TestPlatformRole = "admin" | "bootadmin" | "developer" | "user";
+
+export async function createSessionFor(userId: string) {
   const sessionId = crypto.randomUUID();
   const token = crypto.randomUUID();
   const now = new Date();
 
-  await env.PG72_ID_DB.batch([
-    env.PG72_ID_DB.prepare(
-      `INSERT INTO user
-        (id, name, email, emailVerified, createdAt, updatedAt, role, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).bind(
-      userId,
-      "Test User",
-      email,
-      1,
-      now.toISOString(),
-      now.toISOString(),
-      role,
-      "active",
-    ),
-    env.PG72_ID_DB.prepare(
-      `INSERT INTO session
-        (id, expiresAt, token, createdAt, updatedAt, userId)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).bind(
+  await env.PG72_ID_DB.prepare(
+    `INSERT INTO session
+      (id, expiresAt, token, createdAt, updatedAt, userId)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
       sessionId,
       new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
       token,
       now.toISOString(),
       now.toISOString(),
       userId,
-    ),
-  ]);
+    )
+    .run();
 
   const signedToken = `${token}.${await makeSignature(token, env.BETTER_AUTH_SECRET)}`;
   const headers = new Headers({
@@ -60,4 +44,51 @@ export async function createAuthenticatedUser(
     ].join("; "),
   });
   return { headers, sessionId, token, userId };
+}
+
+export async function createAuthenticatedUser(
+  email: string,
+  role: TestPlatformRole = "user",
+) {
+  const userId = crypto.randomUUID();
+  const now = new Date();
+
+  await env.PG72_ID_DB.prepare(
+    `INSERT INTO user
+      (id, name, email, emailVerified, createdAt, updatedAt, role, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      userId,
+      "Test User",
+      email,
+      1,
+      now.toISOString(),
+      now.toISOString(),
+      role,
+      "active",
+    )
+    .run();
+
+  return createSessionFor(userId);
+}
+
+/**
+ * Returns a session for the bootstrap administrator (BOOTSTRAP_ADMIN_EMAIL).
+ * The row is created on first use with the pre-migration legacy stored role
+ * 'user', so every test exercising bootadmin powers also proves that the
+ * effective role is derived from the configured email rather than from the
+ * stored role. Storage persists within a test file, so the row is reused.
+ */
+export async function createBootstrapAdmin() {
+  const email = env.BOOTSTRAP_ADMIN_EMAIL.trim().toLowerCase();
+  const existing = await env.PG72_ID_DB.prepare(
+    "SELECT id FROM user WHERE email = ? LIMIT 1",
+  )
+    .bind(email)
+    .first<{ id: string }>();
+  if (existing) {
+    return createSessionFor(existing.id);
+  }
+  return createAuthenticatedUser(email, "user");
 }

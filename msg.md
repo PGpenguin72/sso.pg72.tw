@@ -14,6 +14,7 @@ Claude 把「需要你決策 / 需要你動手 / 想讓你知道」的事寫在�
 - **(A) 推薦**:Dovecot 接 PGID token introspection,IMAP/SMTP 走 XOAUTH2 → 真正免密碼、集中撤銷。需要一次維護窗口套用(我會先在你 VPS 上做設定備份 + 可即時 rollback 的步驟)。
 - **(B) 較保守**:先維持現有郵件密碼登入不動,Roundcube 只做 Web OIDC 登入 + `oauth_password_claim`/app password 過渡。
 → **你的決定**:(A) 安排維護窗口讓我套用,還是 (B) 先過渡?我兩種的設定檔和 runbook 都會先備好。
+> 補充:Path A 設定已全部備妥(`原專案代碼/webmail.pg72.tw/deploy/pgid/mail/`)。有一個 **PGID 側前置**——`/oauth2/introspect` 需對 access token 回 `active:true` 且回 `email`(RFC 7662 只保證 username)。我會排進 SSO 後端待辦,套用 mail 前先確認這個。套用步驟全部限維護窗口、你在場才做(不會半夜動你信箱)。
 
 ### D-新. 設計語言(階段 30)確認
 我從 `~/ahsnccu-ann` 抽出風格:**深藍黑底 (#0a0f1c/#0d1424) + 翡翠綠終端色 (#10b981/#22d3ae) + slate 灰文字 + 等寬字點綴**——簡約駭客風。我會用這套統一所有 PGID/專案介面。

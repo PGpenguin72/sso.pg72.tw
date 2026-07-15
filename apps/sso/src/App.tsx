@@ -16,6 +16,7 @@ import {
   LogIn,
   LogOut,
   Mail,
+  Menu,
   MonitorSmartphone,
   Moon,
   Pencil,
@@ -3211,7 +3212,7 @@ export function App() {
               title="選單"
               onClick={() => setNavOpen((open) => !open)}
             >
-              {navOpen ? <X aria-hidden="true" /> : <Activity aria-hidden="true" />}
+              {navOpen ? <X aria-hidden="true" /> : <Menu aria-hidden="true" />}
             </button>
           </div>
           <nav className="nav-groups">

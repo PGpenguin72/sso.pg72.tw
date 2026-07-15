@@ -1,0 +1,39 @@
+{
+  "name": "@pg72/id",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build && node scripts/remove-built-dev-vars.mjs",
+    "cf-typegen": "pnpm build && wrangler types --strict-vars false --config dist/pg72_id/wrangler.json",
+    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "db:migrate:local": "wrangler d1 migrations apply PG72_ID_DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply PG72_ID_DB --remote",
+    "db:seed-test-rp:local": "wrangler d1 execute PG72_ID_DB --local --file seed/test-rp-client.sql",
+    "dev": "vite",
+    "test": "vitest run",
+    "typecheck": "tsc --build --pretty false"
+  },
+  "dependencies": {
+    "@better-auth/oauth-provider": "1.6.23",
+    "@better-auth/passkey": "1.6.23",
+    "better-auth": "1.6.23",
+    "hono": "4.12.30",
+    "lucide-react": "1.24.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.44.0",
+    "@cloudflare/vitest-pool-workers": "0.18.4",
+    "@cloudflare/workers-types": "5.20260714.1",
+    "@types/node": "26.1.1",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.3",
+    "typescript": "7.0.2",
+    "vite": "8.1.4",
+    "vitest": "4.1.10",
+    "wrangler": "4.110.0"
+  }
+}

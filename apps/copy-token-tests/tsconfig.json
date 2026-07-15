@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "lib": ["ES2024", "WebWorker"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["../../原專案代碼/copy.pg72.tw/*"]
+    },
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": [
+      "@cloudflare/vitest-pool-workers/types",
+      "@cloudflare/workers-types"
+    ]
+  },
+  "include": [
+    "test",
+    "../../原專案代碼/copy.pg72.tw/cloudflare-env.d.ts",
+    "../../原專案代碼/copy.pg72.tw/lib/sso-token-session.test.ts"
+  ]
+}

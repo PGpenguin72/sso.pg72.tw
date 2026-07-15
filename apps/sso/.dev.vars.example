@@ -1,0 +1,10 @@
+# Copy to .dev.vars for local development. Never commit the real values.
+AUTH_BASE_URL="http://localhost:5173"
+PASSKEY_RP_ID="localhost"
+PASSKEY_ORIGIN="http://localhost:5173"
+REGISTRATION_MODE="invite"
+ENVIRONMENT="development"
+BETTER_AUTH_SECRET="generate-with-openssl-rand-base64-32"
+GOOGLE_CLIENT_ID="replace-with-google-oauth-client-id"
+GOOGLE_CLIENT_SECRET="replace-with-google-oauth-client-secret"
+BOOTSTRAP_ADMIN_EMAIL="you@example.com"

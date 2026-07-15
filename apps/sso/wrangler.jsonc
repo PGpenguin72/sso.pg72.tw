@@ -1,0 +1,70 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pg72-id",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-07-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "routes": [
+    { "pattern": "sso.pg72.tw", "custom_domain": true }
+  ],
+  "assets": {
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
+  },
+  "d1_databases": [
+    {
+      "binding": "PG72_ID_DB",
+      "database_name": "pg72-id-preview",
+      "database_id": "7ae0f65e-37ce-496d-bf82-448125b9316d",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "AUTH_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": { "limit": 30, "period": 60 }
+    },
+    {
+      "name": "ADMIN_RATE_LIMITER",
+      "namespace_id": "1002",
+      "simple": { "limit": 20, "period": 60 }
+    }
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "SECURITY_EVENTS", "queue": "pg72-id-security-events" }
+    ],
+    "consumers": [
+      {
+        "queue": "pg72-id-security-events",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "pg72-id-security-events-dlq"
+      }
+    ]
+  },
+  "vars": {
+    "AUTH_BASE_URL": "https://sso.pg72.tw",
+    "PASSKEY_RP_ID": "sso.pg72.tw",
+    "PASSKEY_ORIGIN": "https://sso.pg72.tw",
+    "REGISTRATION_MODE": "invite",
+    "ENVIRONMENT": "production"
+  },
+  "secrets": {
+    "required": [
+      "BETTER_AUTH_SECRET",
+      "GOOGLE_CLIENT_ID",
+      "GOOGLE_CLIENT_SECRET",
+      "BOOTSTRAP_ADMIN_EMAIL"
+    ]
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": { "enabled": true, "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 0.1 }
+  }
+}

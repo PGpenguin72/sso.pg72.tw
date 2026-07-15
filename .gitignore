@@ -1,0 +1,14 @@
+node_modules/
+.DS_Store
+dist/
+.wrangler/
+.dev.vars*
+!**/.dev.vars.example
+.env
+.env.*
+!.env.example
+coverage/
+worker-configuration.d.ts
+*.tsbuildinfo
+*.log
+原專案代碼/

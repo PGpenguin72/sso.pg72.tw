@@ -42,3 +42,4 @@
 - **2026-07-16 ~02:40** 派出 6 個建置 agent(前端重構/後端/文件/file/upload/webmail),全部背景執行,未 push。
 
 > 註:上述為補記;自 02:45 起的操作將即時逐筆記錄於上表。
+| 2026-07-16 03:28 | 主題採用 | sso.pg72.tw | morden_dark.txt, docs/design-system.md, memory | owner 指定 morden_dark.txt(Linear/Modern 深色)為視覺統一權威主題;更新設計文件並記錄階段30範圍(排除 anzhiyu/fuwari/clone) | 完成 |

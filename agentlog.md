@@ -22,6 +22,8 @@
 | 2026-07-16 02:50 | 建立訊息檔 | sso.pg72.tw | msg.md | 建立給 owner 的非同步收件匣,整理待決/待辦/告知事項 | 完成 |
 | 2026-07-16 02:52 | 規則追加 | sso.pg72.tw | (全域) | Owner 指示:subagent 一律用 claude-fable-5,不為省 token 降級,完成任務優先 | 已採用 |
 | 2026-07-16 02:52 | agent 回報 | 原專案代碼/webmail.pg72.tw | deploy/pgid/oauth.inc.php, README.md | webmail Roundcube OIDC 串接方案完成(commit 478e7be, branch pgid-oidc-deploy-config);Roundcube 用 client_secret_post 與 PGID 相容;mail backend 待 owner 確認 | 完成 |
+| 2026-07-16 02:56 | agent 回報 | 原專案代碼/file.pg72.tw | deploy/pgid/(docker-compose、oauth2-proxy、nginx、filebrowser 設定) | file.pg72.tw oauth2-proxy gateway 串接方案完成(commit 306169ce, branch master);CVE-2026-54089 補償控制落地;client pg72-file 用 client_secret_post | 完成 |
+| 2026-07-16 02:58 | agent 回報 | 原專案代碼/upload.pg72.tw | utils/oidc_client.py, tests/, docs/pgid-cutover-runbook.md | upload admin OIDC 定案(commit 022ef81, branch windows);改用 client_secret_post;client pg72-upload;13 測試全過 | 完成 |
 
 ### 本 session 稍早已完成的重大操作(補記)
 

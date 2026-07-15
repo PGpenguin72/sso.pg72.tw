@@ -49,3 +49,4 @@
 | 2026-07-16 04:05 | 整合修復 | sso.pg72.tw | apps/sso/(telegram.ts, App.tsx, styles.css, test), README, .dev.vars.example | 修 Telegram 前後端落差(改用 Login Widget + /api/auth/telegram/config);更新 README RP 狀態;143 測試過(commit eb42475, 836aa6f) | 完成 |
 | 2026-07-16 04:08 | 派工(審查) | worktree | (唯讀) | 派出 bug-hunt/資安審查 agent 對合併後 SSO 新面(avatar/report/activity/telegram/social/前端)做對抗性檢查,回報後統一修 | 進行中 |
 | 2026-07-16 04:20 | bug 修復 | sso.pg72.tw | apps/sso/(index.ts CSP, App.tsx, telegram.ts, social-config, tests) | 依 bug-hunt 修 M1(Telegram CSP)/M2(檢舉理由)/L1(社群 gating)/L4(Telegram write)/L5(頭貼上限);審查無 Critical/High;144 測試過(commit ce72bd1) | 完成 |
+| 2026-07-16 04:40 | persona 回報 | worktree | (唯讀) | 美術設計師審查 PGID:現況 light 中性系統 vs morden_dark 深色,階段30 屬重塑;優先序=主題token/載Inter/背景系統/按鈕glow/多層陰影;最該救登入頁/consent/workspace 外殼 | 收到 |

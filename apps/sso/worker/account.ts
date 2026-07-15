@@ -31,7 +31,30 @@ interface UserImageRow {
   googleImage: string | null;
 }
 
+interface AccountRow {
+  id: string;
+  providerId: string;
+  createdAt: string;
+}
+
+interface AccountOwnershipRow {
+  id: string;
+  providerId: string;
+}
+
+interface LoginMethodCountRow {
+  accounts: number;
+  passkeys: number;
+}
+
 export type AvatarSource = "google" | "generated";
+
+/**
+ * Providers a signed-in user may explicitly link. Adding a future provider
+ * means registering it here and in the Better Auth `socialProviders` config;
+ * the listing/unlink policy below is provider-agnostic.
+ */
+export const LINKABLE_PROVIDERS: readonly string[] = ["google"];
 
 export function normalizeDisplayName(value: unknown): string | null {
   if (typeof value !== "string" || value.length > DISPLAY_NAME_MAX_INPUT_LENGTH) {
@@ -164,9 +187,27 @@ async function auditAccountEvent(
   }
 }
 
+async function loginMethodCounts(
+  env: Env,
+  userId: string,
+): Promise<LoginMethodCountRow> {
+  const counts = await env.PG72_ID_DB.prepare(
+    `SELECT
+      (SELECT COUNT(*) FROM account WHERE userId = ?) AS accounts,
+      (SELECT COUNT(*) FROM passkey WHERE userId = ?) AS passkeys`,
+  )
+    .bind(userId, userId)
+    .first<LoginMethodCountRow>();
+  return { accounts: counts?.accounts ?? 0, passkeys: counts?.passkeys ?? 0 };
+}
+
 export const accountRoutes = new Hono<AppEnv>();
 
-const PROTECTED_ACCOUNT_PATHS = ["/api/account/profile"];
+const PROTECTED_ACCOUNT_PATHS = [
+  "/api/account/profile",
+  "/api/account/login-methods",
+  "/api/account/login-methods/:accountId",
+];
 
 for (const path of PROTECTED_ACCOUNT_PATHS) {
   accountRoutes.use(
@@ -281,6 +322,79 @@ accountRoutes.post("/api/account/profile", async (c) => {
       ? "generated"
       : "google") satisfies AvatarSource,
   });
+});
+
+accountRoutes.get("/api/account/login-methods", async (c) => {
+  const gate = await requireActiveUser(c, { rateLimited: false });
+  if (!gate.ok) return gate.response;
+
+  const accounts = await c.env.PG72_ID_DB.prepare(
+    `SELECT id, providerId, createdAt
+       FROM account
+      WHERE userId = ?
+      ORDER BY createdAt ASC, id ASC`,
+  )
+    .bind(gate.userId)
+    .all<AccountRow>();
+  const counts = await loginMethodCounts(c.env, gate.userId);
+  const totalMethods = counts.accounts + counts.passkeys;
+  const linkedProviders = new Set(
+    accounts.results.map((account) => account.providerId),
+  );
+
+  return c.json({
+    providers: accounts.results.map((account) => ({
+      id: account.id,
+      provider: account.providerId,
+      createdAt: account.createdAt,
+      canUnlink: totalMethods > 1,
+    })),
+    passkeyCount: counts.passkeys,
+    linkable: LINKABLE_PROVIDERS.filter(
+      (provider) => !linkedProviders.has(provider),
+    ),
+  });
+});
+
+accountRoutes.delete("/api/account/login-methods/:accountId", async (c) => {
+  const gate = await requireActiveUser(c, { rateLimited: true });
+  if (!gate.ok) return gate.response;
+
+  const accountId = c.req.param("accountId");
+  if (!isUuid(accountId)) {
+    return c.json({ error: "invalid_account" }, 400);
+  }
+
+  const account = await c.env.PG72_ID_DB.prepare(
+    "SELECT id, providerId FROM account WHERE id = ? AND userId = ? LIMIT 1",
+  )
+    .bind(accountId, gate.userId)
+    .first<AccountOwnershipRow>();
+  if (!account) {
+    return c.json({ error: "account_not_found" }, 404);
+  }
+
+  // Policy: a user must always keep at least one sign-in method. Passkeys
+  // count as methods, so the last social account may only be unlinked while
+  // at least one passkey remains (and vice versa in the passkey routes).
+  const counts = await loginMethodCounts(c.env, gate.userId);
+  if (counts.accounts + counts.passkeys <= 1) {
+    await auditAccountEvent(c, "account.unlink_blocked", "denied", gate.userId);
+    return c.json({ error: "last_login_method" }, 409);
+  }
+
+  const deletion = await c.env.PG72_ID_DB.prepare(
+    "DELETE FROM account WHERE id = ? AND userId = ?",
+  )
+    .bind(accountId, gate.userId)
+    .run();
+  if (deletion.meta.changes !== 1) {
+    return c.json({ error: "account_not_found" }, 404);
+  }
+
+  await auditAccountEvent(c, "account.unlinked", "success", gate.userId);
+
+  return c.json({ unlinked: true, provider: account.providerId });
 });
 
 accountRoutes.get("/api/avatar/v1/:file", async (c) => {

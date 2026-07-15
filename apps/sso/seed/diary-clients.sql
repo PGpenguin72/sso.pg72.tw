@@ -22,7 +22,7 @@ INSERT INTO oauthClient (
 ) VALUES (
   '00000000-0000-4000-8000-0000000000d1',
   'pg72-diary',
-  '8Yo5mt5HgAuJtWfkJUbpaW1lqKUhdj9sjwP_oGv-u2U',
+  'JBGEBuVX6hIOrc9Ez8mmMAZ8Yz2Jb5KRd1h6uZuhF54',
   0,
   0,
   1,

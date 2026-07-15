@@ -30,6 +30,14 @@
       "name": "ADMIN_RATE_LIMITER",
       "namespace_id": "1002",
       "simple": { "limit": 20, "period": 60 }
+    },
+    {
+      // New-account creation budget. Deliberately stricter than the
+      // sign-in limiter (AUTH_RATE_LIMITER) because public registration
+      // is the most abusable surface.
+      "name": "REGISTRATION_RATE_LIMITER",
+      "namespace_id": "1003",
+      "simple": { "limit": 5, "period": 60 }
     }
   ],
   "queues": {
@@ -50,7 +58,7 @@
     "AUTH_BASE_URL": "https://sso.pg72.tw",
     "PASSKEY_RP_ID": "sso.pg72.tw",
     "PASSKEY_ORIGIN": "https://sso.pg72.tw",
-    "REGISTRATION_MODE": "invite",
+    "REGISTRATION_MODE": "public",
     "ENVIRONMENT": "production"
   },
   "secrets": {

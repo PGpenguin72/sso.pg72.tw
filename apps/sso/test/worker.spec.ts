@@ -49,9 +49,20 @@ function inviteEmail(
 /**
  * Creates the user through Better Auth's internal adapter so the same
  * databaseHooks run as during a real Google sign-up registration.
+ *
+ * Internal-adapter registrations carry no request, so they all share the
+ * "local" registration rate-limit key; the per-IP budget itself is covered
+ * by registration.spec.ts, so it is stubbed out here to keep these
+ * invitation-semantics tests independent of how many of them run.
  */
 async function registerInvitedUser(email: string) {
-  const auth = createAuth(env);
+  const registrationEnv: Env = {
+    ...env,
+    REGISTRATION_RATE_LIMITER: {
+      limit: async () => ({ success: true }),
+    },
+  };
+  const auth = createAuth(registrationEnv);
   const ctx = await auth.$context;
   return ctx.internalAdapter.createUser({
     name: "Invited User",

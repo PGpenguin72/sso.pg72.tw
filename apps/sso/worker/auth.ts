@@ -12,18 +12,11 @@ import {
   normalizeEmail,
   readRuntimeConfig,
 } from "./config";
+import {
+  assertSessionUserActive,
+  authorizeRegistration,
+} from "./registration";
 import { effectivePlatformRole, hasPermission } from "./roles";
-
-interface InvitationRow {
-  id: string;
-  role: "admin" | "developer" | "user";
-}
-
-interface SessionUserRow {
-  email: string;
-  role: string | null;
-  status: "active" | "suspended";
-}
 
 type AuthDatabase = NonNullable<Parameters<typeof betterAuth>[0]["database"]>;
 
@@ -164,53 +157,22 @@ export function createAuth(
     databaseHooks: {
       user: {
         create: {
-          before: async (user) => {
-            const email = normalizeEmail(user.email);
-            const isBootstrapAdmin = email === config.bootstrapAdminEmail;
-
-            if (config.registrationMode === "public") {
-              return {
-                data: {
-                  ...user,
-                  role: isBootstrapAdmin ? "bootadmin" : "user",
-                  status: "active",
-                },
-              };
-            }
-
-            const invitation = await env.PG72_ID_DB.prepare(
-              `SELECT id, role
-                 FROM invitation
-                WHERE email_normalized = ?
-                  AND consumed_at IS NULL
-                  AND revoked_at IS NULL
-                  AND expires_at > ?
-                LIMIT 1`,
-            )
-              .bind(email, new Date().toISOString())
-              .first<InvitationRow>();
-
-            if (!invitation && !isBootstrapAdmin) {
-              await recordAudit(
-                env,
-                { eventType: "registration.denied", outcome: "denied" },
-                executionCtx,
-              );
-              throw new APIError("FORBIDDEN", {
-                code: "INVITATION_REQUIRED",
-                message: "This PGID account requires an invitation.",
-              });
-            }
-
-            return {
-              data: {
-                ...user,
-                role: isBootstrapAdmin
-                  ? "bootadmin"
-                  : (invitation?.role ?? "user"),
-                status: "active",
+          before: async (user, ctx) => {
+            const clientIp =
+              ctx?.request?.headers.get("cf-connecting-ip") ??
+              ctx?.headers?.get("cf-connecting-ip") ??
+              "local";
+            const grant = await authorizeRegistration(
+              env,
+              config,
+              {
+                email: user.email,
+                emailVerified: user.emailVerified === true,
+                clientIp,
               },
-            };
+              executionCtx,
+            );
+            return { data: { ...user, ...grant } };
           },
           after: async (user) => {
             const email = normalizeEmail(user.email);
@@ -244,35 +206,7 @@ export function createAuth(
       session: {
         create: {
           before: async (session) => {
-            const user = await env.PG72_ID_DB.prepare(
-              "SELECT email, role, status FROM user WHERE id = ? LIMIT 1",
-            )
-              .bind(session.userId)
-              .first<SessionUserRow>();
-
-            if (!user || user.status !== "active") {
-              throw new APIError("FORBIDDEN", {
-                code: "ACCOUNT_SUSPENDED",
-                message: "This account is not allowed to create a session.",
-              });
-            }
-
-            // Lazy data conversion for the four-tier role model: the
-            // bootstrap administrator row (identified by the secret
-            // BOOTSTRAP_ADMIN_EMAIL binding, which migrations cannot read)
-            // is promoted to the explicit 'bootadmin' role on sign-in.
-            // Access control never depends on this write: the effective
-            // role is always derived from the configured email.
-            if (
-              normalizeEmail(user.email) === config.bootstrapAdminEmail &&
-              user.role !== "bootadmin"
-            ) {
-              await env.PG72_ID_DB.prepare(
-                "UPDATE user SET role = 'bootadmin', updatedAt = ? WHERE id = ?",
-              )
-                .bind(new Date().toISOString(), session.userId)
-                .run();
-            }
+            await assertSessionUserActive(env, config, session.userId);
             return { data: session };
           },
         },

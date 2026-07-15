@@ -1852,18 +1852,158 @@ function AboutPage() {
   );
 }
 
+/**
+ * Passkey list for the security tab. `useListPasskeys` triggers a
+ * `/passkey/list-user-passkeys` fetch on mount, so it lives in a component that
+ * is only rendered for an authenticated session — otherwise the sign-in and
+ * public pages would fire a guaranteed-401 request on every load.
+ */
+function PasskeyList({
+  busy,
+  editingPasskeyId,
+  passkeyName,
+  onBeginRename,
+  onRenameChange,
+  onRenameSubmit,
+  onRenameCancel,
+  onRequestDelete,
+}: {
+  busy: string | null;
+  editingPasskeyId: string | null;
+  passkeyName: string;
+  onBeginRename: (passkey: Passkey) => void;
+  onRenameChange: (value: string) => void;
+  onRenameSubmit: (passkey: Passkey) => void;
+  onRenameCancel: () => void;
+  onRequestDelete: (passkey: Passkey) => void;
+}) {
+  const passkeysQuery = authClient.useListPasskeys();
+  return (
+    <div
+      className="item-list passkey-list"
+      aria-busy={busy?.startsWith("passkey:") === true}
+    >
+      {(passkeysQuery.data ?? []).map((passkey: Passkey) => {
+        const editing = editingPasskeyId === passkey.id;
+        const updating = busy === `passkey:update:${passkey.id}`;
+        return (
+          <div className="list-item" key={passkey.id}>
+            <span className="item-icon key-icon">
+              <KeyRound aria-hidden="true" />
+            </span>
+            <div className="item-copy">
+              {editing ? (
+                <form
+                  className="passkey-rename-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if (!updating) onRenameSubmit(passkey);
+                  }}
+                >
+                  <input
+                    autoFocus
+                    type="text"
+                    maxLength={64}
+                    value={passkeyName}
+                    aria-label="Passkey 名稱"
+                    disabled={updating}
+                    onChange={(event) => onRenameChange(event.target.value)}
+                  />
+                </form>
+              ) : (
+                <strong>{passkey.name?.trim() || "未命名 Passkey"}</strong>
+              )}
+              <span>{passkeyMetadata(passkey)}</span>
+              <time>
+                {passkey.createdAt
+                  ? `建立於 ${formatDate(passkey.createdAt)}`
+                  : "建立時間不明"}
+              </time>
+            </div>
+            <div className="passkey-actions">
+              {editing ? (
+                <>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label="儲存 Passkey 名稱"
+                    title="儲存"
+                    disabled={updating || !passkeyName.trim()}
+                    onClick={() => onRenameSubmit(passkey)}
+                  >
+                    <Check aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label="取消重新命名"
+                    title="取消"
+                    disabled={updating}
+                    onClick={onRenameCancel}
+                  >
+                    <X aria-hidden="true" />
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label={`重新命名 ${passkey.name?.trim() || "Passkey"}`}
+                    title="重新命名"
+                    disabled={busy?.startsWith("passkey:") === true}
+                    onClick={() => onBeginRename(passkey)}
+                  >
+                    <Pencil aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-button danger-icon"
+                    aria-label={`刪除 ${passkey.name?.trim() || "Passkey"}`}
+                    title="刪除"
+                    disabled={busy?.startsWith("passkey:") === true}
+                    onClick={() => onRequestDelete(passkey)}
+                  >
+                    <Trash2 aria-hidden="true" />
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })}
+      {passkeysQuery.isPending ? (
+        <div className="empty-state">
+          <RefreshCw aria-hidden="true" className="is-spinning" />
+          <span>載入 Passkeys...</span>
+        </div>
+      ) : null}
+      {!passkeysQuery.isPending &&
+      (passkeysQuery.data?.length ?? 0) === 0 ? (
+        <div className="empty-state">
+          <KeyRound aria-hidden="true" />
+          <span>尚未註冊 Passkey</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function App() {
   const sessionQuery = authClient.useSession();
-  const passkeysQuery = authClient.useListPasskeys();
   const [tab, setTab] = useState<Tab>("account");
   const [navOpen, setNavOpen] = useState(false);
   const [sessions, setSessions] = useState<DeviceSession[]>([]);
+  const [sessionsState, setSessionsState] = useState<LoadState>("loading");
   const [activityEvents, setActivityEvents] = useState<SecurityActivityEvent[]>(
     [],
   );
   const [activityState, setActivityState] = useState<LoadState>("loading");
   const [activityCursor, setActivityCursor] = useState<string | null>(null);
   const [activityLoadingMore, setActivityLoadingMore] = useState(false);
+  const [activityMoreError, setActivityMoreError] = useState<string | null>(
+    null,
+  );
   const [reportTarget, setReportTarget] = useState<{
     clientId: string;
     name: string;
@@ -1941,12 +2081,19 @@ export function App() {
   const session = sessionQuery.data;
 
   const loadSessions = useCallback(async () => {
+    setSessionsState("loading");
     const result = await authClient.listSessions();
-    if (result.data) setSessions(result.data);
+    if (result.error) {
+      setSessionsState("error");
+      return;
+    }
+    setSessions(result.data ?? []);
+    setSessionsState("ready");
   }, []);
 
   const loadSecurityActivity = useCallback(async () => {
     setActivityState("loading");
+    setActivityMoreError(null);
     try {
       const response = await fetch("/api/account/security-activity", {
         credentials: "include",
@@ -1971,6 +2118,7 @@ export function App() {
   const loadMoreSecurityActivity = useCallback(async () => {
     if (!activityCursor) return;
     setActivityLoadingMore(true);
+    setActivityMoreError(null);
     try {
       const params = new URLSearchParams({ cursor: activityCursor });
       const response = await fetch(`/api/account/security-activity?${params}`, {
@@ -1988,8 +2136,10 @@ export function App() {
       setActivityEvents((current) => [...current, ...data.events]);
       setActivityCursor(data.nextCursor ?? null);
     } catch {
-      // Keep the events already shown; surface a soft failure via cursor reset.
-      setActivityCursor(null);
+      // Keep the events already shown and the cursor intact so the user can
+      // retry; surfacing an error avoids the false impression of reaching the
+      // end of the timeline.
+      setActivityMoreError("無法載入更多活動，請重試。");
     } finally {
       setActivityLoadingMore(false);
     }
@@ -4419,117 +4569,23 @@ export function App() {
                 </div>
               ) : null}
 
-              <div className="item-list passkey-list" aria-busy={busy?.startsWith("passkey:") === true}>
-                {(passkeysQuery.data ?? []).map((passkey: Passkey) => {
-                  const editing = editingPasskeyId === passkey.id;
-                  const updating = busy === `passkey:update:${passkey.id}`;
-                  return (
-                    <div className="list-item" key={passkey.id}>
-                      <span className="item-icon key-icon">
-                        <KeyRound aria-hidden="true" />
-                      </span>
-                      <div className="item-copy">
-                        {editing ? (
-                          <form
-                            className="passkey-rename-form"
-                            onSubmit={(event) => {
-                              event.preventDefault();
-                              if (!updating) void updatePasskeyName(passkey);
-                            }}
-                          >
-                            <input
-                              autoFocus
-                              type="text"
-                              maxLength={64}
-                              value={passkeyName}
-                              aria-label="Passkey 名稱"
-                              disabled={updating}
-                              onChange={(event) => setPasskeyName(event.target.value)}
-                            />
-                          </form>
-                        ) : (
-                          <strong>{passkey.name?.trim() || "未命名 Passkey"}</strong>
-                        )}
-                        <span>{passkeyMetadata(passkey)}</span>
-                        <time>
-                          {passkey.createdAt
-                            ? `建立於 ${formatDate(passkey.createdAt)}`
-                            : "建立時間不明"}
-                        </time>
-                      </div>
-                      <div className="passkey-actions">
-                        {editing ? (
-                          <>
-                            <button
-                              type="button"
-                              className="icon-button"
-                              aria-label="儲存 Passkey 名稱"
-                              title="儲存"
-                              disabled={updating || !passkeyName.trim()}
-                              onClick={() => void updatePasskeyName(passkey)}
-                            >
-                              <Check aria-hidden="true" />
-                            </button>
-                            <button
-                              type="button"
-                              className="icon-button"
-                              aria-label="取消重新命名"
-                              title="取消"
-                              disabled={updating}
-                              onClick={() => {
-                                setEditingPasskeyId(null);
-                                setPasskeyName("");
-                                setPasskeyError(null);
-                              }}
-                            >
-                              <X aria-hidden="true" />
-                            </button>
-                          </>
-                        ) : (
-                          <>
-                            <button
-                              type="button"
-                              className="icon-button"
-                              aria-label={`重新命名 ${passkey.name?.trim() || "Passkey"}`}
-                              title="重新命名"
-                              disabled={busy?.startsWith("passkey:") === true}
-                              onClick={() => beginPasskeyRename(passkey)}
-                            >
-                              <Pencil aria-hidden="true" />
-                            </button>
-                            <button
-                              type="button"
-                              className="icon-button danger-icon"
-                              aria-label={`刪除 ${passkey.name?.trim() || "Passkey"}`}
-                              title="刪除"
-                              disabled={busy?.startsWith("passkey:") === true}
-                              onClick={() => {
-                                setPasskeyDeleteError(null);
-                                setPasskeyToDelete(passkey);
-                              }}
-                            >
-                              <Trash2 aria-hidden="true" />
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-                {passkeysQuery.isPending ? (
-                  <div className="empty-state">
-                    <RefreshCw aria-hidden="true" className="is-spinning" />
-                    <span>載入 Passkeys...</span>
-                  </div>
-                ) : null}
-                {!passkeysQuery.isPending &&
-                (passkeysQuery.data?.length ?? 0) === 0 ? (
-                  <div className="empty-state">
-                    <KeyRound aria-hidden="true" />
-                    <span>尚未註冊 Passkey</span>
-                  </div>
-                ) : null}
-              </div>
+              <PasskeyList
+                busy={busy}
+                editingPasskeyId={editingPasskeyId}
+                passkeyName={passkeyName}
+                onBeginRename={beginPasskeyRename}
+                onRenameChange={setPasskeyName}
+                onRenameSubmit={(passkey) => void updatePasskeyName(passkey)}
+                onRenameCancel={() => {
+                  setEditingPasskeyId(null);
+                  setPasskeyName("");
+                  setPasskeyError(null);
+                }}
+                onRequestDelete={(passkey) => {
+                  setPasskeyDeleteError(null);
+                  setPasskeyToDelete(passkey);
+                }}
+              />
 
               <div className="section-heading session-heading">
                 <div>
@@ -4546,28 +4602,59 @@ export function App() {
                   <RefreshCw aria-hidden="true" />
                 </button>
               </div>
-              <div className="item-list">
-                {sessions.map((item) => (
-                  <div className="list-item" key={item.id}>
-                    <span className="item-icon">
-                      {deviceIcon(item.userAgent)}
-                    </span>
-                    <div className="item-copy">
-                      <strong>{friendlyDevice(item.userAgent)}</strong>
-                      <span>{formatDate(item.updatedAt)}</span>
-                    </div>
+              <div
+                className="item-list"
+                aria-busy={sessionsState === "loading"}
+              >
+                {sessionsState === "ready"
+                  ? sessions.map((item) => (
+                      <div className="list-item" key={item.id}>
+                        <span className="item-icon">
+                          {deviceIcon(item.userAgent)}
+                        </span>
+                        <div className="item-copy">
+                          <strong>{friendlyDevice(item.userAgent)}</strong>
+                          <span>{formatDate(item.updatedAt)}</span>
+                        </div>
+                        <button
+                          type="button"
+                          className="icon-button danger-icon"
+                          aria-label="撤銷此裝置"
+                          title="撤銷此裝置"
+                          disabled={busy === item.token}
+                          onClick={() => revokeSession(item.token)}
+                        >
+                          <Trash2 aria-hidden="true" />
+                        </button>
+                      </div>
+                    ))
+                  : null}
+                {sessionsState === "loading" ? (
+                  <div className="empty-state">
+                    <RefreshCw aria-hidden="true" className="is-spinning" />
+                    <span>正在載入裝置...</span>
+                  </div>
+                ) : null}
+                {sessionsState === "error" ? (
+                  <div className="empty-state empty-state-error" role="alert">
+                    <ShieldOff aria-hidden="true" />
+                    <span>無法載入登入中的裝置。</span>
                     <button
                       type="button"
-                      className="icon-button danger-icon"
-                      aria-label="撤銷此裝置"
-                      title="撤銷此裝置"
-                      disabled={busy === item.token}
-                      onClick={() => revokeSession(item.token)}
+                      className="button button-secondary button-compact"
+                      onClick={() => void loadSessions()}
                     >
-                      <Trash2 aria-hidden="true" />
+                      <RefreshCw aria-hidden="true" />
+                      重試
                     </button>
                   </div>
-                ))}
+                ) : null}
+                {sessionsState === "ready" && sessions.length === 0 ? (
+                  <div className="empty-state">
+                    <MonitorSmartphone aria-hidden="true" />
+                    <span>目前沒有登入中的裝置</span>
+                  </div>
+                ) : null}
               </div>
               <div className="danger-row">
                 <div>
@@ -4663,6 +4750,15 @@ export function App() {
               </ol>
               {activityState === "ready" && activityCursor ? (
                 <div className="activity-more">
+                  {activityMoreError ? (
+                    <div
+                      className="authorization-inline-error"
+                      role="alert"
+                    >
+                      <ShieldOff aria-hidden="true" />
+                      <span>{activityMoreError}</span>
+                    </div>
+                  ) : null}
                   <button
                     type="button"
                     className="button button-secondary button-compact"
@@ -4673,7 +4769,11 @@ export function App() {
                       aria-hidden="true"
                       className={activityLoadingMore ? "is-spinning" : undefined}
                     />
-                    {activityLoadingMore ? "載入中..." : "載入更多"}
+                    {activityLoadingMore
+                      ? "載入中..."
+                      : activityMoreError
+                        ? "重試"
+                        : "載入更多"}
                   </button>
                 </div>
               ) : null}

@@ -17,6 +17,7 @@ import {
   authorizeRegistration,
 } from "./registration";
 import { effectivePlatformRole, hasPermission } from "./roles";
+import { recordLoginAudit, type AuthHookContext } from "./security-activity";
 
 type AuthDatabase = NonNullable<Parameters<typeof betterAuth>[0]["database"]>;
 
@@ -39,6 +40,12 @@ export function createAuth(
     disabledPaths: ["/token", "/update-user", "/unlink-account"],
     secret: env.BETTER_AUTH_SECRET,
     trustedOrigins: [config.authBaseUrl],
+    // Google is always on. Discord/GitHub/Facebook/Apple are optional: each is
+    // enabled only when its client id and secret are both configured, so a
+    // missing social secret never breaks the core Google/Passkey login or
+    // fails Worker startup. Telegram is not an OAuth provider and is handled
+    // separately in worker/telegram.ts. Implicit account linking stays off, so
+    // a matching email cannot silently merge accounts.
     socialProviders: {
       google: {
         clientId: env.GOOGLE_CLIENT_ID,
@@ -46,6 +53,44 @@ export function createAuth(
         disableIdTokenSignIn: true,
         prompt: "select_account",
       },
+      ...(env.DISCORD_CLIENT_ID && env.DISCORD_CLIENT_SECRET
+        ? {
+            discord: {
+              clientId: env.DISCORD_CLIENT_ID,
+              clientSecret: env.DISCORD_CLIENT_SECRET,
+            },
+          }
+        : {}),
+      ...(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET
+        ? {
+            github: {
+              clientId: env.GITHUB_CLIENT_ID,
+              clientSecret: env.GITHUB_CLIENT_SECRET,
+            },
+          }
+        : {}),
+      ...(env.FACEBOOK_CLIENT_ID && env.FACEBOOK_CLIENT_SECRET
+        ? {
+            facebook: {
+              clientId: env.FACEBOOK_CLIENT_ID,
+              clientSecret: env.FACEBOOK_CLIENT_SECRET,
+            },
+          }
+        : {}),
+      ...(env.APPLE_CLIENT_ID && env.APPLE_CLIENT_SECRET
+        ? {
+            apple: {
+              // Apple's client secret is a short-lived ES256 JWT the operator
+              // generates from their Apple private key; PGID reads the current
+              // value from the APPLE_CLIENT_SECRET secret and does not mint it.
+              clientId: env.APPLE_CLIENT_ID,
+              clientSecret: env.APPLE_CLIENT_SECRET,
+              ...(env.APPLE_APP_BUNDLE_IDENTIFIER
+                ? { appBundleIdentifier: env.APPLE_APP_BUNDLE_IDENTIFIER }
+                : {}),
+            },
+          }
+        : {}),
     },
     user: {
       additionalFields: {
@@ -238,6 +283,17 @@ export function createAuth(
           before: async (session) => {
             await assertSessionUserActive(env, config, session.userId);
             return { data: session };
+          },
+          // Fires for every successful sign-in (Google/social callback or
+          // passkey). Records the login with a redacted source summary; the
+          // provider is derived from the request path in the hook context.
+          after: async (session, context) => {
+            await recordLoginAudit(
+              env,
+              session.userId,
+              context as AuthHookContext | undefined,
+              executionCtx,
+            );
           },
         },
       },

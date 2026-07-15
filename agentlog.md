@@ -45,3 +45,4 @@
 | 2026-07-16 03:28 | 主題採用 | sso.pg72.tw | morden_dark.txt, docs/design-system.md, memory | owner 指定 morden_dark.txt(Linear/Modern 深色)為視覺統一權威主題;更新設計文件並記錄階段30範圍(排除 anzhiyu/fuwari/clone) | 完成 |
 | 2026-07-16 03:35 | agent 回報 | worktree 前端 | apps/sso/src/App.tsx, styles.css | SSO 前端重構完成(commit a981bd5, branch worktree-agent-ab88...):sidebar 分層/排版bug修復/頭貼上傳/開發者頁/檢舉/consent重設計/安全活動/tos-pp-about/社群登入按鈕;111測試過;待合併 | 完成 |
 | 2026-07-16 03:42 | agent 回報 | 原專案代碼/webmail.pg72.tw | deploy/pgid/mail/ | Mail OAuth Path A 設定完成(commit 71984ba):Dovecot introspection+Postfix SASL+Roundcube XOAUTH2;introspection 用 client_secret_post 相容;PGID 側需 introspect 回 email+active;套用限維護窗口 | 完成 |
+| 2026-07-16 03:55 | 合併+驗證 | sso.pg72.tw | apps/sso/(src+worker+migrations)、docs、wiki | 合併前端/文件/後端三分支回 main(3 個 merge commit,領域互斥無衝突);pnpm check 全綠:142 測試/typecheck/build | 完成 |

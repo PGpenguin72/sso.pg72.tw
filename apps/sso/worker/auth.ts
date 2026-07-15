@@ -11,13 +11,16 @@ import {
   normalizeEmail,
   readRuntimeConfig,
 } from "./config";
+import { effectivePlatformRole, hasPermission } from "./roles";
 
 interface InvitationRow {
   id: string;
-  role: "admin" | "user";
+  role: "admin" | "developer" | "user";
 }
 
-interface StatusRow {
+interface SessionUserRow {
+  email: string;
+  role: string | null;
   status: "active" | "suspended";
 }
 
@@ -49,7 +52,7 @@ export function createAuth(
     user: {
       additionalFields: {
         role: {
-          type: ["user", "admin"],
+          type: ["user", "developer", "admin", "bootadmin"],
           required: false,
           defaultValue: "user",
           input: false,
@@ -163,7 +166,7 @@ export function createAuth(
               return {
                 data: {
                   ...user,
-                  role: isBootstrapAdmin ? "admin" : "user",
+                  role: isBootstrapAdmin ? "bootadmin" : "user",
                   status: "active",
                 },
               };
@@ -196,14 +199,16 @@ export function createAuth(
             return {
               data: {
                 ...user,
-                role: isBootstrapAdmin ? "admin" : (invitation?.role ?? "user"),
+                role: isBootstrapAdmin
+                  ? "bootadmin"
+                  : (invitation?.role ?? "user"),
                 status: "active",
               },
             };
           },
           after: async (user) => {
             const email = normalizeEmail(user.email);
-            await env.PG72_ID_DB.prepare(
+            const consumed = await env.PG72_ID_DB.prepare(
               `UPDATE invitation
                   SET consumed_at = ?, consumed_by_user_id = ?
                 WHERE email_normalized = ?
@@ -212,12 +217,18 @@ export function createAuth(
             )
               .bind(new Date().toISOString(), user.id, email)
               .run();
+            const role = typeof user.role === "string" ? user.role : "user";
             await recordAudit(
               env,
               {
                 eventType: "user.created",
                 outcome: "success",
                 subjectId: user.id,
+                metadata: {
+                  role,
+                  roleSource:
+                    consumed.meta.changes > 0 ? "invitation" : "default",
+                },
               },
               executionCtx,
             );
@@ -228,16 +239,33 @@ export function createAuth(
         create: {
           before: async (session) => {
             const user = await env.PG72_ID_DB.prepare(
-              "SELECT status FROM user WHERE id = ? LIMIT 1",
+              "SELECT email, role, status FROM user WHERE id = ? LIMIT 1",
             )
               .bind(session.userId)
-              .first<StatusRow>();
+              .first<SessionUserRow>();
 
             if (!user || user.status !== "active") {
               throw new APIError("FORBIDDEN", {
                 code: "ACCOUNT_SUSPENDED",
                 message: "This account is not allowed to create a session.",
               });
+            }
+
+            // Lazy data conversion for the four-tier role model: the
+            // bootstrap administrator row (identified by the secret
+            // BOOTSTRAP_ADMIN_EMAIL binding, which migrations cannot read)
+            // is promoted to the explicit 'bootadmin' role on sign-in.
+            // Access control never depends on this write: the effective
+            // role is always derived from the configured email.
+            if (
+              normalizeEmail(user.email) === config.bootstrapAdminEmail &&
+              user.role !== "bootadmin"
+            ) {
+              await env.PG72_ID_DB.prepare(
+                "UPDATE user SET role = 'bootadmin', updatedAt = ? WHERE id = ?",
+              )
+                .bind(new Date().toISOString(), session.userId)
+                .run();
             }
             return { data: session };
           },
@@ -279,17 +307,30 @@ export function createAuth(
         idTokenExpiresIn: 60 * 10,
         refreshTokenExpiresIn: 60 * 60 * 24 * 30,
         codeExpiresIn: 60,
-        clientPrivileges: ({ user }) => user?.role === "admin",
+        clientPrivileges: ({ user }) =>
+          user !== undefined &&
+          hasPermission(
+            effectivePlatformRole(user.role, user.email, config),
+            "clients.manage",
+          ),
         prefix: {
           opaqueAccessToken: "pg72_at_",
           refreshToken: "pg72_rt_",
           clientSecret: CLIENT_SECRET_PREFIX,
         },
         customIdTokenClaims: ({ user }) => ({
-          "https://pg72.tw/role": user.role,
+          "https://pg72.tw/role": effectivePlatformRole(
+            user.role,
+            user.email,
+            config,
+          ),
         }),
         customUserInfoClaims: ({ user }) => ({
-          "https://pg72.tw/role": user.role,
+          "https://pg72.tw/role": effectivePlatformRole(
+            user.role,
+            user.email,
+            config,
+          ),
         }),
         advertisedMetadata: {
           claims_supported: ["https://pg72.tw/role"],

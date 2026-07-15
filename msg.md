@@ -25,6 +25,24 @@ Claude 把「需要你決策 / 需要你動手 / 想讓你知道」的事寫在�
 → **你的決定**:(A) 安排維護窗口讓我套用,還是 (B) 先過渡?我兩種的設定檔和 runbook 都會先備好。
 > 補充:Path A 設定已全部備妥(`原專案代碼/webmail.pg72.tw/deploy/pgid/mail/`)。有一個 **PGID 側前置**——`/oauth2/introspect` 需對 access token 回 `active:true` 且回 `email`(RFC 7662 只保證 username)。我會排進 SSO 後端待辦,套用 mail 前先確認這個。套用步驟全部限維護窗口、你在場才做(不會半夜動你信箱)。
 
+### D-重塑. PGID 已套用 morden_dark(先看再決定要不要套到其他專案)
+PGID 前端已依你的 `morden_dark.txt` 完成視覺重塑並合併(本地,未部署):近黑底 `#050506` + 靛藍 `#5E6AD2` + 分層環境光背景 + 按鈕 glow + 多層陰影 + 自託管 Inter + mono 大寫小標 + expo-out 微互動;a11y 全保留、CSP 不變、144 測試過、已用 headless Chrome 截圖確認。
+→ **你的決定**:先看看 PGID 新樣子(部署到 preview/production 後,或我可另存截圖給你)。**滿意的話我再把同一套套到你其他自有專案**(copy/link/upload);**status 是 XUGOU 的 fork(別人的 repo),依你「不碰 clone」的規則我不會動它**;anzhiyu/fuwari 也不碰。要我列一份「哪些專案要統一、哪些排除」的清單給你確認嗎?**我已盤點 `~` 下的 repo,初步分類如下(需你確認,我不會擅自套用)**:
+
+**建議統一(你的自有原創前端)**
+- `ahsnccu-ann`(ann.ahsnccu.pg72.tw)— 你的,也是這次設計參考來源
+- `NightStudy` — 你的
+- `sm` — 你的(用途我不確定,請確認是否有前端要統一)
+- `原專案代碼/copy.pg72.tw`、`原專案代碼/link.pg72.tw`、`原專案代碼/upload.pg72.tw` — 已上/準備上 PGID 的第一方 RP
+
+**建議排除**
+- `原專案代碼/status.pg72.tw` 與 `PG-xugou` — XUGOU 的 fork(別人的 repo),依你規則不碰
+- `anzhiyu copy 3`、`fuwari`、`fuwari zhudong`(pg72.tw)— 部落格主題,不碰
+- `ZeroJudge`、`arcticpenguin`、`geticon`、`mp4fixer`、`untrunc`、`camp2026-*`、`t5-m5-*`、`team5-prep-course` — 從別人倉庫 clone,不碰
+- `diary.pg72.tw` — 你另一個 Claude 分頁在開發,我不介入(要統一的話請那邊做或你指示)
+
+→ **你的決定**:上面「建議統一」的清單對嗎?要加/減哪些?確認後我依 morden_dark 逐一套用(每個各自本地 commit、不 push)。
+
 ### D-新. 設計語言(階段 30)確認
 我從 `~/ahsnccu-ann` 抽出風格:**深藍黑底 (#0a0f1c/#0d1424) + 翡翠綠終端色 (#10b981/#22d3ae) + slate 灰文字 + 等寬字點綴**——簡約駭客風。我會用這套統一所有 PGID/專案介面。
 → **你的決定**:這方向 OK 嗎?(你睡前說「自己設計」,所以我會直接以此推進;若醒來想調色再說,我會保留可換色的變數。)

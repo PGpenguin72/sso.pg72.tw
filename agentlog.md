@@ -30,6 +30,7 @@
 | 2026-07-16 03:06 | agent 回報 | worktree docs | docs/、wiki/、README.md、AGENTS.md | API 手冊/GitBook wiki/介紹/README/AGENTS 完成(4 commit, branch worktree-agent-a99e...);待合併,README 的 Copy/Link 狀態需更正為已上線 | 完成 |
 | 2026-07-16 03:07 | 派工 | 原專案代碼/webmail.pg72.tw | (待產出) | 派出 mail OAuth 解法 agent:Dovecot oauth2 introspection + Postfix SASL + Roundcube XOAUTH2 設定與 apply runbook(僅檔案,不動 VPS) | 進行中 |
 | 2026-07-16 03:12 | 撰寫規格 | sso.pg72.tw | docs/design-system.md | 定義 PGID 設計語言(深色優先駭客風、雙模式 CSS 變數、元件規格),供階段 30 統一各專案 | 完成 |
+| 2026-07-16 03:18 | 撰寫內容 | sso.pg72.tw | docs/legal/tos.md, privacy.md | 起草服務條款與隱私權政策(繁中,contact@pg72.tw,待複核),供 /tos /pp;已通知前端 agent 嵌入 | 完成(commit 99811a3) |
 
 ### 本 session 稍早已完成的重大操作(補記)
 

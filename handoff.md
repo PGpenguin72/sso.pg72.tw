@@ -278,7 +278,11 @@ been cut over.
   cache policy, body limits, and exact-Origin checks;
 - `/health` and `/ready`;
 - account audit and authorized-application APIs;
-- invitation and user status admin APIs;
+- the consent-screen client info API (`/api/consent/client`), which serves the
+  registered name, developer identity, trust links, and redirect hosts from D1
+  only;
+- invitation, user status, and OAuth client admin APIs (create, trust-metadata
+  edit, secret rotation, disable/enable, delete);
 - controlled Passkey update/delete routes;
 - Better Auth routing for sessions, Google, Passkey, OAuth/OIDC, discovery,
   JWKS, token, introspection, revoke, consent, and logout;
@@ -391,7 +395,12 @@ The React account center currently includes:
 
 - system/light/dark theme with local user preference override;
 - Google and Passkey sign-in;
-- OAuth consent screen with application metadata and scope explanation;
+- OAuth consent screen with the registered application name and developer
+  identity, the registered redirect hosts the user will be sent to, the
+  requested scopes with per-scope explanations (offline access is flagged
+  explicitly), fixed terms-of-service/privacy-policy slots, the signed-in
+  account, and cancel/allow actions (cancel returns `access_denied` to the
+  relying party);
 - account ID, role/status, email and profile display;
 - authorized application list and consent/token revocation;
 - Passkey list, registration, rename, deletion and metadata;
@@ -407,7 +416,6 @@ Known account-center gaps:
 
 - no recovery-code implementation yet;
 - no complete admin user search/list UI;
-- no OAuth client creation/rotation UI;
 - no signing-key status/rotation UI;
 - no Queue/DLQ dashboard;
 - no central/global logout delivery status;
@@ -461,6 +469,15 @@ Updates pre-existing `pg72-copy-preview` or `pg72-copy` clients to the exact
 confidential-client/refresh-token contract only when a secret and expected exact
 redirect URI already exist. It does not create a client. Because the current
 database has zero clients, applying this migration alone cannot enable Copy.
+
+### `0006_client_trust_metadata.sql`
+
+Backfills `metadata.developer_name` ("PG72 官方") for the known first-party
+clients created before the consent screen required a developer identity, using
+`json_set` so unrelated metadata keys (for example the diary client's
+`backchannel_logout_uri`) are preserved. New clients must provide
+`developerName` through the admin API; terms-of-service and privacy-policy
+links use the existing `tos`/`policy` columns, so no schema change is needed.
 
 ## 9. Security Controls
 

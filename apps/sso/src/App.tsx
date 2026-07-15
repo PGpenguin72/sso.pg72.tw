@@ -325,7 +325,7 @@ function applyTheme(theme: Theme) {
   document.documentElement.dataset.theme = theme;
   document
     .querySelector('meta[name="theme-color"]')
-    ?.setAttribute("content", theme === "dark" ? "#151719" : "#f7f8fa");
+    ?.setAttribute("content", theme === "dark" ? "#050506" : "#f6f7f9");
 }
 
 function messageFrom(error: unknown, fallback: string): string {

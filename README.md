@@ -52,13 +52,14 @@ PG72 services integrate as standard OIDC relying parties. Integration status (se
 
 | Service | Integration | Status |
 | --- | --- | --- |
-| Copy (`copy.pg72.tw`) | Native OIDC confidential client + PKCE, guest-code path kept separate | Code integrated and Preview-validated; production cutover pending (no production OAuth client yet). |
-| Link (`link.pg72.tw`) | `oauth4webapi` BFF, stable `sub` session | Local integration complete; isolated Preview and central `sid`/back-channel logout pending. |
+| Copy (`copy.pg72.tw`) | Native OIDC confidential client + PKCE, guest-code path kept separate | **Production live** (cutover 2026-07-16; `pg72-copy` client). Guest six-digit code retained. |
+| Link (`link.pg72.tw`) | `oauth4webapi` BFF, stable `sub` session | **Production live** (cutover 2026-07-16; `pg72-link` client, `client_secret_post`). Central `sid`/back-channel logout still pending. |
 | Status (`status.pg72.tw`) | OIDC BFF + D1 opaque session | Local integration complete; Preview and back-channel logout pending. |
-| Upload admin (`upload.pg72.tw/admin`) | Authlib OIDC + SQLite session | Local integration complete; VPS Preview pending. |
-| File Browser / Roundcube | Gateway proxy auth / native Generic OIDC | Upstream reference; package from pinned stable release. |
+| Upload admin (`upload.pg72.tw/admin`) | Authlib OIDC + SQLite session (`client_secret_post`) | Local integration complete; VPS Preview/cutover runbook prepared. |
+| File Browser (`file.pg72.tw`) | oauth2-proxy gateway + proxy auth header | Deploy config prepared (`deploy/pgid/`); not yet deployed. |
+| Roundcube (`webmail.pg72.tw`) | Native Generic OIDC + Dovecot XOAUTH2 for mail | Deploy config prepared; mail-server apply pending owner maintenance window. |
 
-No relying party has switched production traffic to PGID yet; the central identity database currently has zero production OAuth clients. Do not describe any RP as production-live until its cutover in `handoff.md` passes.
+Copy and Link have switched production traffic to PGID. Relying parties must use `client_secret_post` for the token endpoint (the provider's HTTP Basic parsing is not RFC-6749-percent-decode compatible). See `handoff.md` for cutover records.
 
 ## Requirements
 

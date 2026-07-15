@@ -32,3 +32,4 @@ APPLE_CLIENT_SECRET="placeholder-apple-client-secret-jwt"
 APPLE_APP_BUNDLE_IDENTIFIER="tw.pg72.placeholder"
 # Telegram bot token from @BotFather (format 123456:ABC...). Placeholder only.
 TELEGRAM_BOT_TOKEN="123456:placeholder-telegram-bot-token"
+TELEGRAM_BOT_USERNAME="placeholder_bot_username"

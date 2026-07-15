@@ -9,6 +9,7 @@
     "check": "pnpm typecheck && pnpm test && pnpm build",
     "db:migrate:local": "wrangler d1 migrations apply PG72_ID_DB --local",
     "db:migrate:remote": "wrangler d1 migrations apply PG72_ID_DB --remote",
+    "db:seed-diary:local": "wrangler d1 execute PG72_ID_DB --local --file seed/diary-clients.sql",
     "db:seed-test-rp:local": "wrangler d1 execute PG72_ID_DB --local --file seed/test-rp-client.sql",
     "dev": "vite",
     "test": "vitest run",

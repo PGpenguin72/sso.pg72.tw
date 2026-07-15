@@ -423,6 +423,24 @@ D1 marks central session inactive
 - Queue delivery、retry 與 Dead Letter Queue 狀態。
 - 註冊模式與 abuse controls。
 
+### 12.3 平台角色階層
+
+平台角色固定四級，權限對照表集中在 `worker/roles.ts`，路由只檢查 permission、不比對角色字串：
+
+| 角色 | 說明 |
+| --- | --- |
+| `bootadmin` | 綁定 `BOOTSTRAP_ADMIN_EMAIL` 的 bootstrap administrator。不可被刪除、降級或停權（app 層與 D1 trigger 雙重保護），且是唯一可指派/收回 `admin` 的角色。effective role 一律以設定的 email 推導；stored role 只是持久化快照。 |
+| `admin` | 管理使用者（邀請、停權、撤銷 sessions、刪除、指派 `developer`/`user`）與全部 OAuth clients。不可動 `bootadmin`、其他 `admin` 的角色與自己。 |
+| `developer` | 建立並管理「自己擁有的」OAuth clients（`oauthClient.ownerUserId`）。無使用者管理權限。 |
+| `user` | 一般使用者，無管理權限。 |
+
+補充規則：
+
+- `bootadmin` 不可被指派；它由設定推導，非授予。
+- 邀請可帶角色（`user`/`developer`/`admin`），可指派範圍與直接角色變更相同。邀請既有帳號時立即套用角色（不留待日後生效的 pending grant），audit 記錄來源為 invitation。
+- OAuth client 擁有者被刪除時，client 保留但立即停用、tokens 撤銷、轉為無主（admin 管理）；`ownerUserId` 為 NULL 的既有 client 一律視為 admin 管理。
+- 所有管理操作寫入 audit（actor、target、redacted metadata，不含 PII 全文）。
+
 ## 13. 資料模型
 
 ### 13.1 Auth engine tables

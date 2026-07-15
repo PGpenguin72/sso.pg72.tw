@@ -11,6 +11,7 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Search,
   ShieldCheck,
   ShieldOff,
   Smartphone,
@@ -75,8 +76,62 @@ interface AdminOAuthClient {
   tokenEndpointAuthMethod: string | null;
   hasSecret: boolean;
   trusted: boolean;
+  ownerUserId: string | null;
   createdAt: string | null;
   updatedAt: string | null;
+}
+
+type PlatformRole = "bootadmin" | "admin" | "developer" | "user";
+
+interface AdminUserView {
+  id: string;
+  name: string;
+  email: string;
+  role: PlatformRole;
+  status: "active" | "suspended";
+  createdAt: string;
+  lastSessionAt: string | null;
+  passkeyCount: number;
+  authorizedAppCount: number;
+}
+
+interface AdminUsersResponse {
+  page: number;
+  perPage: number;
+  total: number;
+  viewerRole: PlatformRole;
+  users: AdminUserView[];
+}
+
+const ROLE_LABELS: Record<PlatformRole, string> = {
+  bootadmin: "Bootadmin",
+  admin: "Admin",
+  developer: "Developer",
+  user: "User",
+};
+
+/** Mirrors the worker-side ASSIGNABLE_ROLES matrix for UI affordances. */
+const UI_ASSIGNABLE_ROLES: Record<PlatformRole, readonly PlatformRole[]> = {
+  bootadmin: ["admin", "developer", "user"],
+  admin: ["developer", "user"],
+  developer: [],
+  user: [],
+};
+
+const ADMIN_USER_ERROR_MESSAGES: Record<string, string> = {
+  bootadmin_protected: "Bootstrap administrator 受系統保護，無法變更。",
+  cannot_modify_self: "不能對自己的帳號執行這個操作。",
+  cannot_suspend_self: "不能停權自己的帳號。",
+  invalid_role: "角色無效。",
+  rate_limited: "操作太頻繁，請稍後再試。",
+  role_not_assignable: "你的角色無法執行這個角色變更。",
+  user_not_found: "找不到這個使用者，請重新整理列表。",
+};
+
+function adminUserErrorMessage(code: unknown, fallback: string): string {
+  return typeof code === "string"
+    ? (ADMIN_USER_ERROR_MESSAGES[code] ?? fallback)
+    : fallback;
 }
 
 interface AdminClientsResponse {
@@ -763,7 +818,18 @@ export function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState<"admin" | "user">("user");
+  const [inviteRole, setInviteRole] = useState<PlatformRole>("user");
+  const [adminUsers, setAdminUsers] = useState<AdminUserView[]>([]);
+  const [adminUsersState, setAdminUsersState] = useState<LoadState>("loading");
+  const [adminUsersError, setAdminUsersError] = useState<string | null>(null);
+  const [adminUsersPage, setAdminUsersPage] = useState(1);
+  const [adminUsersTotal, setAdminUsersTotal] = useState(0);
+  const [adminUsersQuery, setAdminUsersQuery] = useState("");
+  const [userSearchDraft, setUserSearchDraft] = useState("");
+  const [viewerRole, setViewerRole] = useState<PlatformRole | null>(null);
+  const [userPendingDelete, setUserPendingDelete] = useState<string | null>(
+    null,
+  );
   const [adminClients, setAdminClients] = useState<AdminOAuthClient[]>([]);
   const [adminClientsState, setAdminClientsState] =
     useState<LoadState>("loading");
@@ -854,16 +920,67 @@ export function App() {
     }
   }, []);
 
+  const loadAdminUsers = useCallback(
+    async (page: number, query: string) => {
+      setAdminUsersState("loading");
+      setUserPendingDelete(null);
+      try {
+        const params = new URLSearchParams({
+          page: String(page),
+          perPage: "10",
+        });
+        if (query) params.set("q", query);
+        const response = await fetch(`/api/admin/users?${params}`, {
+          credentials: "include",
+          cache: "no-store",
+          headers: { Accept: "application/json" },
+        });
+        if (!response.ok) {
+          throw new Error(`Unable to load users (${response.status})`);
+        }
+        const data = (await response.json()) as AdminUsersResponse;
+        if (!Array.isArray(data.users)) {
+          throw new Error("Invalid users response");
+        }
+        setAdminUsers(data.users);
+        setAdminUsersPage(data.page);
+        setAdminUsersTotal(data.total);
+        setViewerRole(data.viewerRole);
+        setAdminUsersState("ready");
+      } catch {
+        setAdminUsersState("error");
+      }
+    },
+    [],
+  );
+
+  const sessionRole = (session?.user.role ?? "user") as PlatformRole;
+  const canManageUsers =
+    sessionRole === "admin" || sessionRole === "bootadmin";
+  const canManageClients = canManageUsers || sessionRole === "developer";
+
   useEffect(() => {
     if (session) {
       void loadSessions();
       void loadAudit();
       void loadAuthorizations();
-      if (session.user.role === "admin") {
+      if (canManageClients) {
         void loadAdminClients();
       }
+      if (canManageUsers) {
+        void loadAdminUsers(1, "");
+      }
     }
-  }, [loadAdminClients, loadAudit, loadAuthorizations, loadSessions, session]);
+  }, [
+    canManageClients,
+    canManageUsers,
+    loadAdminClients,
+    loadAdminUsers,
+    loadAudit,
+    loadAuthorizations,
+    loadSessions,
+    session,
+  ]);
 
   const isConsent = window.location.pathname === "/consent";
   const clientId = new URLSearchParams(window.location.search).get("client_id");
@@ -1048,19 +1165,163 @@ export function App() {
   const createInvitation = async () => {
     setBusy("invite");
     setNotice(null);
-    const response = await fetch("/api/admin/invitations", {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: inviteEmail, role: inviteRole }),
-    });
-    if (response.ok) {
+    try {
+      const response = await fetch("/api/admin/invitations", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: inviteEmail, role: inviteRole }),
+      });
+      const payload = (await response.json()) as {
+        applied?: boolean;
+        role?: string;
+        error?: string;
+      };
+      if (!response.ok) {
+        setNotice(
+          adminUserErrorMessage(payload.error, "無法建立邀請資格。"),
+        );
+        return;
+      }
       setInviteEmail("");
-      setNotice("邀請資格已建立，有效期限 7 天。 ");
-    } else {
-      setNotice("無法建立邀請資格。 ");
+      if (payload.applied) {
+        setNotice(
+          `這個 Email 已有帳號，已直接套用角色 ${ROLE_LABELS[inviteRole]}。`,
+        );
+        await loadAdminUsers(adminUsersPage, adminUsersQuery);
+      } else {
+        setNotice("邀請資格已建立，有效期限 7 天。");
+      }
+    } catch {
+      setNotice("網路連線失敗，請稍後再試。");
+    } finally {
+      setBusy(null);
     }
-    setBusy(null);
+  };
+
+  const changeUserRole = async (user: AdminUserView, role: PlatformRole) => {
+    setBusy(`user:${user.id}`);
+    setAdminUsersError(null);
+    try {
+      const response = await fetch(
+        `/api/admin/users/${encodeURIComponent(user.id)}/role`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ role }),
+        },
+      );
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string };
+        setAdminUsersError(
+          adminUserErrorMessage(payload.error, "無法變更角色。"),
+        );
+        return;
+      }
+      setNotice(`已將 ${user.email} 的角色變更為 ${ROLE_LABELS[role]}。`);
+      await loadAdminUsers(adminUsersPage, adminUsersQuery);
+    } catch {
+      setAdminUsersError("網路連線失敗，請稍後再試。");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const toggleUserStatus = async (user: AdminUserView) => {
+    const suspend = user.status === "active";
+    setBusy(`user:${user.id}`);
+    setAdminUsersError(null);
+    try {
+      const response = await fetch(
+        `/api/admin/users/${encodeURIComponent(user.id)}/status`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ suspended: suspend }),
+        },
+      );
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string };
+        setAdminUsersError(
+          adminUserErrorMessage(payload.error, "無法更新使用者狀態。"),
+        );
+        return;
+      }
+      setNotice(
+        suspend
+          ? `${user.email} 已停權，sessions 與 tokens 已撤銷。`
+          : `${user.email} 已復權。`,
+      );
+      await loadAdminUsers(adminUsersPage, adminUsersQuery);
+    } catch {
+      setAdminUsersError("網路連線失敗，請稍後再試。");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const revokeUserSessions = async (user: AdminUserView) => {
+    setBusy(`user:${user.id}`);
+    setAdminUsersError(null);
+    try {
+      const response = await fetch(
+        `/api/admin/users/${encodeURIComponent(user.id)}/revoke-sessions`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { Accept: "application/json" },
+        },
+      );
+      const payload = (await response.json()) as {
+        revokedSessions?: number;
+        error?: string;
+      };
+      if (!response.ok) {
+        setAdminUsersError(
+          adminUserErrorMessage(payload.error, "無法撤銷 sessions。"),
+        );
+        return;
+      }
+      setNotice(
+        `已撤銷 ${user.email} 的 ${payload.revokedSessions ?? 0} 個 sessions。`,
+      );
+      await loadAdminUsers(adminUsersPage, adminUsersQuery);
+    } catch {
+      setAdminUsersError("網路連線失敗，請稍後再試。");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const deleteAdminUser = async (user: AdminUserView) => {
+    setBusy(`user:${user.id}`);
+    setAdminUsersError(null);
+    try {
+      const response = await fetch(
+        `/api/admin/users/${encodeURIComponent(user.id)}`,
+        {
+          method: "DELETE",
+          credentials: "include",
+          headers: { Accept: "application/json" },
+        },
+      );
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string };
+        setAdminUsersError(
+          adminUserErrorMessage(payload.error, "無法刪除使用者。"),
+        );
+        return;
+      }
+      setNotice(`使用者 ${user.email} 已刪除。`);
+      await loadAdminUsers(adminUsersPage, adminUsersQuery);
+    } catch {
+      setAdminUsersError("網路連線失敗，請稍後再試。");
+    } finally {
+      setUserPendingDelete(null);
+      setBusy(null);
+    }
   };
 
   const createAdminClient = async () => {
@@ -1320,7 +1581,7 @@ export function App() {
                 </div>
                 <div>
                   <dt>角色</dt>
-                  <dd>{session.user.role ?? "user"}</dd>
+                  <dd>{ROLE_LABELS[sessionRole]}</dd>
                 </div>
               </dl>
 
@@ -1434,11 +1695,14 @@ export function App() {
                 ) : null}
               </div>
 
-              {session.user.role === "admin" ? (
+              {canManageUsers ? (
                 <div className="admin-band">
                   <div>
                     <span className="eyebrow">Administration</span>
                     <h3>建立邀請資格</h3>
+                    <p className="section-description">
+                      若這個 Email 已有帳號，會直接套用所選角色。
+                    </p>
                   </div>
                   <div className="invite-form">
                     <label>
@@ -1458,11 +1722,14 @@ export function App() {
                       <select
                         value={inviteRole}
                         onChange={(event) =>
-                          setInviteRole(event.target.value as "admin" | "user")
+                          setInviteRole(event.target.value as PlatformRole)
                         }
                       >
                         <option value="user">User</option>
-                        <option value="admin">Admin</option>
+                        <option value="developer">Developer</option>
+                        {(viewerRole ?? sessionRole) === "bootadmin" ? (
+                          <option value="admin">Admin</option>
+                        ) : null}
                       </select>
                     </label>
                     <button
@@ -1478,13 +1745,262 @@ export function App() {
                 </div>
               ) : null}
 
-              {session.user.role === "admin" ? (
+              {canManageUsers ? (
+                <div className="admin-band">
+                  <div>
+                    <span className="eyebrow">Administration</span>
+                    <h3>使用者管理</h3>
+                    <p className="section-description">
+                      角色變更、停權、session 撤銷與刪除都會寫入稽核紀錄。
+                    </p>
+                  </div>
+
+                  {adminUsersError ? (
+                    <div className="authorization-inline-error" role="alert">
+                      <ShieldOff aria-hidden="true" />
+                      <span>{adminUsersError}</span>
+                    </div>
+                  ) : null}
+
+                  <form
+                    className="invite-form user-search-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      const query = userSearchDraft.trim();
+                      setAdminUsersQuery(query);
+                      void loadAdminUsers(1, query);
+                    }}
+                  >
+                    <label>
+                      <span>搜尋 Email 或名稱</span>
+                      <div className="input-with-icon">
+                        <Search aria-hidden="true" />
+                        <input
+                          type="search"
+                          value={userSearchDraft}
+                          maxLength={254}
+                          onChange={(event) =>
+                            setUserSearchDraft(event.target.value)
+                          }
+                          autoComplete="off"
+                        />
+                      </div>
+                    </label>
+                    <button
+                      type="submit"
+                      className="button button-secondary"
+                      disabled={adminUsersState === "loading"}
+                    >
+                      <Search aria-hidden="true" />
+                      搜尋
+                    </button>
+                  </form>
+
+                  <div
+                    className="item-list"
+                    aria-busy={adminUsersState === "loading"}
+                  >
+                    {adminUsersState === "ready"
+                      ? adminUsers.map((user) => {
+                          const userBusy = busy === `user:${user.id}`;
+                          const isSelf = user.id === session.user.id;
+                          const isBootadmin = user.role === "bootadmin";
+                          const actorRole = viewerRole ?? sessionRole;
+                          const assignable = UI_ASSIGNABLE_ROLES[actorRole];
+                          const roleLocked =
+                            isSelf ||
+                            isBootadmin ||
+                            !assignable.includes(user.role);
+                          const manageLocked = isSelf || isBootadmin;
+                          const roleOptions = assignable.includes(user.role)
+                            ? assignable
+                            : [user.role, ...assignable];
+                          return (
+                            <div
+                              className="list-item"
+                              key={user.id}
+                              aria-busy={userBusy}
+                            >
+                              <span className="item-icon">
+                                <UserRound aria-hidden="true" />
+                              </span>
+                              <div className="item-copy">
+                                <strong>
+                                  {user.name || user.email}
+                                  {isSelf ? "（你）" : ""}
+                                </strong>
+                                <span className="mono">{user.email}</span>
+                                <span>
+                                  {ROLE_LABELS[user.role]}
+                                  {user.status === "suspended"
+                                    ? " · 已停權"
+                                    : " · Active"}
+                                  {` · ${user.passkeyCount} passkeys`}
+                                  {` · ${user.authorizedAppCount} 個授權 app`}
+                                </span>
+                                <span>
+                                  建立於 {formatDate(user.createdAt)}
+                                  {user.lastSessionAt
+                                    ? ` · 最後 session ${formatDate(user.lastSessionAt)}`
+                                    : " · 沒有 session 紀錄"}
+                                </span>
+                              </div>
+                              <div className="passkey-actions">
+                                <select
+                                  className="role-select"
+                                  aria-label={`變更 ${user.email} 的角色`}
+                                  value={user.role}
+                                  disabled={userBusy || roleLocked}
+                                  onChange={(event) => {
+                                    const role = event.target
+                                      .value as PlatformRole;
+                                    if (role !== user.role) {
+                                      void changeUserRole(user, role);
+                                    }
+                                  }}
+                                >
+                                  {roleOptions.map((role) => (
+                                    <option key={role} value={role}>
+                                      {ROLE_LABELS[role]}
+                                    </option>
+                                  ))}
+                                </select>
+                                <button
+                                  type="button"
+                                  className="icon-button"
+                                  aria-label={
+                                    user.status === "active"
+                                      ? `停權 ${user.email}`
+                                      : `復權 ${user.email}`
+                                  }
+                                  title={
+                                    user.status === "active"
+                                      ? "停權並撤銷 sessions/tokens"
+                                      : "復權"
+                                  }
+                                  disabled={userBusy || manageLocked}
+                                  onClick={() => void toggleUserStatus(user)}
+                                >
+                                  {user.status === "active" ? (
+                                    <ShieldOff aria-hidden="true" />
+                                  ) : (
+                                    <ShieldCheck aria-hidden="true" />
+                                  )}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="icon-button"
+                                  aria-label={`撤銷 ${user.email} 的全部 sessions`}
+                                  title="撤銷全部 sessions"
+                                  disabled={userBusy || manageLocked}
+                                  onClick={() => void revokeUserSessions(user)}
+                                >
+                                  <LogOut aria-hidden="true" />
+                                </button>
+                                {userPendingDelete === user.id ? (
+                                  <button
+                                    type="button"
+                                    className="button button-danger button-compact"
+                                    disabled={userBusy || manageLocked}
+                                    onClick={() => void deleteAdminUser(user)}
+                                  >
+                                    確認刪除
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="icon-button danger-icon"
+                                    aria-label={`刪除 ${user.email}`}
+                                    title="刪除使用者"
+                                    disabled={userBusy || manageLocked}
+                                    onClick={() =>
+                                      setUserPendingDelete(user.id)
+                                    }
+                                  >
+                                    <Trash2 aria-hidden="true" />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })
+                      : null}
+                    {adminUsersState === "loading" ? (
+                      <div className="empty-state">
+                        <RefreshCw aria-hidden="true" className="is-spinning" />
+                        <span>正在載入使用者...</span>
+                      </div>
+                    ) : null}
+                    {adminUsersState === "error" ? (
+                      <div className="empty-state empty-state-error" role="alert">
+                        <ShieldOff aria-hidden="true" />
+                        <span>無法載入使用者列表。</span>
+                        <button
+                          type="button"
+                          className="button button-secondary button-compact"
+                          onClick={() =>
+                            void loadAdminUsers(adminUsersPage, adminUsersQuery)
+                          }
+                        >
+                          <RefreshCw aria-hidden="true" />
+                          重試
+                        </button>
+                      </div>
+                    ) : null}
+                    {adminUsersState === "ready" && adminUsers.length === 0 ? (
+                      <div className="empty-state">
+                        <UserRound aria-hidden="true" />
+                        <span>找不到符合的使用者</span>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  {adminUsersState === "ready" && adminUsersTotal > 0 ? (
+                    <div className="pagination-row">
+                      <button
+                        type="button"
+                        className="button button-secondary button-compact"
+                        disabled={adminUsersPage <= 1}
+                        onClick={() =>
+                          void loadAdminUsers(
+                            adminUsersPage - 1,
+                            adminUsersQuery,
+                          )
+                        }
+                      >
+                        上一頁
+                      </button>
+                      <span>
+                        第 {adminUsersPage} 頁 · 共 {adminUsersTotal} 位使用者
+                      </span>
+                      <button
+                        type="button"
+                        className="button button-secondary button-compact"
+                        disabled={adminUsersPage * 10 >= adminUsersTotal}
+                        onClick={() =>
+                          void loadAdminUsers(
+                            adminUsersPage + 1,
+                            adminUsersQuery,
+                          )
+                        }
+                      >
+                        下一頁
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {canManageClients ? (
                 <div className="admin-band">
                   <div>
                     <span className="eyebrow">Administration</span>
                     <h3>OAuth Clients</h3>
                     <p className="section-description">
-                      管理 OIDC 應用程式。Client secret 只會在建立或重設時顯示一次，
+                      {sessionRole === "developer"
+                        ? "管理你擁有的 OIDC 應用程式。"
+                        : "管理 OIDC 應用程式。"}
+                      Client secret 只會在建立或重設時顯示一次，
                       請立即存入應用程式的 secret 管理機制。
                     </p>
                   </div>

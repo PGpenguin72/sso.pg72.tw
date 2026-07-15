@@ -13,7 +13,7 @@ export const authClient = createAuthClient({
     inferAdditionalFields({
       user: {
         role: {
-          type: ["user", "admin"],
+          type: ["user", "developer", "admin", "bootadmin"],
           required: false,
           defaultValue: "user",
           input: false,

@@ -12,6 +12,8 @@ export async function sha256Base64Url(value: string): Promise<string> {
     .replace(/=+$/, "");
 }
 
+export type TestPlatformRole = "admin" | "bootadmin" | "developer" | "user";
+
 export async function createSessionFor(userId: string) {
   const sessionId = crypto.randomUUID();
   const token = crypto.randomUUID();
@@ -46,7 +48,7 @@ export async function createSessionFor(userId: string) {
 
 export async function createAuthenticatedUser(
   email: string,
-  role: "admin" | "user" = "user",
+  role: TestPlatformRole = "user",
 ) {
   const userId = crypto.randomUUID();
   const now = new Date();
@@ -69,4 +71,24 @@ export async function createAuthenticatedUser(
     .run();
 
   return createSessionFor(userId);
+}
+
+/**
+ * Returns a session for the bootstrap administrator (BOOTSTRAP_ADMIN_EMAIL).
+ * The row is created on first use with the pre-migration legacy stored role
+ * 'user', so every test exercising bootadmin powers also proves that the
+ * effective role is derived from the configured email rather than from the
+ * stored role. Storage persists within a test file, so the row is reused.
+ */
+export async function createBootstrapAdmin() {
+  const email = env.BOOTSTRAP_ADMIN_EMAIL.trim().toLowerCase();
+  const existing = await env.PG72_ID_DB.prepare(
+    "SELECT id FROM user WHERE email = ? LIMIT 1",
+  )
+    .bind(email)
+    .first<{ id: string }>();
+  if (existing) {
+    return createSessionFor(existing.id);
+  }
+  return createAuthenticatedUser(email, "user");
 }

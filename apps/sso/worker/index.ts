@@ -2,6 +2,13 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 
 import { adminClientRoutes } from "./admin-clients";
+import { requireAdminPermission } from "./admin-gate";
+import {
+  adminUserRoutes,
+  applyRoleChange,
+  deniedRoleChange,
+  fetchTarget,
+} from "./admin-users";
 import {
   consumeSecurityEvents,
   recordAudit,
@@ -9,16 +16,13 @@ import {
 } from "./audit";
 import { createAuth } from "./auth";
 import { normalizeEmail, readRuntimeConfig } from "./config";
+import { ASSIGNABLE_ROLES, isPlatformRole } from "./roles";
 
 type AppEnv = { Bindings: Env };
 
 interface InvitationInput {
   email: string;
-  role?: "admin" | "user";
-}
-
-interface AccountStatusInput {
-  suspended: boolean;
+  role?: unknown;
 }
 
 interface PasskeyMutationInput {
@@ -322,6 +326,7 @@ app.use("/api/admin/*", async (c, next) => {
 });
 
 app.route("/api/admin/clients", adminClientRoutes);
+app.route("/api/admin/users", adminUserRoutes);
 
 app.use(
   "/oauth2/token",
@@ -669,28 +674,50 @@ app.delete("/api/account/authorizations/:consentId", async (c) => {
 });
 
 app.post("/api/admin/invitations", async (c) => {
-  const auth = createAuth(c.env, c.executionCtx);
-  const session = await auth.api.getSession({ headers: c.req.raw.headers });
-  if (
-    !session ||
-    session.user.status !== "active" ||
-    session.user.role !== "admin"
-  ) {
-    return c.json({ error: "forbidden" }, 403);
-  }
-
-  const rateLimit = await c.env.ADMIN_RATE_LIMITER.limit({
-    key: session.user.id,
-  });
-  if (!rateLimit.success) {
-    return c.json({ error: "rate_limited" }, 429);
-  }
+  const gate = await requireAdminPermission(c, "users.invite");
+  if (!gate.ok) return gate.response;
 
   const input = await readJson<InvitationInput>(c.req.raw);
   const email = input?.email ? normalizeEmail(input.email) : "";
   const role = input?.role ?? "user";
-  if (!validEmail(email) || (role !== "user" && role !== "admin")) {
+  if (!validEmail(email) || !isPlatformRole(role) || role === "bootadmin") {
     return c.json({ error: "invalid_invitation" }, 400);
+  }
+  // Invitation roles obey the same assignment matrix as direct role
+  // changes: only bootadmin can hand out admin.
+  if (!ASSIGNABLE_ROLES[gate.actor.role].includes(role)) {
+    return c.json({ error: "role_not_assignable" }, 403);
+  }
+
+  // Inviting an existing account applies the role immediately as a normal,
+  // fully guarded role change. No pending grant is stored: a dormant
+  // invitation that silently upgrades an account on a later sign-in would
+  // be a privilege escalation ambush.
+  const existingUser = await c.env.PG72_ID_DB.prepare(
+    "SELECT id, email, role, status FROM user WHERE lower(trim(email)) = ? LIMIT 1",
+  )
+    .bind(email)
+    .first<{ id: string; email: string; role: string | null; status: string }>();
+  if (existingUser) {
+    const target = await fetchTarget(c, existingUser.id);
+    if (!target) {
+      return c.json({ error: "user_not_found" }, 404);
+    }
+    const denial = await deniedRoleChange(
+      c,
+      gate.actor,
+      target,
+      role,
+      "invitation",
+    );
+    if (denial === "cannot_modify_self") {
+      return c.json({ error: "cannot_modify_self" }, 409);
+    }
+    if (denial) {
+      return c.json({ error: denial }, 403);
+    }
+    const at = await applyRoleChange(c, gate.actor, target, role, "invitation");
+    return c.json({ applied: true, userId: target.row.id, role, at });
   }
 
   const id = crypto.randomUUID();
@@ -714,7 +741,7 @@ app.post("/api/admin/invitations", async (c) => {
       id,
       email,
       role,
-      session.user.id,
+      gate.actor.userId,
       expiresAt.toISOString(),
       now.toISOString(),
     )
@@ -729,7 +756,9 @@ app.post("/api/admin/invitations", async (c) => {
     {
       eventType: "invitation.created",
       outcome: "success",
+      actorUserId: gate.actor.userId,
       subjectId: id,
+      metadata: { role },
     },
     c.executionCtx,
   );
@@ -738,64 +767,6 @@ app.post("/api/admin/invitations", async (c) => {
     { id, email, role, expiresAt: expiresAt.toISOString() },
     201,
   );
-});
-
-app.post("/api/admin/users/:userId/status", async (c) => {
-  const auth = createAuth(c.env, c.executionCtx);
-  const session = await auth.api.getSession({ headers: c.req.raw.headers });
-  if (
-    !session ||
-    session.user.status !== "active" ||
-    session.user.role !== "admin"
-  ) {
-    return c.json({ error: "forbidden" }, 403);
-  }
-
-  const userId = c.req.param("userId");
-  const input = await readJson<AccountStatusInput>(c.req.raw);
-  if (!validUserId(userId) || typeof input?.suspended !== "boolean") {
-    return c.json({ error: "invalid_request" }, 400);
-  }
-  if (userId === session.user.id && input.suspended) {
-    return c.json({ error: "cannot_suspend_self" }, 409);
-  }
-
-  const now = new Date().toISOString();
-  const statements = [
-    c.env.PG72_ID_DB.prepare("UPDATE user SET status = ?, updatedAt = ? WHERE id = ?")
-      .bind(input.suspended ? "suspended" : "active", now, userId),
-  ];
-
-  if (input.suspended) {
-    statements.push(
-      c.env.PG72_ID_DB.prepare("DELETE FROM session WHERE userId = ?").bind(
-        userId,
-      ),
-      c.env.PG72_ID_DB.prepare(
-        "UPDATE oauthRefreshToken SET revoked = ? WHERE userId = ? AND revoked IS NULL",
-      ).bind(now, userId),
-      c.env.PG72_ID_DB.prepare(
-        "DELETE FROM oauthAccessToken WHERE userId = ?",
-      ).bind(userId),
-    );
-  }
-
-  const results = await c.env.PG72_ID_DB.batch(statements);
-  if (results[0]?.meta.changes !== 1) {
-    return c.json({ error: "user_not_found" }, 404);
-  }
-
-  await recordAudit(
-    c.env,
-    {
-      eventType: input.suspended ? "user.suspended" : "user.reactivated",
-      outcome: "success",
-      subjectId: userId,
-    },
-    c.executionCtx,
-  );
-
-  return c.json({ userId, status: input.suspended ? "suspended" : "active", at: now });
 });
 
 app.all("*", async (c) => {

@@ -43,3 +43,4 @@
 
 > 註:上述為補記;自 02:45 起的操作將即時逐筆記錄於上表。
 | 2026-07-16 03:28 | 主題採用 | sso.pg72.tw | morden_dark.txt, docs/design-system.md, memory | owner 指定 morden_dark.txt(Linear/Modern 深色)為視覺統一權威主題;更新設計文件並記錄階段30範圍(排除 anzhiyu/fuwari/clone) | 完成 |
+| 2026-07-16 03:35 | agent 回報 | worktree 前端 | apps/sso/src/App.tsx, styles.css | SSO 前端重構完成(commit a981bd5, branch worktree-agent-ab88...):sidebar 分層/排版bug修復/頭貼上傳/開發者頁/檢舉/consent重設計/安全活動/tos-pp-about/社群登入按鈕;111測試過;待合併 | 完成 |

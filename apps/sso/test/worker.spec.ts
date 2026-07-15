@@ -5,6 +5,7 @@ import { createAuth } from "../worker/auth";
 import { readRuntimeConfig } from "../worker/config";
 import {
   createAuthenticatedUser,
+  createBootstrapAdmin,
   createSessionFor,
   sha256Base64Url,
 } from "./helpers";
@@ -1081,12 +1082,19 @@ describe("PGID Worker", () => {
     expect(consumed?.consumed_at).not.toBeNull();
     expect(consumed?.consumed_by_user_id).toBe(firstUser.id);
 
-    // While the account exists, its consumed invitation must not be reissued.
+    // While the account exists, no new invitation is issued for its email:
+    // inviting an existing account is handled as an immediate, fully guarded
+    // role change instead, and the consumed invitation row stays untouched.
     const blockedInvite = await inviteEmail(admin.headers, email);
-    expect(blockedInvite.status).toBe(409);
-    expect(await blockedInvite.json()).toEqual({
-      error: "invitation_already_consumed",
+    expect(blockedInvite.status).toBe(200);
+    expect(await blockedInvite.json()).toMatchObject({
+      applied: true,
+      userId: firstUser.id,
+      role: "user",
     });
+    const untouched = await readInvitation(email);
+    expect(untouched?.id).toBe(consumed?.id);
+    expect(untouched?.consumed_by_user_id).toBe(firstUser.id);
 
     const session = await createSessionFor(firstUser.id);
     const deleteResponse = await exports.default.fetch(
@@ -1151,10 +1159,9 @@ describe("PGID Worker", () => {
   });
 
   it("refreshes a pending invitation on duplicate invites", async () => {
-    const admin = await createAuthenticatedUser(
-      `${crypto.randomUUID()}@example.com`,
-      "admin",
-    );
+    // Only bootadmin may hand out the admin role, so the refresh-to-admin
+    // path below needs the bootstrap administrator as the acting admin.
+    const admin = await createBootstrapAdmin();
     const email = `${crypto.randomUUID()}@example.com`;
 
     const firstInvite = await inviteEmail(admin.headers, email, "user");

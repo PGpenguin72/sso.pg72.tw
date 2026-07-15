@@ -2315,6 +2315,20 @@ export function App() {
   const isConsent = pathname === "/consent";
   const clientId = new URLSearchParams(window.location.search).get("client_id");
 
+  // Per-route document title. Public/consent routes are keyed off the path;
+  // the root route depends on whether a session resolved (account center vs.
+  // sign-in). Runs on every render before the route-specific early returns.
+  useEffect(() => {
+    let title: string;
+    if (pathname === "/about") title = "關於 PGID";
+    else if (pathname === "/tos") title = "服務條款 — PGID";
+    else if (pathname === "/pp") title = "隱私權政策 — PGID";
+    else if (pathname === "/consent") title = "授權 — PGID";
+    else if (session) title = "PGID 帳號中心";
+    else title = "PGID — PG72 單一登入";
+    document.title = title;
+  }, [pathname, session]);
+
   // Public informational pages render without a session so they are linkable
   // from consent, sign-in and third-party sites.
   if (pathname === "/tos") return <LegalPage kind="tos" />;

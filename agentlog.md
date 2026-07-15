@@ -18,6 +18,10 @@
 | 時間 (CST) | 類型 | 工作目錄 | 檔案 | 簡述 | 結果 |
 |---|---|---|---|---|---|
 | 2026-07-16 02:45 | 建立紀錄器 | sso.pg72.tw | agentlog.md | 依 owner 授權建立操作紀錄器並記錄運作規則 | 完成 |
+| 2026-07-16 02:48 | 規則釐清 | sso.pg72.tw | agentlog.md | Owner 確認:本專案自身的 production 部署算例行、不投票;僅「高風險」操作(跨專案/難回復/損害性)需 3-agent 投票 gate | 已定案 |
+| 2026-07-16 02:50 | 建立訊息檔 | sso.pg72.tw | msg.md | 建立給 owner 的非同步收件匣,整理待決/待辦/告知事項 | 完成 |
+| 2026-07-16 02:52 | 規則追加 | sso.pg72.tw | (全域) | Owner 指示:subagent 一律用 claude-fable-5,不為省 token 降級,完成任務優先 | 已採用 |
+| 2026-07-16 02:52 | agent 回報 | 原專案代碼/webmail.pg72.tw | deploy/pgid/oauth.inc.php, README.md | webmail Roundcube OIDC 串接方案完成(commit 478e7be, branch pgid-oidc-deploy-config);Roundcube 用 client_secret_post 與 PGID 相容;mail backend 待 owner 確認 | 完成 |
 
 ### 本 session 稍早已完成的重大操作(補記)
 

@@ -232,6 +232,20 @@ function telegramCookieResponse(
 
 export const telegramRoutes = new Hono<AppEnv>();
 
+// Public, unauthenticated config for the sign-in page's Telegram Login Widget.
+// The widget needs the bot username to render; the flow is enabled only when a
+// bot token is configured. No secret is exposed (the username is public, and
+// appears in the widget itself).
+telegramRoutes.get("/api/auth/telegram/config", (c) => {
+  const enabled = Boolean(c.env.TELEGRAM_BOT_TOKEN);
+  const botUsername = c.env.TELEGRAM_BOT_USERNAME?.trim() || null;
+  return c.json(
+    { enabled: enabled && botUsername !== null, botUsername },
+    200,
+    { "Cache-Control": "no-store" },
+  );
+});
+
 for (const path of ["/api/auth/telegram", "/api/auth/telegram/link"]) {
   telegramRoutes.use(
     path,

@@ -333,6 +333,19 @@ svg {
   grid-column: 1 / -1;
 }
 
+.telegram-login {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+}
+
+.telegram-login[aria-disabled="true"] {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
 .consent-shell {
   min-height: 100vh;
   padding: 70px 0;

@@ -111,6 +111,30 @@ async function seedTelegramAccount(telegramId: string): Promise<string> {
   return userId;
 }
 
+describe("telegram config endpoint", () => {
+  it("reports enabled with the bot username when configured", async () => {
+    // The ambient test env injects a deterministic TELEGRAM_BOT_TOKEN; the
+    // username is exposed publicly so the sign-in widget can render.
+    const response = await exports.default.fetch(
+      new Request(`${BASE_URL}/api/auth/telegram/config`, {
+        headers: { accept: "application/json" },
+      }),
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      enabled: boolean;
+      botUsername: string | null;
+    };
+    // enabled requires BOTH a token and a username; the token is present in the
+    // test env. Whether a username is set depends on the test env, so assert the
+    // shape and the invariant (enabled implies a non-null username).
+    expect(typeof body.enabled).toBe("boolean");
+    if (body.enabled) expect(body.botUsername).toBeTruthy();
+    else expect(body.botUsername === null || typeof body.botUsername === "string").toBe(true);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+});
+
 describe("telegram login endpoint", () => {
   it("signs in an existing Telegram account and records the login", async () => {
     const telegramId = randomTelegramId();

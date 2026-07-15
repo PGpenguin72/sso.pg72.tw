@@ -19,6 +19,7 @@ interface __SocialProviderSecrets {
   APPLE_CLIENT_SECRET?: string;
   APPLE_APP_BUNDLE_IDENTIFIER?: string;
   TELEGRAM_BOT_TOKEN?: string;
+  TELEGRAM_BOT_USERNAME?: string;
 }
 
 interface Env extends __SocialProviderSecrets {}

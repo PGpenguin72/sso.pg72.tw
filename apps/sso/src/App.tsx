@@ -420,13 +420,96 @@ function ThemeToggle({ floating = false }: { floating?: boolean }) {
  */
 type SocialProviderId = Parameters<typeof authClient.signIn.social>[0]["provider"];
 
+// Telegram is intentionally absent: it is not an OAuth provider and does not go
+// through `signIn.social`. It uses the Telegram Login Widget (see TelegramLogin).
 const SOCIAL_SIGN_IN_PROVIDERS: { id: string; label: string }[] = [
   { id: "discord", label: "Discord" },
   { id: "github", label: "GitHub" },
   { id: "facebook", label: "Facebook" },
   { id: "apple", label: "Apple" },
-  { id: "telegram", label: "Telegram" },
 ];
+
+/**
+ * Telegram Login Widget button. Telegram authenticates via its own widget, which
+ * posts a signed payload; we forward it to the Worker's `/api/auth/telegram`
+ * endpoint (which verifies the HMAC server-side). The widget needs the bot
+ * username, fetched from the public config endpoint. When Telegram is not yet
+ * configured (no bot token/username), the button renders disabled.
+ */
+function TelegramLogin({ disabled }: { disabled: boolean }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [config, setConfig] = useState<
+    { enabled: boolean; botUsername: string | null } | null
+  >(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/auth/telegram/config", { headers: { accept: "application/json" } })
+      .then((r) => (r.ok ? r.json() : { enabled: false, botUsername: null }))
+      .then((c) => {
+        if (!cancelled) setConfig(c);
+      })
+      .catch(() => {
+        if (!cancelled) setConfig({ enabled: false, botUsername: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!config?.enabled || !config.botUsername || !containerRef.current) return;
+    const container = containerRef.current;
+    // Telegram invokes this global with the signed auth payload.
+    const cbName = "onTelegramAuth";
+    (window as unknown as Record<string, unknown>)[cbName] = async (
+      user: Record<string, unknown>,
+    ) => {
+      setError(null);
+      try {
+        const res = await fetch("/api/auth/telegram", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(user),
+        });
+        if (res.ok) {
+          window.location.reload();
+        } else {
+          setError("Telegram 登入失敗，請稍後再試。");
+        }
+      } catch {
+        setError("Telegram 登入失敗，請稍後再試。");
+      }
+    };
+    const script = document.createElement("script");
+    script.src = "https://telegram.org/js/telegram-widget.js?22";
+    script.async = true;
+    script.setAttribute("data-telegram-login", config.botUsername);
+    script.setAttribute("data-size", "large");
+    script.setAttribute("data-radius", "8");
+    script.setAttribute("data-onauth", `${cbName}(user)`);
+    script.setAttribute("data-request-access", "write");
+    container.appendChild(script);
+    return () => {
+      container.replaceChildren();
+    };
+  }, [config]);
+
+  if (config && !config.enabled) {
+    return (
+      <button className="button button-secondary" type="button" disabled title="Telegram 登入尚未設定">
+        Telegram（尚未設定）
+      </button>
+    );
+  }
+  return (
+    <div className="telegram-login" aria-disabled={disabled}>
+      <div ref={containerRef} />
+      {error ? <div className="notice notice-error">{error}</div> : null}
+    </div>
+  );
+}
 
 function SignInView({ pending }: { pending: boolean }) {
   const [busy, setBusy] = useState<string | null>(null);
@@ -507,6 +590,7 @@ function SignInView({ pending }: { pending: boolean }) {
               {busy === provider.id ? "正在連線..." : provider.label}
             </button>
           ))}
+          <TelegramLogin disabled={pending || busy !== null} />
         </div>
 
         {error ? <div className="notice notice-error">{error}</div> : null}

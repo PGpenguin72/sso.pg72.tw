@@ -46,3 +46,5 @@
 | 2026-07-16 03:35 | agent 回報 | worktree 前端 | apps/sso/src/App.tsx, styles.css | SSO 前端重構完成(commit a981bd5, branch worktree-agent-ab88...):sidebar 分層/排版bug修復/頭貼上傳/開發者頁/檢舉/consent重設計/安全活動/tos-pp-about/社群登入按鈕;111測試過;待合併 | 完成 |
 | 2026-07-16 03:42 | agent 回報 | 原專案代碼/webmail.pg72.tw | deploy/pgid/mail/ | Mail OAuth Path A 設定完成(commit 71984ba):Dovecot introspection+Postfix SASL+Roundcube XOAUTH2;introspection 用 client_secret_post 相容;PGID 側需 introspect 回 email+active;套用限維護窗口 | 完成 |
 | 2026-07-16 03:55 | 合併+驗證 | sso.pg72.tw | apps/sso/(src+worker+migrations)、docs、wiki | 合併前端/文件/後端三分支回 main(3 個 merge commit,領域互斥無衝突);pnpm check 全綠:142 測試/typecheck/build | 完成 |
+| 2026-07-16 04:05 | 整合修復 | sso.pg72.tw | apps/sso/(telegram.ts, App.tsx, styles.css, test), README, .dev.vars.example | 修 Telegram 前後端落差(改用 Login Widget + /api/auth/telegram/config);更新 README RP 狀態;143 測試過(commit eb42475, 836aa6f) | 完成 |
+| 2026-07-16 04:08 | 派工(審查) | worktree | (唯讀) | 派出 bug-hunt/資安審查 agent 對合併後 SSO 新面(avatar/report/activity/telegram/social/前端)做對抗性檢查,回報後統一修 | 進行中 |

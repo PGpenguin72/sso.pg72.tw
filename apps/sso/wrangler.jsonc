@@ -58,7 +58,7 @@
     "AUTH_BASE_URL": "https://sso.pg72.tw",
     "PASSKEY_RP_ID": "sso.pg72.tw",
     "PASSKEY_ORIGIN": "https://sso.pg72.tw",
-    "REGISTRATION_MODE": "public",
+    "REGISTRATION_MODE": "invite",
     "ENVIRONMENT": "production"
   },
   "secrets": {

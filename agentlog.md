@@ -48,3 +48,4 @@
 | 2026-07-16 03:55 | 合併+驗證 | sso.pg72.tw | apps/sso/(src+worker+migrations)、docs、wiki | 合併前端/文件/後端三分支回 main(3 個 merge commit,領域互斥無衝突);pnpm check 全綠:142 測試/typecheck/build | 完成 |
 | 2026-07-16 04:05 | 整合修復 | sso.pg72.tw | apps/sso/(telegram.ts, App.tsx, styles.css, test), README, .dev.vars.example | 修 Telegram 前後端落差(改用 Login Widget + /api/auth/telegram/config);更新 README RP 狀態;143 測試過(commit eb42475, 836aa6f) | 完成 |
 | 2026-07-16 04:08 | 派工(審查) | worktree | (唯讀) | 派出 bug-hunt/資安審查 agent 對合併後 SSO 新面(avatar/report/activity/telegram/social/前端)做對抗性檢查,回報後統一修 | 進行中 |
+| 2026-07-16 04:20 | bug 修復 | sso.pg72.tw | apps/sso/(index.ts CSP, App.tsx, telegram.ts, social-config, tests) | 依 bug-hunt 修 M1(Telegram CSP)/M2(檢舉理由)/L1(社群 gating)/L4(Telegram write)/L5(頭貼上限);審查無 Critical/High;144 測試過(commit ce72bd1) | 完成 |

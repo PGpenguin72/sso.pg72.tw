@@ -1,14 +1,14 @@
 import { Hono, type Context } from "hono";
 
+import { requireAdminPermission, type AdminActor } from "./admin-gate";
 import { recordAudit } from "./audit";
-import { createAuth } from "./auth";
 import {
   CLIENT_SECRET_PREFIX,
   TRUSTED_CLIENT_IDS,
-  normalizeEmail,
   readRuntimeConfig,
   type RuntimeConfig,
 } from "./config";
+import { hasPermission } from "./roles";
 
 type AppEnv = { Bindings: Env };
 
@@ -52,6 +52,7 @@ interface AdminClientRow {
   tokenEndpointAuthMethod: string | null;
   hasSecret?: number;
   clientSecret?: string | null;
+  ownerUserId: string | null;
   createdAt: string | null;
   updatedAt: string | null;
 }
@@ -164,6 +165,7 @@ function clientView(row: AdminClientRow) {
     tokenEndpointAuthMethod: row.tokenEndpointAuthMethod,
     hasSecret: row.hasSecret === 1,
     trusted: TRUSTED_CLIENT_IDS.has(row.clientId),
+    ownerUserId: row.ownerUserId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -195,33 +197,34 @@ function pendingAuthorizationCodeCleanup(env: Env, clientId: string) {
   ).bind(clientId);
 }
 
-type AdminGate =
-  | { ok: true; adminUserId: string }
-  | { ok: false; response: Response };
+/**
+ * Whether the actor may manage every client (admin/bootadmin) or only the
+ * clients they own (developer).
+ */
+function managesAllClients(actor: AdminActor): boolean {
+  return hasPermission(actor.role, "clients.manage_all");
+}
 
-async function requireActiveAdmin(c: Context<AppEnv>): Promise<AdminGate> {
-  const auth = createAuth(c.env, c.executionCtx);
-  const session = await auth.api.getSession({ headers: c.req.raw.headers });
-  if (!session) {
-    return { ok: false, response: c.json({ error: "unauthorized" }, 401) };
+/**
+ * Ownership gate for mutations on an existing client. Developers get a 404
+ * for clients they do not own so the endpoint does not leak which client
+ * IDs exist.
+ */
+async function loadManagedClient(
+  c: Context<AppEnv>,
+  actor: AdminActor,
+  clientId: string,
+): Promise<{ ownerUserId: string | null } | null> {
+  const row = await c.env.PG72_ID_DB.prepare(
+    "SELECT ownerUserId FROM oauthClient WHERE clientId = ? LIMIT 1",
+  )
+    .bind(clientId)
+    .first<{ ownerUserId: string | null }>();
+  if (!row) return null;
+  if (!managesAllClients(actor) && row.ownerUserId !== actor.userId) {
+    return null;
   }
-
-  const config = readRuntimeConfig(c.env);
-  const isAdmin =
-    session.user.role === "admin" ||
-    normalizeEmail(session.user.email) === config.bootstrapAdminEmail;
-  if (session.user.status !== "active" || !isAdmin) {
-    return { ok: false, response: c.json({ error: "forbidden" }, 403) };
-  }
-
-  const rateLimit = await c.env.ADMIN_RATE_LIMITER.limit({
-    key: session.user.id,
-  });
-  if (!rateLimit.success) {
-    return { ok: false, response: c.json({ error: "rate_limited" }, 429) };
-  }
-
-  return { ok: true, adminUserId: session.user.id };
+  return row;
 }
 
 async function auditClientChange(
@@ -233,7 +236,13 @@ async function auditClientChange(
   try {
     await recordAudit(
       c.env,
-      { eventType, outcome: "success", clientId, subjectId: adminUserId },
+      {
+        eventType,
+        outcome: "success",
+        clientId,
+        subjectId: adminUserId,
+        actorUserId: adminUserId,
+      },
       c.executionCtx,
     );
   } catch (error) {
@@ -251,25 +260,31 @@ async function auditClientChange(
 export const adminClientRoutes = new Hono<AppEnv>();
 
 adminClientRoutes.get("/", async (c) => {
-  const gate = await requireActiveAdmin(c);
+  const gate = await requireAdminPermission(c, "clients.manage");
   if (!gate.ok) return gate.response;
 
+  // Developers only see clients they own; admin/bootadmin see everything,
+  // including unowned (NULL owner) clients such as the seeded first-party
+  // relying parties.
   const result = await c.env.PG72_ID_DB.prepare(
     `SELECT clientId, name, uri, disabled, public, scopes, redirectUris,
             postLogoutRedirectUris, grantTypes, tokenEndpointAuthMethod,
             CASE WHEN clientSecret IS NOT NULL
                   AND length(trim(clientSecret)) > 0
                  THEN 1 ELSE 0 END AS hasSecret,
-            createdAt, updatedAt
+            ownerUserId, createdAt, updatedAt
        FROM oauthClient
+      WHERE ?1 = 1 OR ownerUserId = ?2
       ORDER BY createdAt DESC, clientId ASC`,
-  ).all<AdminClientRow>();
+  )
+    .bind(managesAllClients(gate.actor) ? 1 : 0, gate.actor.userId)
+    .all<AdminClientRow>();
 
   return c.json({ clients: result.results.map(clientView) });
 });
 
 adminClientRoutes.post("/", async (c) => {
-  const gate = await requireActiveAdmin(c);
+  const gate = await requireAdminPermission(c, "clients.manage");
   if (!gate.ok) return gate.response;
 
   const config = readRuntimeConfig(c.env);
@@ -409,8 +424,8 @@ adminClientRoutes.post("/", async (c) => {
         id, clientId, clientSecret, disabled, skipConsent, enableEndSession,
         subjectType, scopes, createdAt, updatedAt, name, uri, redirectUris,
         postLogoutRedirectUris, tokenEndpointAuthMethod, grantTypes,
-        responseTypes, public, type, requirePKCE
-      ) VALUES (?, ?, ?, 0, 0, ?, 'public', ?, ?, ?, ?, ?, ?, ?, ?, ?, '["code"]', ?, ?, 1)`,
+        responseTypes, public, type, requirePKCE, ownerUserId
+      ) VALUES (?, ?, ?, 0, 0, ?, 'public', ?, ?, ?, ?, ?, ?, ?, ?, ?, '["code"]', ?, ?, 1, ?)`,
     )
       .bind(
         crypto.randomUUID(),
@@ -430,6 +445,7 @@ adminClientRoutes.post("/", async (c) => {
         JSON.stringify(grantTypes),
         isPublic ? 1 : 0,
         isPublic ? null : "web",
+        gate.actor.userId,
       )
       .run();
   } catch (error) {
@@ -442,7 +458,12 @@ adminClientRoutes.post("/", async (c) => {
     throw error;
   }
 
-  await auditClientChange(c, "oauth_client.created", clientId, gate.adminUserId);
+  await auditClientChange(
+    c,
+    "oauth_client.created",
+    clientId,
+    gate.actor.userId,
+  );
 
   return c.json(
     {
@@ -459,6 +480,7 @@ adminClientRoutes.post("/", async (c) => {
         tokenEndpointAuthMethod,
         hasSecret: !isPublic,
         trusted: false,
+        ownerUserId: gate.actor.userId,
         createdAt: now,
         updatedAt: now,
       },
@@ -472,7 +494,7 @@ adminClientRoutes.post("/", async (c) => {
 });
 
 adminClientRoutes.post("/:clientId/rotate-secret", async (c) => {
-  const gate = await requireActiveAdmin(c);
+  const gate = await requireAdminPermission(c, "clients.manage");
   if (!gate.ok) return gate.response;
 
   const clientId = c.req.param("clientId");
@@ -481,6 +503,9 @@ adminClientRoutes.post("/:clientId/rotate-secret", async (c) => {
   }
   if (TRUSTED_CLIENT_IDS.has(clientId)) {
     return c.json({ error: "trusted_client_locked" }, 409);
+  }
+  if (!(await loadManagedClient(c, gate.actor, clientId))) {
+    return c.json({ error: "client_not_found" }, 404);
   }
 
   const client = await c.env.PG72_ID_DB.prepare(
@@ -514,7 +539,7 @@ adminClientRoutes.post("/:clientId/rotate-secret", async (c) => {
     c,
     "oauth_client.secret_rotated",
     clientId,
-    gate.adminUserId,
+    gate.actor.userId,
   );
 
   return c.json({
@@ -526,7 +551,7 @@ adminClientRoutes.post("/:clientId/rotate-secret", async (c) => {
 });
 
 adminClientRoutes.post("/:clientId/status", async (c) => {
-  const gate = await requireActiveAdmin(c);
+  const gate = await requireAdminPermission(c, "clients.manage");
   if (!gate.ok) return gate.response;
 
   const clientId = c.req.param("clientId");
@@ -536,6 +561,9 @@ adminClientRoutes.post("/:clientId/status", async (c) => {
   }
   if (TRUSTED_CLIENT_IDS.has(clientId)) {
     return c.json({ error: "trusted_client_locked" }, 409);
+  }
+  if (!(await loadManagedClient(c, gate.actor, clientId))) {
+    return c.json({ error: "client_not_found" }, 404);
   }
 
   const now = new Date().toISOString();
@@ -568,14 +596,14 @@ adminClientRoutes.post("/:clientId/status", async (c) => {
     c,
     input.disabled ? "oauth_client.disabled" : "oauth_client.enabled",
     clientId,
-    gate.adminUserId,
+    gate.actor.userId,
   );
 
   return c.json({ clientId, disabled: input.disabled, at: now });
 });
 
 adminClientRoutes.delete("/:clientId", async (c) => {
-  const gate = await requireActiveAdmin(c);
+  const gate = await requireAdminPermission(c, "clients.manage");
   if (!gate.ok) return gate.response;
 
   const clientId = c.req.param("clientId");
@@ -584,6 +612,9 @@ adminClientRoutes.delete("/:clientId", async (c) => {
   }
   if (TRUSTED_CLIENT_IDS.has(clientId)) {
     return c.json({ error: "trusted_client_locked" }, 409);
+  }
+  if (!(await loadManagedClient(c, gate.actor, clientId))) {
+    return c.json({ error: "client_not_found" }, 404);
   }
 
   // Deleting the client cascades to oauthAccessToken, oauthRefreshToken and
@@ -601,7 +632,12 @@ adminClientRoutes.delete("/:clientId", async (c) => {
     return c.json({ error: "client_not_found" }, 404);
   }
 
-  await auditClientChange(c, "oauth_client.deleted", clientId, gate.adminUserId);
+  await auditClientChange(
+    c,
+    "oauth_client.deleted",
+    clientId,
+    gate.actor.userId,
+  );
 
   return c.json({ deleted: true, clientId });
 });

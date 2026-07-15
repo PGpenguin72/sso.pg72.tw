@@ -5,6 +5,7 @@ import { oauthProvider } from "@better-auth/oauth-provider";
 import { passkey } from "@better-auth/passkey";
 
 import { recordAudit, type WaitUntilContext } from "./audit";
+import { ownedClientShutdownStatements } from "./client-ownership";
 import {
   CLIENT_SECRET_PREFIX,
   TRUSTED_CLIENT_IDS,
@@ -82,6 +83,11 @@ export function createAuth(
               message: "The bootstrap administrator account cannot be deleted.",
             });
           }
+          // OAuth clients owned by the account are preserved but disabled
+          // and orphaned before the owner row (and its cascade) goes away.
+          await env.PG72_ID_DB.batch(
+            ownedClientShutdownStatements(env, user.id, new Date().toISOString()),
+          );
         },
         afterDelete: async (user) => {
           try {

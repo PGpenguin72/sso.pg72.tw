@@ -2526,7 +2526,9 @@ export function App() {
         body: JSON.stringify({ name }),
       });
       if (!response.ok) {
-        const payload = (await response.json()) as { error?: string };
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
         setProfileError(
           payload.error === "invalid_name"
             ? "名稱無效:去除控制字元與前後空白後必須是 1-64 個字元。"
@@ -2691,7 +2693,9 @@ export function App() {
         },
       );
       if (!response.ok) {
-        const payload = (await response.json()) as { error?: string };
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
         setLoginMethodsError(
           payload.error === "last_login_method"
             ? "這是帳號僅存的登入方式,無法解除連結。"
@@ -2786,7 +2790,9 @@ export function App() {
         },
       );
       if (!response.ok) {
-        const payload = (await response.json()) as { error?: string };
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
         setAdminUsersError(
           adminUserErrorMessage(payload.error, "無法變更角色。"),
         );
@@ -2816,7 +2822,9 @@ export function App() {
         },
       );
       if (!response.ok) {
-        const payload = (await response.json()) as { error?: string };
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
         setAdminUsersError(
           adminUserErrorMessage(payload.error, "無法更新使用者狀態。"),
         );
@@ -2881,7 +2889,9 @@ export function App() {
         },
       );
       if (!response.ok) {
-        const payload = (await response.json()) as { error?: string };
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
         setAdminUsersError(
           adminUserErrorMessage(payload.error, "無法刪除使用者。"),
         );
@@ -2990,7 +3000,9 @@ export function App() {
         },
       );
       if (!response.ok) {
-        const payload = (await response.json()) as { error?: string };
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
         setAdminClientsError(
           adminClientErrorMessage(payload.error, "無法更新 client 資訊。"),
         );
@@ -3056,7 +3068,9 @@ export function App() {
         },
       );
       if (!response.ok) {
-        const payload = (await response.json()) as { error?: string };
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
         setAdminClientsError(
           adminClientErrorMessage(payload.error, "無法更新 client 狀態。"),
         );
@@ -3088,7 +3102,9 @@ export function App() {
         },
       );
       if (!response.ok) {
-        const payload = (await response.json()) as { error?: string };
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
         setAdminClientsError(
           adminClientErrorMessage(payload.error, "無法刪除 client。"),
         );

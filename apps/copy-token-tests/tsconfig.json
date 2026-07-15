@@ -19,6 +19,7 @@
   "include": [
     "test",
     "../../原專案代碼/copy.pg72.tw/cloudflare-env.d.ts",
+    "../../原專案代碼/copy.pg72.tw/lib/session-logout-route.test.ts",
     "../../原專案代碼/copy.pg72.tw/lib/sso-token-session.test.ts"
   ]
 }

@@ -3,6 +3,13 @@ import { Hono, type Context } from "hono";
 import { requireAdminPermission, type AdminActor } from "./admin-gate";
 import { recordAudit } from "./audit";
 import {
+  DEVELOPER_NAME_METADATA_KEY,
+  developerNameFromMetadata,
+  parseClientMetadataRecord,
+  trustUrlOrNull,
+  validDeveloperName,
+} from "./client-metadata";
+import {
   CLIENT_SECRET_PREFIX,
   TRUSTED_CLIENT_IDS,
   readRuntimeConfig,
@@ -24,6 +31,9 @@ const CLIENT_SECRET_BYTES = 32;
 interface CreateClientInput {
   clientId?: unknown;
   name?: unknown;
+  developerName?: unknown;
+  privacyPolicyUrl?: unknown;
+  termsOfServiceUrl?: unknown;
   uri?: unknown;
   redirectUris?: unknown;
   postLogoutRedirectUris?: unknown;
@@ -39,6 +49,12 @@ interface ClientStatusInput {
   disabled?: unknown;
 }
 
+interface ClientTrustInput {
+  developerName?: unknown;
+  privacyPolicyUrl?: unknown;
+  termsOfServiceUrl?: unknown;
+}
+
 interface AdminClientRow {
   clientId: string;
   name: string | null;
@@ -50,6 +66,9 @@ interface AdminClientRow {
   postLogoutRedirectUris: string | null;
   grantTypes: string | null;
   tokenEndpointAuthMethod: string | null;
+  tos: string | null;
+  policy: string | null;
+  metadata: string | null;
   hasSecret?: number;
   clientSecret?: string | null;
   ownerUserId: string | null;
@@ -151,10 +170,30 @@ function parseJsonStringArray(value: string | null): string[] {
   }
 }
 
+/**
+ * Optional trust URL from the request body. `undefined`, `null`, and the
+ * empty string all mean "not provided"; anything else must pass the strict
+ * HTTPS validation in trustUrlOrNull.
+ */
+function optionalTrustUrl(
+  value: unknown,
+): { ok: true; url: string | null } | { ok: false } {
+  if (value === undefined || value === null || value === "") {
+    return { ok: true, url: null };
+  }
+  const url = trustUrlOrNull(value);
+  return url ? { ok: true, url } : { ok: false };
+}
+
 function clientView(row: AdminClientRow) {
   return {
     clientId: row.clientId,
     name: row.name ?? row.clientId,
+    developerName: developerNameFromMetadata(
+      parseClientMetadataRecord(row.metadata),
+    ),
+    privacyPolicyUrl: row.policy,
+    termsOfServiceUrl: row.tos,
     uri: row.uri,
     disabled: row.disabled === 1,
     public: row.public === 1,
@@ -269,6 +308,7 @@ adminClientRoutes.get("/", async (c) => {
   const result = await c.env.PG72_ID_DB.prepare(
     `SELECT clientId, name, uri, disabled, public, scopes, redirectUris,
             postLogoutRedirectUris, grantTypes, tokenEndpointAuthMethod,
+            tos, policy, metadata,
             CASE WHEN clientSecret IS NOT NULL
                   AND length(trim(clientSecret)) > 0
                  THEN 1 ELSE 0 END AS hasSecret,
@@ -301,6 +341,23 @@ adminClientRoutes.post("/", async (c) => {
   const name = typeof input.name === "string" ? input.name.trim() : "";
   if (!name || name.length > CLIENT_NAME_MAX_LENGTH) {
     return c.json({ error: "invalid_client_name" }, 400);
+  }
+
+  // The consent screen must always show who operates the client, so the
+  // developer identity is mandatory at creation time and can only be edited
+  // by an administrator; it is never read from authorization request input.
+  if (!validDeveloperName(input.developerName)) {
+    return c.json({ error: "invalid_developer_name" }, 400);
+  }
+  const developerName = input.developerName.trim();
+
+  const privacyPolicy = optionalTrustUrl(input.privacyPolicyUrl);
+  if (!privacyPolicy.ok) {
+    return c.json({ error: "invalid_privacy_policy_url" }, 400);
+  }
+  const termsOfService = optionalTrustUrl(input.termsOfServiceUrl);
+  if (!termsOfService.ok) {
+    return c.json({ error: "invalid_terms_of_service_url" }, 400);
   }
 
   let clientId: string;
@@ -424,8 +481,9 @@ adminClientRoutes.post("/", async (c) => {
         id, clientId, clientSecret, disabled, skipConsent, enableEndSession,
         subjectType, scopes, createdAt, updatedAt, name, uri, redirectUris,
         postLogoutRedirectUris, tokenEndpointAuthMethod, grantTypes,
-        responseTypes, public, type, requirePKCE, ownerUserId
-      ) VALUES (?, ?, ?, 0, 0, ?, 'public', ?, ?, ?, ?, ?, ?, ?, ?, ?, '["code"]', ?, ?, 1, ?)`,
+        responseTypes, public, type, requirePKCE, ownerUserId, tos, policy,
+        metadata
+      ) VALUES (?, ?, ?, 0, 0, ?, 'public', ?, ?, ?, ?, ?, ?, ?, ?, ?, '["code"]', ?, ?, 1, ?, ?, ?, ?)`,
     )
       .bind(
         crypto.randomUUID(),
@@ -446,6 +504,9 @@ adminClientRoutes.post("/", async (c) => {
         isPublic ? 1 : 0,
         isPublic ? null : "web",
         gate.actor.userId,
+        termsOfService.url,
+        privacyPolicy.url,
+        JSON.stringify({ [DEVELOPER_NAME_METADATA_KEY]: developerName }),
       )
       .run();
   } catch (error) {
@@ -470,6 +531,9 @@ adminClientRoutes.post("/", async (c) => {
       client: {
         clientId,
         name,
+        developerName,
+        privacyPolicyUrl: privacyPolicy.url,
+        termsOfServiceUrl: termsOfService.url,
         uri,
         disabled: false,
         public: isPublic,
@@ -491,6 +555,115 @@ adminClientRoutes.post("/", async (c) => {
     },
     201,
   );
+});
+
+adminClientRoutes.patch("/:clientId", async (c) => {
+  const gate = await requireAdminPermission(c, "clients.manage");
+  if (!gate.ok) return gate.response;
+
+  const clientId = c.req.param("clientId");
+  if (!CLIENT_ID_PATTERN.test(clientId)) {
+    return c.json({ error: "invalid_client_id" }, 400);
+  }
+  if (TRUSTED_CLIENT_IDS.has(clientId)) {
+    return c.json({ error: "trusted_client_locked" }, 409);
+  }
+  // Same ownership rule as every other mutation: developers may only edit
+  // the trust metadata of clients they own (404 keeps client IDs private).
+  if (!(await loadManagedClient(c, gate.actor, clientId))) {
+    return c.json({ error: "client_not_found" }, 404);
+  }
+
+  const input = await readJson<ClientTrustInput>(c.req.raw);
+  if (!input) {
+    return c.json({ error: "invalid_request" }, 400);
+  }
+
+  const row = await c.env.PG72_ID_DB.prepare(
+    `SELECT clientId, tos, policy, metadata
+       FROM oauthClient
+      WHERE clientId = ?
+      LIMIT 1`,
+  )
+    .bind(clientId)
+    .first<{
+      clientId: string;
+      tos: string | null;
+      policy: string | null;
+      metadata: string | null;
+    }>();
+  if (!row) {
+    return c.json({ error: "client_not_found" }, 404);
+  }
+
+  // Preserve unrelated metadata keys (e.g. the diary client stores its
+  // backchannel_logout_uri here); only developer_name is managed by this
+  // endpoint.
+  const metadata = parseClientMetadataRecord(row.metadata);
+  let developerName = developerNameFromMetadata(metadata);
+  if (input.developerName !== undefined) {
+    if (!validDeveloperName(input.developerName)) {
+      return c.json({ error: "invalid_developer_name" }, 400);
+    }
+    developerName = input.developerName.trim();
+  }
+  // The developer identity is mandatory; legacy rows without one must be
+  // backfilled through this endpoint and can never be cleared.
+  if (!developerName) {
+    return c.json({ error: "invalid_developer_name" }, 400);
+  }
+  metadata[DEVELOPER_NAME_METADATA_KEY] = developerName;
+
+  let termsOfServiceUrl = trustUrlOrNull(row.tos);
+  if (input.termsOfServiceUrl !== undefined) {
+    const parsed = optionalTrustUrl(input.termsOfServiceUrl);
+    if (!parsed.ok) {
+      return c.json({ error: "invalid_terms_of_service_url" }, 400);
+    }
+    termsOfServiceUrl = parsed.url;
+  }
+
+  let privacyPolicyUrl = trustUrlOrNull(row.policy);
+  if (input.privacyPolicyUrl !== undefined) {
+    const parsed = optionalTrustUrl(input.privacyPolicyUrl);
+    if (!parsed.ok) {
+      return c.json({ error: "invalid_privacy_policy_url" }, 400);
+    }
+    privacyPolicyUrl = parsed.url;
+  }
+
+  const now = new Date().toISOString();
+  const update = await c.env.PG72_ID_DB.prepare(
+    `UPDATE oauthClient
+        SET metadata = ?, tos = ?, policy = ?, updatedAt = ?
+      WHERE clientId = ?`,
+  )
+    .bind(
+      JSON.stringify(metadata),
+      termsOfServiceUrl,
+      privacyPolicyUrl,
+      now,
+      clientId,
+    )
+    .run();
+  if (update.meta.changes !== 1) {
+    return c.json({ error: "client_not_found" }, 404);
+  }
+
+  await auditClientChange(
+    c,
+    "oauth_client.trust_updated",
+    clientId,
+    gate.actor.userId,
+  );
+
+  return c.json({
+    clientId,
+    developerName,
+    privacyPolicyUrl,
+    termsOfServiceUrl,
+    updatedAt: now,
+  });
 });
 
 adminClientRoutes.post("/:clientId/rotate-secret", async (c) => {

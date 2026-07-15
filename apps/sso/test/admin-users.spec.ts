@@ -659,6 +659,8 @@ describe("Developer-owned OAuth clients", () => {
     return {
       clientId,
       name: "Owned Client",
+      // Mandatory since the consent screen surfaces the developer identity.
+      developerName: "Owned Client Devs",
       redirectUris: [`https://${clientId}.example/callback`],
     };
   }
@@ -754,6 +756,45 @@ describe("Developer-owned OAuth clients", () => {
         )
       ).status,
     ).toBe(200);
+  });
+
+  it("applies the ownership gate to consent trust metadata edits", async () => {
+    const developer = await randomUser("developer");
+    const otherDeveloper = await randomUser("developer");
+    const admin = await randomUser("admin");
+
+    const ownedId = `trust-owned-${crypto.randomUUID()}`;
+    expect(
+      (await createClient(developer.headers, clientBody(ownedId))).status,
+    ).toBe(201);
+
+    const patchTrust = (headers: Headers, developerName: string) =>
+      exports.default.fetch(
+        new Request(`${CLIENTS_URL}/${ownedId}`, {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify({ developerName }),
+        }),
+      );
+
+    // Foreign developers get the same existence-hiding 404 as on every
+    // other client mutation.
+    expect((await patchTrust(otherDeveloper.headers, "Mallory")).status).toBe(
+      404,
+    );
+
+    // The owner may edit the trust metadata of their own client.
+    const ownerPatch = await patchTrust(developer.headers, "Owned Client Team");
+    expect(ownerPatch.status).toBe(200);
+    expect(await ownerPatch.json()).toMatchObject({
+      clientId: ownedId,
+      developerName: "Owned Client Team",
+    });
+
+    // Admins may edit any client.
+    expect((await patchTrust(admin.headers, "Platform Admins")).status).toBe(
+      200,
+    );
   });
 
   it("treats unowned clients as admin-managed", async () => {
@@ -904,6 +945,7 @@ describe("Role claims in issued ID tokens", () => {
         body: JSON.stringify({
           clientId,
           name: "Claims Test Client",
+          developerName: "Claims Test Devs",
           redirectUris: [redirectUri],
           public: true,
         }),

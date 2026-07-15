@@ -1,6 +1,7 @@
 import {
   Activity,
   Check,
+  Globe,
   KeyRound,
   Laptop,
   LogIn,
@@ -43,10 +44,18 @@ interface AuditResponse {
   events: AuditEvent[];
 }
 
-interface PublicOAuthClient {
-  client_id?: string;
-  client_name?: string;
-  client_uri?: string;
+interface ConsentClientInfo {
+  clientId: string;
+  name: string;
+  developerName: string | null;
+  privacyPolicyUrl: string | null;
+  termsOfServiceUrl: string | null;
+  redirectHosts: string[];
+  scopes: string[];
+}
+
+interface ConsentClientResponse {
+  client?: ConsentClientInfo;
 }
 
 interface AuthorizedApplication {
@@ -67,6 +76,9 @@ interface AuthorizationsResponse {
 interface AdminOAuthClient {
   clientId: string;
   name: string;
+  developerName: string | null;
+  privacyPolicyUrl: string | null;
+  termsOfServiceUrl: string | null;
   uri: string | null;
   disabled: boolean;
   public: boolean;
@@ -189,6 +201,9 @@ const ADMIN_CLIENT_ERROR_MESSAGES: Record<string, string> = {
   client_exists: "這個 Client ID 已存在。",
   invalid_client_id: "Client ID 格式無效（小寫英數、-、_、.，3-64 字元）。",
   invalid_client_name: "名稱不能是空白且不可超過 64 字元。",
+  invalid_developer_name: "開發者名稱為必填，且不可超過 64 字元。",
+  invalid_privacy_policy_url: "隱私權政策必須是完整的 HTTPS URL。",
+  invalid_terms_of_service_url: "服務條款必須是完整的 HTTPS URL。",
   invalid_redirect_uri:
     "Redirect URI 必須是完整的 HTTPS URL，不允許 wildcard 或 fragment。",
   invalid_scopes: "Scopes 只能是 openid/profile/email/offline_access。",
@@ -406,9 +421,12 @@ const SCOPE_DETAILS: Record<string, { label: string; description: string }> = {
   },
   offline_access: {
     label: "在你離線時保持連線",
-    description: "允許網站在你離開後更新登入權杖。",
+    description: "允許應用程式在你離開後更新登入權杖。",
   },
 };
+
+const OFFLINE_ACCESS_NOTICE = "離線存取：應用在你離線時仍可存取。";
+const DEVELOPER_NAME_FALLBACK = "PG72 官方";
 
 function scopeIcon(scope: string) {
   if (scope === "email") return <Mail aria-hidden="true" />;
@@ -443,22 +461,44 @@ function safeOAuthRedirect(uri: string): string | null {
   }
 }
 
+function TrustLink({ label, url }: { label: string; url: string | null }) {
+  return (
+    <div className="trust-link-row">
+      <dt>{label}</dt>
+      <dd>
+        {url ? (
+          <a href={url} target="_blank" rel="noopener noreferrer">
+            檢視
+          </a>
+        ) : (
+          <span className="trust-missing">開發者未提供</span>
+        )}
+      </dd>
+    </div>
+  );
+}
+
 function ConsentView({
   clientId,
   userEmail,
+  userName,
 }: {
   clientId: string | null;
   userEmail: string;
+  userName: string;
 }) {
   const [busy, setBusy] = useState<"allow" | "deny" | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [client, setClient] = useState<PublicOAuthClient | null>(null);
+  const [client, setClient] = useState<ConsentClientInfo | null>(null);
   const [clientLoading, setClientLoading] = useState(true);
   const scope =
     new URLSearchParams(window.location.search).get("scope") ?? "openid";
+  // Only the scopes requested by this authorization request are listed. The
+  // query string was signed by the Worker when it redirected here, and the
+  // provider rejects any consent decision whose signed query was tampered
+  // with, as well as any scope outside the client's registration.
   const scopes = scope.split(" ").filter(Boolean);
-  const appName = client?.client_name ?? "這個應用程式";
-  const clientHost = safeClientHost(client?.client_uri);
+  const appName = client?.name ?? "這個應用程式";
 
   useEffect(() => {
     if (!clientId) {
@@ -469,8 +509,11 @@ function ConsentView({
 
     const controller = new AbortController();
     const loadClient = async () => {
+      // Server-side client registration data straight from D1. Nothing shown
+      // in the identity block can be influenced by authorization request
+      // parameters.
       const query = new URLSearchParams({ client_id: clientId });
-      const response = await fetch(`/oauth2/public-client?${query}`, {
+      const response = await fetch(`/api/consent/client?${query}`, {
         credentials: "include",
         cache: "no-store",
         headers: { Accept: "application/json" },
@@ -480,11 +523,11 @@ function ConsentView({
         throw new Error("Unable to load OAuth client metadata");
       }
 
-      const data = (await response.json()) as PublicOAuthClient;
-      if (data.client_id !== clientId || !data.client_name) {
+      const data = (await response.json()) as ConsentClientResponse;
+      if (!data.client || data.client.clientId !== clientId || !data.client.name) {
         throw new Error("OAuth client metadata did not match the request");
       }
-      setClient(data);
+      setClient(data.client);
       setClientLoading(false);
     };
 
@@ -501,6 +544,8 @@ function ConsentView({
     setBusy(accept ? "allow" : "deny");
     setError(null);
     try {
+      // Cancelling returns the user to the relying party with an
+      // access_denied error redirect built by the provider.
       const result = await authClient.oauth2.consent({ accept });
       if (result.error) {
         setError(messageFrom(result.error, "無法處理授權，請稍後再試。"));
@@ -538,12 +583,23 @@ function ConsentView({
           </span>
           <span className="eyebrow">應用程式授權</span>
           <h1>允許 {appName} 存取帳號？</h1>
-          {clientHost ? <p className="client-host">{clientHost}</p> : null}
+          {client ? (
+            <p className="consent-developer">
+              開發者：{client.developerName ?? DEVELOPER_NAME_FALLBACK}
+            </p>
+          ) : null}
         </div>
-        <p className="consent-account">
-          將以 <strong>{userEmail}</strong> 繼續
-        </p>
-        <h2 className="scope-heading">這個網站將能夠：</h2>
+        {client && client.redirectHosts.length > 0 ? (
+          <p className="consent-domain">
+            <Globe aria-hidden="true" />
+            <span>
+              授權後將前往{" "}
+              <strong>{client.redirectHosts.join("、")}</strong>
+              。這是該應用註冊時綁定的網域，請確認它是你信任的網站。
+            </span>
+          </p>
+        ) : null}
+        <h2 className="scope-heading">{appName} 將能夠：</h2>
         <ul className="scope-list">
           {scopes.map((item) => {
             const details = SCOPE_DETAILS[item] ?? {
@@ -556,11 +612,26 @@ function ConsentView({
                 <span className="scope-copy">
                   <strong>{details.label}</strong>
                   <span>{details.description}</span>
+                  {item === "offline_access" ? (
+                    <span className="scope-offline-flag">
+                      {OFFLINE_ACCESS_NOTICE}
+                    </span>
+                  ) : null}
                 </span>
               </li>
             );
           })}
         </ul>
+        <dl className="trust-links">
+          <TrustLink label="服務條款" url={client?.termsOfServiceUrl ?? null} />
+          <TrustLink
+            label="隱私權政策"
+            url={client?.privacyPolicyUrl ?? null}
+          />
+        </dl>
+        <p className="consent-account">
+          將以 <strong>{userName}</strong>（{userEmail}）的身分繼續
+        </p>
         {error ? (
           <div className="notice notice-error" role="alert">
             {error}
@@ -574,7 +645,7 @@ function ConsentView({
             onClick={() => void decide(false)}
           >
             <X aria-hidden="true" />
-            {busy === "deny" ? "返回中..." : "拒絕"}
+            {busy === "deny" ? "返回中..." : "取消"}
           </button>
           <button
             type="button"
@@ -886,7 +957,14 @@ export function App() {
   const [adminClientsError, setAdminClientsError] = useState<string | null>(null);
   const [clientName, setClientName] = useState("");
   const [clientIdDraft, setClientIdDraft] = useState("");
+  const [clientDeveloperDraft, setClientDeveloperDraft] = useState("");
+  const [clientPrivacyUrlDraft, setClientPrivacyUrlDraft] = useState("");
+  const [clientTermsUrlDraft, setClientTermsUrlDraft] = useState("");
   const [clientRedirectUrisDraft, setClientRedirectUrisDraft] = useState("");
+  const [editingClientId, setEditingClientId] = useState<string | null>(null);
+  const [editDeveloperDraft, setEditDeveloperDraft] = useState("");
+  const [editPrivacyUrlDraft, setEditPrivacyUrlDraft] = useState("");
+  const [editTermsUrlDraft, setEditTermsUrlDraft] = useState("");
   const [clientTypeDraft, setClientTypeDraft] = useState<
     "confidential" | "public"
   >("confidential");
@@ -1095,7 +1173,11 @@ export function App() {
 
   if (isConsent) {
     return (
-      <ConsentView clientId={clientId} userEmail={session.user.email} />
+      <ConsentView
+        clientId={clientId}
+        userEmail={session.user.email}
+        userName={session.user.name}
+      />
     );
   }
 
@@ -1562,6 +1644,7 @@ export function App() {
       const isPublic = clientTypeDraft === "public";
       const body: Record<string, unknown> = {
         name: clientName.trim(),
+        developerName: clientDeveloperDraft.trim(),
         redirectUris,
         public: isPublic,
         scopes: clientOfflineDraft
@@ -1573,6 +1656,10 @@ export function App() {
       };
       const clientId = clientIdDraft.trim();
       if (clientId) body.clientId = clientId;
+      const privacyPolicyUrl = clientPrivacyUrlDraft.trim();
+      if (privacyPolicyUrl) body.privacyPolicyUrl = privacyPolicyUrl;
+      const termsOfServiceUrl = clientTermsUrlDraft.trim();
+      if (termsOfServiceUrl) body.termsOfServiceUrl = termsOfServiceUrl;
 
       const response = await fetch("/api/admin/clients", {
         method: "POST",
@@ -1597,10 +1684,55 @@ export function App() {
       }
       setClientName("");
       setClientIdDraft("");
+      setClientDeveloperDraft("");
+      setClientPrivacyUrlDraft("");
+      setClientTermsUrlDraft("");
       setClientRedirectUrisDraft("");
       setClientOfflineDraft(false);
       setClientTypeDraft("confidential");
       setNotice(`Client ${payload.client.clientId} 已建立。`);
+      await loadAdminClients();
+    } catch {
+      setAdminClientsError("網路連線失敗，請稍後再試。");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const beginClientTrustEdit = (client: AdminOAuthClient) => {
+    setAdminClientsError(null);
+    setEditingClientId(client.clientId);
+    setEditDeveloperDraft(client.developerName ?? "");
+    setEditPrivacyUrlDraft(client.privacyPolicyUrl ?? "");
+    setEditTermsUrlDraft(client.termsOfServiceUrl ?? "");
+  };
+
+  const updateAdminClientTrust = async (client: AdminOAuthClient) => {
+    setBusy(`client:${client.clientId}`);
+    setAdminClientsError(null);
+    try {
+      const response = await fetch(
+        `/api/admin/clients/${encodeURIComponent(client.clientId)}`,
+        {
+          method: "PATCH",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            developerName: editDeveloperDraft.trim(),
+            privacyPolicyUrl: editPrivacyUrlDraft.trim() || null,
+            termsOfServiceUrl: editTermsUrlDraft.trim() || null,
+          }),
+        },
+      );
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string };
+        setAdminClientsError(
+          adminClientErrorMessage(payload.error, "無法更新 client 資訊。"),
+        );
+        return;
+      }
+      setEditingClientId(null);
+      setNotice(`Client ${client.clientId} 的信任資訊已更新。`);
       await loadAdminClients();
     } catch {
       setAdminClientsError("網路連線失敗，請稍後再試。");
@@ -2426,6 +2558,47 @@ export function App() {
                         placeholder="pg72-copy"
                       />
                     </label>
+                    <label>
+                      <span>開發者名稱（顯示於授權畫面）</span>
+                      <input
+                        type="text"
+                        maxLength={64}
+                        value={clientDeveloperDraft}
+                        onChange={(event) =>
+                          setClientDeveloperDraft(event.target.value)
+                        }
+                        autoComplete="off"
+                        placeholder="PG72 官方"
+                      />
+                    </label>
+                    <label>
+                      <span>服務條款 URL（選填，HTTPS）</span>
+                      <input
+                        type="url"
+                        maxLength={512}
+                        value={clientTermsUrlDraft}
+                        onChange={(event) =>
+                          setClientTermsUrlDraft(event.target.value)
+                        }
+                        autoComplete="off"
+                        placeholder="https://copy.pg72.tw/terms"
+                        spellCheck={false}
+                      />
+                    </label>
+                    <label>
+                      <span>隱私權政策 URL（選填，HTTPS）</span>
+                      <input
+                        type="url"
+                        maxLength={512}
+                        value={clientPrivacyUrlDraft}
+                        onChange={(event) =>
+                          setClientPrivacyUrlDraft(event.target.value)
+                        }
+                        autoComplete="off"
+                        placeholder="https://copy.pg72.tw/privacy"
+                        spellCheck={false}
+                      />
+                    </label>
                     <label className="client-form-full">
                       <span>Redirect URIs（每行一個，production 僅接受 HTTPS）</span>
                       <textarea
@@ -2472,6 +2645,7 @@ export function App() {
                       className="button button-primary"
                       disabled={
                         !clientName.trim() ||
+                        !clientDeveloperDraft.trim() ||
                         !clientRedirectUrisDraft.trim() ||
                         busy === "client:create"
                       }
@@ -2489,6 +2663,8 @@ export function App() {
                     {adminClientsState === "ready"
                       ? adminClients.map((client) => {
                           const clientBusy = busy === `client:${client.clientId}`;
+                          const editingClient =
+                            editingClientId === client.clientId;
                           return (
                             <div
                               className="list-item"
@@ -2502,6 +2678,11 @@ export function App() {
                                 <strong>{client.name}</strong>
                                 <span className="mono">{client.clientId}</span>
                                 <span>
+                                  開發者：{client.developerName ?? "未填寫"}
+                                  {client.termsOfServiceUrl ? " · 服務條款" : ""}
+                                  {client.privacyPolicyUrl ? " · 隱私權政策" : ""}
+                                </span>
+                                <span>
                                   {client.public
                                     ? "Public · PKCE"
                                     : "Confidential · client_secret_basic"}
@@ -2514,8 +2695,96 @@ export function App() {
                                 <span className="mono">
                                   {client.redirectUris.join(" ")}
                                 </span>
+                                {editingClient ? (
+                                  <form
+                                    className="client-trust-form"
+                                    onSubmit={(event) => {
+                                      event.preventDefault();
+                                      if (!clientBusy) {
+                                        void updateAdminClientTrust(client);
+                                      }
+                                    }}
+                                  >
+                                    <label>
+                                      <span>開發者名稱</span>
+                                      <input
+                                        type="text"
+                                        maxLength={64}
+                                        value={editDeveloperDraft}
+                                        disabled={clientBusy}
+                                        onChange={(event) =>
+                                          setEditDeveloperDraft(event.target.value)
+                                        }
+                                        autoComplete="off"
+                                      />
+                                    </label>
+                                    <label>
+                                      <span>服務條款 URL（選填，HTTPS）</span>
+                                      <input
+                                        type="url"
+                                        maxLength={512}
+                                        value={editTermsUrlDraft}
+                                        disabled={clientBusy}
+                                        onChange={(event) =>
+                                          setEditTermsUrlDraft(event.target.value)
+                                        }
+                                        autoComplete="off"
+                                        spellCheck={false}
+                                      />
+                                    </label>
+                                    <label>
+                                      <span>隱私權政策 URL（選填，HTTPS）</span>
+                                      <input
+                                        type="url"
+                                        maxLength={512}
+                                        value={editPrivacyUrlDraft}
+                                        disabled={clientBusy}
+                                        onChange={(event) =>
+                                          setEditPrivacyUrlDraft(event.target.value)
+                                        }
+                                        autoComplete="off"
+                                        spellCheck={false}
+                                      />
+                                    </label>
+                                    <div className="client-trust-actions">
+                                      <button
+                                        type="button"
+                                        className="button button-secondary button-compact"
+                                        disabled={clientBusy}
+                                        onClick={() => setEditingClientId(null)}
+                                      >
+                                        取消
+                                      </button>
+                                      <button
+                                        type="submit"
+                                        className="button button-primary button-compact"
+                                        disabled={
+                                          clientBusy || !editDeveloperDraft.trim()
+                                        }
+                                      >
+                                        {clientBusy ? "儲存中..." : "儲存"}
+                                      </button>
+                                    </div>
+                                  </form>
+                                ) : null}
                               </div>
                               <div className="passkey-actions">
+                                {!client.trusted ? (
+                                  <button
+                                    type="button"
+                                    className="icon-button"
+                                    aria-label={`編輯 ${client.clientId} 的信任資訊`}
+                                    title="編輯開發者與條款資訊"
+                                    disabled={clientBusy}
+                                    onClick={() =>
+                                      editingClient
+                                        ? setEditingClientId(null)
+                                        : beginClientTrustEdit(client)
+                                    }
+                                  >
+                                    <Pencil aria-hidden="true" />
+                                  </button>
+                                ) : null}
                                 {!client.trusted && !client.public ? (
                                   <button
                                     type="button"

@@ -1234,6 +1234,7 @@ function ReportDialog({
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
   const panelRef = useRef<HTMLElement>(null);
+  const doneButtonRef = useRef<HTMLButtonElement>(null);
   const busyRef = useRef(busy);
 
   useEffect(() => {
@@ -1244,6 +1245,11 @@ function ReportDialog({
     const previousFocus = document.activeElement as HTMLElement | null;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
+    // Move focus into the dialog on open (first radio, falling back to the
+    // first control) so keyboard and screen-reader users start inside it.
+    panelRef.current
+      ?.querySelector<HTMLElement>("input, button, textarea")
+      ?.focus();
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !busyRef.current) {
@@ -1274,6 +1280,12 @@ function ReportDialog({
       previousFocus?.focus();
     };
   }, [onClose]);
+
+  // After a successful report the form is replaced by a confirmation; move
+  // focus to its primary action so the keyboard focus is not left orphaned.
+  useEffect(() => {
+    if (done) doneButtonRef.current?.focus();
+  }, [done]);
 
   const submit = async () => {
     setBusy(true);
@@ -1332,6 +1344,7 @@ function ReportDialog({
             </p>
             <div className="dialog-actions">
               <button
+                ref={doneButtonRef}
                 type="button"
                 className="button button-primary"
                 onClick={onClose}

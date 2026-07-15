@@ -56,3 +56,4 @@
 | 2026-07-16 04:55 | 派工(修正) | worktree | apps/sso | 派出 QA 修正 agent:H1 破版/M1-M4/L1-L8/per-route title/文件矛盾;不做換膚(階段30) | 進行中 |
 | 2026-07-16 05:05 | 合併+驗證 | sso.pg72.tw | apps/sso/(App.tsx,styles.css), CLAUDE.md, codex.md, docs | 合併 QA 修正(10 commit):H1 破版/M1-M4/L1-L8/per-route title/文件矛盾;144 測試過;PGID 功能+QA 完成 | 完成 |
 | 2026-07-16 05:10 | 派工(階段30) | worktree | apps/sso | 派出 PGID 視覺重塑 agent(morden_dark:token/Inter/分層背景/glow/多層陰影/mono/微互動),保留 a11y,不 push | 進行中 |
+| 2026-07-16 05:25 | 合併(階段30) | sso.pg72.tw | apps/sso/(styles.css, index.html, App.tsx, public/fonts) | 合併 PGID morden_dark 重塑(4 commit):近黑底+靛藍+分層背景+glow+多層陰影+Inter自託管+mono標籤+微互動;a11y保留;CSP不變;144測試過;headless Chrome 確認渲染 | 完成 |

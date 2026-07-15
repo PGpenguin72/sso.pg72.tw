@@ -23,7 +23,18 @@ import {
   trustUrlOrNull,
 } from "./client-metadata";
 import { normalizeEmail, readRuntimeConfig } from "./config";
+import {
+  adminOauthReportRoutes,
+  oauthReportRoutes,
+} from "./oauth-reports";
 import { ASSIGNABLE_ROLES, isPlatformRole } from "./roles";
+import {
+  ACTIVITY_AUDIT_PATHS,
+  parseConsentActivity,
+  recordAuthPathActivity,
+  type ConsentActivity,
+} from "./security-activity";
+import { telegramRoutes } from "./telegram";
 
 type AppEnv = { Bindings: Env };
 
@@ -306,6 +317,13 @@ app.use("*", async (c, next) => {
   } else if (pathname.startsWith("/api/avatar/")) {
     // Generated avatars are deterministic public images; the route sets its
     // own long-lived Cache-Control instead of the API no-store default.
+  } else if (
+    (c.req.method === "GET" || c.req.method === "HEAD") &&
+    /^\/api\/account\/avatar\/[^/]+$/.test(pathname)
+  ) {
+    // Served uploaded avatars are immutable per id; the route sets its own
+    // long-lived Cache-Control. `/api/account/avatar` and `.../avatar/mode`
+    // stay on the no-store default below (POST, or not matched here).
   } else if (isAuthPath(pathname) || pathname.startsWith("/api/")) {
     c.header("Cache-Control", "no-store");
   }
@@ -348,8 +366,11 @@ app.use("/api/admin/*", async (c, next) => {
 });
 
 app.route("/api/admin/clients", adminClientRoutes);
+app.route("/api/admin/oauth-reports", adminOauthReportRoutes);
 app.route("/api/admin/users", adminUserRoutes);
 app.route("/", accountRoutes);
+app.route("/", oauthReportRoutes);
+app.route("/", telegramRoutes);
 
 app.use(
   "/oauth2/token",
@@ -430,7 +451,8 @@ app.post("/passkey/update-passkey", async (c) => {
       {
         eventType: "passkey.renamed",
         outcome: "success",
-        subjectId: id,
+        subjectId: session.user.id,
+        metadata: { passkeyId: id },
       },
       c.executionCtx,
     );
@@ -495,7 +517,8 @@ app.post("/passkey/delete-passkey", async (c) => {
           {
             eventType: "passkey.delete_blocked",
             outcome: "denied",
-            subjectId: id,
+            subjectId: session.user.id,
+            metadata: { passkeyId: id },
           },
           c.executionCtx,
         );
@@ -526,7 +549,8 @@ app.post("/passkey/delete-passkey", async (c) => {
           {
             eventType: "passkey.delete_blocked",
             outcome: "denied",
-            subjectId: id,
+            subjectId: session.user.id,
+            metadata: { passkeyId: id },
           },
           c.executionCtx,
         );
@@ -564,7 +588,8 @@ app.post("/passkey/delete-passkey", async (c) => {
       {
         eventType: "passkey.deleted",
         outcome: "success",
-        subjectId: id,
+        subjectId: session.user.id,
+        metadata: { passkeyId: id },
       },
       c.executionCtx,
     );
@@ -901,7 +926,39 @@ app.all("*", async (c) => {
       }
     }
 
-    const response = await createAuth(c.env, c.executionCtx).handler(c.req.raw);
+    const auth = createAuth(c.env, c.executionCtx);
+
+    // For the self security-activity paths (session revocation, passkey
+    // registration, consent), capture the actor before the handler runs:
+    // revoking sessions can invalidate the current session, so the user id
+    // cannot be read afterwards, and the consent body must be cloned before
+    // the handler consumes it.
+    let activityUserId: string | null = null;
+    let consentActivity: ConsentActivity | null = null;
+    if (ACTIVITY_AUDIT_PATHS.has(pathname)) {
+      const priorSession = await auth.api.getSession({
+        headers: c.req.raw.headers,
+      });
+      activityUserId = priorSession?.user.id ?? null;
+      if (activityUserId && pathname === "/oauth2/consent") {
+        consentActivity = await parseConsentActivity(c.req.raw);
+      }
+    }
+
+    const response = await auth.handler(c.req.raw);
+
+    if (activityUserId) {
+      // Audit is a source-of-truth write, so it completes before responding.
+      await recordAuthPathActivity(
+        c.env,
+        pathname,
+        response,
+        activityUserId,
+        consentActivity,
+        c.executionCtx,
+      );
+    }
+
     if (isAuthNavigationPath(pathname)) {
       return normalizeOAuthNavigationRedirect(c.req.raw, response);
     }

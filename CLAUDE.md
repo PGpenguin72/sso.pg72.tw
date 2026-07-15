@@ -6,8 +6,9 @@
 
 - Issuer 固定為 `https://sso.pg72.tw`。
 - SSO 由 PG72 自行掌控，不使用 Cloudflare Access 作登入或授權層。
-- v1 日常登入方式只有 Google 與 Passkey。
-- v1 不提供密碼、Email OTP、TOTP、GitHub 或 Discord 登入。
+- v1 日常登入主力是 Google 與 Passkey。
+- v1 另提供 Discord、GitHub、Facebook、Apple、Telegram 社群登入作為額外選項（owner 決策，2026-07-16）；各 provider 未設定 secret 時自動隱藏，登入頁在無任何可用社群登入時不顯示該區塊。
+- v1 不提供密碼、Email OTP 或 TOTP 登入。
 - 公開註冊已開放（owner 決策，2026-07-16），邀請功能保留可用。Google 首次登入需 verified email 直接建帳號；Passkey 註冊仍需先有帳號與已登入 session。
 - 公開註冊的完整安全 gate 尚未全部完成；未完成項目如實列於 `codex.md` §9.2（含 Turnstile、Terms/Privacy、獨立安全審查、DAST 等），不得以文件宣稱取代驗證。
 - 必須支援裝置 session、單一/全部撤銷、全域登出、audit 與管理員停權。

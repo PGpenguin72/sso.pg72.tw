@@ -62,7 +62,7 @@ PG72 目前有多個需要登入的網站，每個服務各自使用 Google OAut
 - 不自行手寫 OAuth、OIDC、JWT 或 WebAuthn 密碼學實作。
 - 不建立跨所有 `*.pg72.tw` 共用的 domain cookie。
 - 不把 Email 當成永久使用者主鍵。
-- 第一階段不支援密碼登入、Email OTP、GitHub 或 Discord。
+- 第一階段不支援密碼登入、Email OTP 或 TOTP。日常登入主力為 Google 與 Passkey；Discord、GitHub、Facebook、Apple、Telegram 社群登入為額外選項（owner 決策，2026-07-16），各 provider 未設定 secret 時自動隱藏。
 - 第一階段不開放第三方開發者動態註冊 OAuth clients。
 - SSO 負責 authentication；各應用程式仍負責自己的業務 authorization。
 - 瀏覽器 SSO 不自動解決 IMAP、SMTP 或其他非 HTTP 協議驗證。

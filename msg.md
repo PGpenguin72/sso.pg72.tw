@@ -57,6 +57,15 @@ Discord / GitHub / Facebook / Apple / Telegram 都會用偽 token 先做好。�
 - 建置中的 apps/sso 前端重構 + 後端(社群登入)+ 文件 三個 agent 仍在跑。
 - 我今晚會持續:合併 apps/sso → 驗證 → 跑 QA 八角色 → 依回饋修改 → 統一設計。進度都會在 agentlog.md,決策卡點都會寫這裡。
 
+### 進度快照(2026-07-16 ~05:00)
+- ✅ 建置全部合併、144 測試過、資安審查無 Critical/High(已修 Telegram CSP/檢舉理由/社群 gating/頭貼上限)。
+- ✅ 已跑 PGID 適用的 3 個 persona(QA 工程師/美術/AI 讀者)。重點:
+  - **美術**:現況是 light 中性風,與 morden_dark(深色+靛藍+環境光)是兩種語言,階段 30 屬「重塑」;最該救登入頁/consent/workspace 外殼。已把設計方向寫進 docs/design-system.md。
+  - **AI 讀者**:SPA 對非 JS 爬蟲隱形——**已補** robots.txt/sitemap.xml/llms.txt/meta/JSON-LD/favicon(commit 26ce122)。仍待:讓公開頁對爬蟲可見(需 SSR/prerender,較大,列後續)。
+  - **QA 工程師**:抓到一個真破版 bug(管理/開發者列表操作區溢出蓋字),已派 agent 修正中,連同 focus/對比/RWD/文件矛盾一起修。
+- ⏸️ 這些修正都在**本地**,未部署(等你 D-部署 核准)。
+- ⏳ 待你回 **D-QA** 後才跑「陌生訪客/教授/站主本人」那三個角色(需確認目標網站)。
+
 ---
 
 ## ✅ 已完成 / 已回覆

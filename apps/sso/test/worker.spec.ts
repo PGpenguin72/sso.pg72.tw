@@ -1,8 +1,13 @@
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 
+import { createAuth } from "../worker/auth";
 import { readRuntimeConfig } from "../worker/config";
-import { createAuthenticatedUser, sha256Base64Url } from "./helpers";
+import {
+  createAuthenticatedUser,
+  createSessionFor,
+  sha256Base64Url,
+} from "./helpers";
 
 const COPY_REFRESH_MIGRATION = "0005_copy_refresh_grant.sql";
 
@@ -17,6 +22,53 @@ async function applyCopyRefreshGrantMigration(): Promise<void> {
   await env.PG72_ID_DB.batch(
     migration.queries.map((query) => env.PG72_ID_DB.prepare(query)),
   );
+}
+
+interface InvitationStateRow {
+  id: string;
+  role: string;
+  consumed_at: string | null;
+  consumed_by_user_id: string | null;
+}
+
+function inviteEmail(
+  adminHeaders: Headers,
+  email: string,
+  role: "admin" | "user" = "user",
+): Promise<Response> {
+  return exports.default.fetch(
+    new Request("http://localhost:5173/api/admin/invitations", {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ email, role }),
+    }),
+  );
+}
+
+/**
+ * Creates the user through Better Auth's internal adapter so the same
+ * databaseHooks run as during a real Google sign-up registration.
+ */
+async function registerInvitedUser(email: string) {
+  const auth = createAuth(env);
+  const ctx = await auth.$context;
+  return ctx.internalAdapter.createUser({
+    name: "Invited User",
+    email,
+    emailVerified: true,
+  });
+}
+
+async function readInvitation(
+  email: string,
+): Promise<InvitationStateRow | null> {
+  return env.PG72_ID_DB.prepare(
+    `SELECT id, role, consumed_at, consumed_by_user_id
+       FROM invitation
+      WHERE email_normalized = ?`,
+  )
+    .bind(email)
+    .first<InvitationStateRow>();
 }
 
 async function createPasskey(userId: string, name: string): Promise<string> {
@@ -1012,6 +1064,118 @@ describe("PGID Worker", () => {
       .bind(userId)
       .first();
     expect(user).toBeNull();
+  });
+
+  it("re-invites and re-registers an email after self-deletion", async () => {
+    const admin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
+    );
+    const email = `${crypto.randomUUID()}@example.com`;
+
+    const firstInvite = await inviteEmail(admin.headers, email);
+    expect(firstInvite.status).toBe(201);
+
+    const firstUser = await registerInvitedUser(email);
+    const consumed = await readInvitation(email);
+    expect(consumed?.consumed_at).not.toBeNull();
+    expect(consumed?.consumed_by_user_id).toBe(firstUser.id);
+
+    // While the account exists, its consumed invitation must not be reissued.
+    const blockedInvite = await inviteEmail(admin.headers, email);
+    expect(blockedInvite.status).toBe(409);
+    expect(await blockedInvite.json()).toEqual({
+      error: "invitation_already_consumed",
+    });
+
+    const session = await createSessionFor(firstUser.id);
+    const deleteResponse = await exports.default.fetch(
+      new Request("http://localhost:5173/delete-user", {
+        method: "POST",
+        headers: session.headers,
+        body: "{}",
+      }),
+    );
+    expect(deleteResponse.status).toBe(200);
+    expect(
+      await env.PG72_ID_DB.prepare("SELECT id FROM user WHERE id = ?")
+        .bind(firstUser.id)
+        .first(),
+    ).toBeNull();
+
+    // Deleting the account releases the consumed invitation entirely.
+    expect(await readInvitation(email)).toBeNull();
+
+    // Without a fresh invitation the email still cannot register.
+    await expect(registerInvitedUser(email)).rejects.toMatchObject({
+      body: { code: "INVITATION_REQUIRED" },
+    });
+
+    const secondInvite = await inviteEmail(admin.headers, email);
+    expect(secondInvite.status).toBe(201);
+
+    const secondUser = await registerInvitedUser(email);
+    expect(secondUser.id).not.toBe(firstUser.id);
+    const reconsumed = await readInvitation(email);
+    expect(reconsumed?.consumed_by_user_id).toBe(secondUser.id);
+  });
+
+  it("re-invites and re-registers an email after admin-side deletion", async () => {
+    const admin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
+    );
+    const email = `${crypto.randomUUID()}@example.com`;
+
+    expect((await inviteEmail(admin.headers, email)).status).toBe(201);
+    const firstUser = await registerInvitedUser(email);
+    expect((await readInvitation(email))?.consumed_by_user_id).toBe(
+      firstUser.id,
+    );
+
+    // Administrators currently remove accounts directly in D1; the schema must
+    // release the consumed invitation regardless of the deletion path.
+    await env.PG72_ID_DB.prepare("DELETE FROM user WHERE id = ?")
+      .bind(firstUser.id)
+      .run();
+    expect(await readInvitation(email)).toBeNull();
+
+    const reinvite = await inviteEmail(admin.headers, email);
+    expect(reinvite.status).toBe(201);
+
+    const secondUser = await registerInvitedUser(email);
+    expect(secondUser.id).not.toBe(firstUser.id);
+    expect((await readInvitation(email))?.consumed_by_user_id).toBe(
+      secondUser.id,
+    );
+  });
+
+  it("refreshes a pending invitation on duplicate invites", async () => {
+    const admin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
+    );
+    const email = `${crypto.randomUUID()}@example.com`;
+
+    const firstInvite = await inviteEmail(admin.headers, email, "user");
+    expect(firstInvite.status).toBe(201);
+    const first = await readInvitation(email);
+
+    const secondInvite = await inviteEmail(admin.headers, email, "admin");
+    expect(secondInvite.status).toBe(201);
+    const second = await readInvitation(email);
+    expect(second?.id).not.toBe(first?.id);
+    expect(second?.role).toBe("admin");
+
+    const rows = await env.PG72_ID_DB.prepare(
+      "SELECT COUNT(*) AS count FROM invitation WHERE email_normalized = ?",
+    )
+      .bind(email)
+      .first<{ count: number }>();
+    expect(rows?.count).toBe(1);
+
+    const user = await registerInvitedUser(email);
+    expect(user.role).toBe("admin");
   });
 
   it("blocks resource indicators while the stable provider lacks grant binding", async () => {

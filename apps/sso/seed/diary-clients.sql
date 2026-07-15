@@ -39,7 +39,7 @@ INSERT INTO oauthClient (
   0,
   'web',
   1,
-  '{"backchannel_logout_uri":"https://diary.pg72.tw/api/auth/backchannel-logout"}'
+  '{"backchannel_logout_uri":"https://diary.pg72.tw/api/auth/backchannel-logout","developer_name":"PG72 官方"}'
 )
 ON CONFLICT(clientId) DO UPDATE SET
   clientSecret = excluded.clientSecret,
@@ -78,7 +78,8 @@ INSERT INTO oauthClient (
   responseTypes,
   public,
   type,
-  requirePKCE
+  requirePKCE,
+  metadata
 ) VALUES (
   '00000000-0000-4000-8000-0000000000d2',
   'pg72-diary-dev',
@@ -98,7 +99,8 @@ INSERT INTO oauthClient (
   '["code"]',
   1,
   'web',
-  1
+  1,
+  '{"developer_name":"PG72 官方"}'
 )
 ON CONFLICT(clientId) DO UPDATE SET
   clientSecret = excluded.clientSecret,
@@ -115,4 +117,5 @@ ON CONFLICT(clientId) DO UPDATE SET
   public = excluded.public,
   type = excluded.type,
   requirePKCE = excluded.requirePKCE,
+  metadata = excluded.metadata,
   updatedAt = datetime('now');

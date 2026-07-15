@@ -17,7 +17,8 @@ INSERT INTO oauthClient (
   responseTypes,
   public,
   type,
-  requirePKCE
+  requirePKCE,
+  metadata
 ) VALUES (
   '00000000-0000-4000-8000-000000000072',
   'pg72-test-rp',
@@ -37,7 +38,8 @@ INSERT INTO oauthClient (
   '["code"]',
   1,
   'web',
-  1
+  1,
+  '{"developer_name":"PG72 官方"}'
 )
 ON CONFLICT(clientId) DO UPDATE SET
   disabled = 0,
@@ -53,4 +55,5 @@ ON CONFLICT(clientId) DO UPDATE SET
   public = excluded.public,
   type = excluded.type,
   requirePKCE = excluded.requirePKCE,
+  metadata = excluded.metadata,
   updatedAt = datetime('now');

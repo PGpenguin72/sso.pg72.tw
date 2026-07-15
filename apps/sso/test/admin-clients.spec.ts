@@ -69,6 +69,7 @@ function confidentialClientBody(clientId: string): Record<string, unknown> {
   return {
     clientId,
     name: "Admin API Test Client",
+    developerName: "PG72 Platform Team",
     redirectUris: [`https://${clientId}.example/callback`],
     scopes: ["openid", "profile", "email", "offline_access"],
     grantTypes: ["authorization_code", "refresh_token"],
@@ -382,6 +383,7 @@ describe("Admin OAuth client management", () => {
       disabled: false,
       hasSecret: true,
       trusted: false,
+      developerName: "PG72 Platform Team",
       tokenEndpointAuthMethod: "client_secret_basic",
       scopes: ["openid", "profile", "email", "offline_access"],
       grantTypes: ["authorization_code", "refresh_token"],
@@ -459,6 +461,7 @@ describe("Admin OAuth client management", () => {
     const { status, payload } = await createClient(headers, {
       clientId,
       name: "Public Test Client",
+      developerName: "PG72 Platform Team",
       redirectUris: ["http://localhost:5174/callback"],
       public: true,
     });
@@ -845,6 +848,200 @@ describe("Admin OAuth client management", () => {
       }),
     );
     expect(repeatedDelete.status).toBe(404);
+  });
+
+  it("requires a developer identity for new clients", async () => {
+    const { headers } = await createAdmin();
+
+    for (const developerName of [undefined, "", "   ", 42, "x".repeat(65)]) {
+      const clientId = `no-developer-${crypto.randomUUID()}`;
+      const body = confidentialClientBody(clientId);
+      if (developerName === undefined) {
+        delete body.developerName;
+      } else {
+        body.developerName = developerName;
+      }
+
+      const { status, payload } = await createClient(headers, body);
+      expect(status).toBe(400);
+      expect(payload).toMatchObject({ error: "invalid_developer_name" });
+      expect(await fetchClientRow(clientId)).toBeNull();
+    }
+  });
+
+  it("rejects trust URLs that are not clean HTTPS", async () => {
+    const { headers } = await createAdmin();
+
+    const cases: Array<[string, string, string]> = [
+      ["privacyPolicyUrl", "http://copy.pg72.tw/privacy", "invalid_privacy_policy_url"],
+      ["privacyPolicyUrl", "https://user:secret@copy.pg72.tw/privacy", "invalid_privacy_policy_url"],
+      ["privacyPolicyUrl", "javascript:alert(1)", "invalid_privacy_policy_url"],
+      ["termsOfServiceUrl", "http://copy.pg72.tw/terms", "invalid_terms_of_service_url"],
+      ["termsOfServiceUrl", "not-a-url", "invalid_terms_of_service_url"],
+    ];
+    for (const [field, value, error] of cases) {
+      const clientId = `bad-trust-url-${crypto.randomUUID()}`;
+      const { status, payload } = await createClient(headers, {
+        ...confidentialClientBody(clientId),
+        [field]: value,
+      });
+      expect(status).toBe(400);
+      expect(payload).toMatchObject({ error });
+      expect(await fetchClientRow(clientId)).toBeNull();
+    }
+  });
+
+  it("stores consent trust metadata on creation", async () => {
+    const { headers } = await createAdmin();
+    const clientId = `trust-create-${crypto.randomUUID()}`;
+
+    const { status, payload } = await createClient(headers, {
+      ...confidentialClientBody(clientId),
+      developerName: "  PG72 Lab  ",
+      privacyPolicyUrl: "https://apps.pg72.tw/privacy",
+      termsOfServiceUrl: "https://apps.pg72.tw/terms",
+    });
+    expect(status).toBe(201);
+    expect(payload.client).toMatchObject({
+      developerName: "PG72 Lab",
+      privacyPolicyUrl: "https://apps.pg72.tw/privacy",
+      termsOfServiceUrl: "https://apps.pg72.tw/terms",
+    });
+
+    const row = await env.PG72_ID_DB.prepare(
+      "SELECT tos, policy, metadata FROM oauthClient WHERE clientId = ?",
+    )
+      .bind(clientId)
+      .first<{ tos: string; policy: string; metadata: string }>();
+    expect(row).toMatchObject({
+      tos: "https://apps.pg72.tw/terms",
+      policy: "https://apps.pg72.tw/privacy",
+    });
+    expect(JSON.parse(row?.metadata ?? "{}")).toEqual({
+      developer_name: "PG72 Lab",
+    });
+
+    const listResponse = await exports.default.fetch(
+      new Request(CLIENTS_URL, { headers }),
+    );
+    const listed = ((await listResponse.json()) as {
+      clients: Array<{
+        clientId: string;
+        developerName: string | null;
+        privacyPolicyUrl: string | null;
+        termsOfServiceUrl: string | null;
+      }>;
+    }).clients.find((client) => client.clientId === clientId);
+    expect(listed).toMatchObject({
+      developerName: "PG72 Lab",
+      privacyPolicyUrl: "https://apps.pg72.tw/privacy",
+      termsOfServiceUrl: "https://apps.pg72.tw/terms",
+    });
+  });
+
+  it("edits trust fields while preserving unrelated client metadata", async () => {
+    const { headers, userId } = await createAdmin();
+    const clientId = `trust-edit-${crypto.randomUUID()}`;
+
+    const created = await createClient(headers, confidentialClientBody(clientId));
+    expect(created.status).toBe(201);
+
+    // Simulate a client that also stores provider-level metadata, like the
+    // diary client's back-channel logout URI.
+    await env.PG72_ID_DB.prepare(
+      `UPDATE oauthClient
+          SET metadata = json_set(metadata, '$.backchannel_logout_uri',
+                                  'https://diary.pg72.tw/api/auth/backchannel-logout')
+        WHERE clientId = ?`,
+    )
+      .bind(clientId)
+      .run();
+
+    const patchResponse = await exports.default.fetch(
+      new Request(`${CLIENTS_URL}/${clientId}`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({
+          developerName: "PG72 Diary Team",
+          privacyPolicyUrl: "https://diary.pg72.tw/privacy",
+          termsOfServiceUrl: null,
+        }),
+      }),
+    );
+    expect(patchResponse.status).toBe(200);
+    expect(await patchResponse.json()).toMatchObject({
+      clientId,
+      developerName: "PG72 Diary Team",
+      privacyPolicyUrl: "https://diary.pg72.tw/privacy",
+      termsOfServiceUrl: null,
+    });
+
+    const row = await env.PG72_ID_DB.prepare(
+      "SELECT tos, policy, metadata FROM oauthClient WHERE clientId = ?",
+    )
+      .bind(clientId)
+      .first<{ tos: string | null; policy: string | null; metadata: string }>();
+    expect(row?.tos).toBeNull();
+    expect(row?.policy).toBe("https://diary.pg72.tw/privacy");
+    expect(JSON.parse(row?.metadata ?? "{}")).toEqual({
+      developer_name: "PG72 Diary Team",
+      backchannel_logout_uri: "https://diary.pg72.tw/api/auth/backchannel-logout",
+    });
+
+    const invalidUpdate = await exports.default.fetch(
+      new Request(`${CLIENTS_URL}/${clientId}`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ developerName: "" }),
+      }),
+    );
+    expect(invalidUpdate.status).toBe(400);
+    expect(await invalidUpdate.json()).toMatchObject({
+      error: "invalid_developer_name",
+    });
+
+    const crossOriginHeaders = new Headers(headers);
+    crossOriginHeaders.set("Origin", "https://attacker.example");
+    const crossOrigin = await exports.default.fetch(
+      new Request(`${CLIENTS_URL}/${clientId}`, {
+        method: "PATCH",
+        headers: crossOriginHeaders,
+        body: JSON.stringify({ developerName: "Attacker" }),
+      }),
+    );
+    expect(crossOrigin.status).toBe(403);
+
+    const audit = await env.PG72_ID_DB.prepare(
+      `SELECT outcome, subject_id FROM audit_event
+        WHERE event_type = 'oauth_client.trust_updated' AND client_id = ?`,
+    )
+      .bind(clientId)
+      .first<{ outcome: string; subject_id: string }>();
+    expect(audit).toEqual({ outcome: "success", subject_id: userId });
+  });
+
+  it("refuses trust edits on trusted or unknown clients", async () => {
+    const { headers } = await createAdmin();
+
+    const trusted = await exports.default.fetch(
+      new Request(`${CLIENTS_URL}/pg72-test-rp`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ developerName: "Attacker" }),
+      }),
+    );
+    expect(trusted.status).toBe(409);
+    expect(await trusted.json()).toEqual({ error: "trusted_client_locked" });
+
+    const missing = await exports.default.fetch(
+      new Request(`${CLIENTS_URL}/does-not-exist-${Date.now()}`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ developerName: "Nobody" }),
+      }),
+    );
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: "client_not_found" });
   });
 
   it("refuses to mutate the cached trusted test RP", async () => {

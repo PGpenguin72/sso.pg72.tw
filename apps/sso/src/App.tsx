@@ -1,7 +1,16 @@
 import {
   Activity,
+  AlertTriangle,
+  ArrowLeft,
+  BookOpen,
   Check,
+  Code2,
+  ExternalLink,
+  FileText,
+  Flag,
   Globe,
+  Image as ImageIcon,
+  ImagePlus,
   KeyRound,
   Laptop,
   LogIn,
@@ -13,15 +22,20 @@ import {
   Plus,
   RefreshCw,
   Search,
+  ShieldAlert,
   ShieldCheck,
   ShieldOff,
   Smartphone,
+  Sparkles,
   Sun,
   Trash2,
+  Upload,
   UserRound,
+  Users,
   X,
 } from "lucide-react";
 import type { Passkey } from "@better-auth/passkey";
+import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { authClient } from "./auth-client";
@@ -31,17 +45,6 @@ interface DeviceSession {
   token: string;
   updatedAt: string | Date;
   userAgent?: string | null;
-}
-
-interface AuditEvent {
-  id: string;
-  event_type: string;
-  outcome: "denied" | "failure" | "success";
-  occurred_at: string;
-}
-
-interface AuditResponse {
-  events: AuditEvent[];
 }
 
 interface ConsentClientInfo {
@@ -150,12 +153,62 @@ interface AdminClientsResponse {
   clients: AdminOAuthClient[];
 }
 
+type AvatarSource = "generated" | "google" | "upload";
+
 interface AccountProfileResponse {
   name: string;
   image: string | null;
-  avatarSource: "generated" | "google";
+  avatarSource: AvatarSource;
   generatedAvatarUrl: string;
   googleAvatarUrl: string | null;
+  /** URL of a self-hosted uploaded avatar, when one exists. */
+  uploadedAvatarUrl?: string | null;
+}
+
+interface SecurityActivityEvent {
+  id: string;
+  type: string;
+  at: string;
+  summary: string;
+  provider?: string | null;
+}
+
+interface SecurityActivityResponse {
+  events: SecurityActivityEvent[];
+  nextCursor?: string | null;
+}
+
+type ReportReason = "abuse" | "impersonation" | "other" | "phishing";
+
+const REPORT_REASONS: { id: ReportReason; label: string }[] = [
+  { id: "impersonation", label: "冒名或假冒官方" },
+  { id: "phishing", label: "釣魚或竊取帳號" },
+  { id: "abuse", label: "濫用權限或過度索取資料" },
+  { id: "other", label: "其他問題" },
+];
+
+/**
+ * Human labels for security-activity event types. Unknown types fall back to
+ * the raw string so a new Worker-side event never renders blank.
+ */
+const SECURITY_ACTIVITY_LABELS: Record<string, string> = {
+  "account.deleted": "帳號刪除",
+  "login.passkey": "以 Passkey 登入",
+  "login.social": "社群帳號登入",
+  "login.success": "登入成功",
+  "oauth.authorized": "授權應用程式",
+  "oauth.consent": "同意應用程式存取",
+  "oauth.revoked": "撤銷應用程式授權",
+  "passkey.added": "新增 Passkey",
+  "passkey.removed": "刪除 Passkey",
+  "passkey.renamed": "重新命名 Passkey",
+  "profile.updated": "更新個人資料",
+  "session.revoked": "撤銷裝置 session",
+  "session.revoked_all": "登出其他裝置",
+};
+
+function securityActivityLabel(type: string): string {
+  return SECURITY_ACTIVITY_LABELS[type] ?? type;
 }
 
 interface LoginMethodProvider {
@@ -220,9 +273,34 @@ function adminClientErrorMessage(code: unknown, fallback: string): string {
     : fallback;
 }
 
-type Tab = "account" | "security" | "activity";
+type Tab =
+  | "account"
+  | "security"
+  | "activity"
+  | "apps"
+  | "developer"
+  | "admin";
 type Theme = "dark" | "light";
 type LoadState = "error" | "loading" | "ready";
+
+const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
+const ACCEPTED_AVATAR_TYPES = ["image/png", "image/jpeg", "image/webp"];
+const ACCEPTED_AVATAR_HINT = "支援 PNG、JPG 或 WebP，檔案上限 2 MB。";
+
+/** Developer resource links; wiki/API handbook are produced by the docs agent. */
+const DEVELOPER_RESOURCES: { label: string; description: string; href: string }[] =
+  [
+    {
+      label: "OAuth / OIDC 串接手冊",
+      description: "Authorization Code + PKCE、scopes 與 token 交換說明。",
+      href: "https://wiki.sso.pg72.tw/oauth",
+    },
+    {
+      label: "PGID 開發者 Wiki",
+      description: "client 設定、redirect URI 規範與最佳實務。",
+      href: "https://wiki.sso.pg72.tw",
+    },
+  ];
 
 const THEME_STORAGE_KEY = "pg72_theme";
 
@@ -335,24 +413,41 @@ function ThemeToggle({ floating = false }: { floating?: boolean }) {
   );
 }
 
+/**
+ * Provider id + label for the client's `signIn.social`. `telegram` is not one of
+ * Better Auth's built-in social providers, so the id is cast at the call site;
+ * whether it actually works depends on the Worker-side provider configuration.
+ */
+type SocialProviderId = Parameters<typeof authClient.signIn.social>[0]["provider"];
+
+const SOCIAL_SIGN_IN_PROVIDERS: { id: string; label: string }[] = [
+  { id: "discord", label: "Discord" },
+  { id: "github", label: "GitHub" },
+  { id: "facebook", label: "Facebook" },
+  { id: "apple", label: "Apple" },
+  { id: "telegram", label: "Telegram" },
+];
+
 function SignInView({ pending }: { pending: boolean }) {
-  const [busy, setBusy] = useState<"google" | "passkey" | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const query = new URLSearchParams(window.location.search);
   const oauthQuery = query.has("client_id") && query.has("sig");
 
-  const googleSignIn = async () => {
-    setBusy("google");
+  const socialSignIn = async (provider: string, label: string) => {
+    setBusy(provider);
     setError(null);
     const result = await authClient.signIn.social({
-      provider: "google",
+      provider: provider as SocialProviderId,
       callbackURL: window.location.href,
     });
     if (result?.error) {
-      setError(messageFrom(result.error, "Google sign-in failed."));
+      setError(messageFrom(result.error, `${label} 登入失敗，請稍後再試。`));
       setBusy(null);
     }
   };
+
+  const googleSignIn = () => void socialSignIn("google", "Google");
 
   const passkeySignIn = async () => {
     setBusy("passkey");
@@ -372,7 +467,7 @@ function SignInView({ pending }: { pending: boolean }) {
           <Brand />
           <span className="eyebrow">Secure account</span>
           <h1>{oauthQuery ? "繼續登入" : "登入 PGID"}</h1>
-          <p>使用你的 Google 帳號或已註冊的 Passkey。</p>
+          <p>使用 Google、Passkey 或其他社群帳號登入。</p>
         </div>
 
         <div className="auth-actions" aria-busy={pending || busy !== null}>
@@ -396,10 +491,29 @@ function SignInView({ pending }: { pending: boolean }) {
           </button>
         </div>
 
+        <div className="auth-divider" role="separator">
+          <span>或使用其他帳號</span>
+        </div>
+
+        <div className="social-grid" aria-busy={pending || busy !== null}>
+          {SOCIAL_SIGN_IN_PROVIDERS.map((provider) => (
+            <button
+              key={provider.id}
+              className="button button-secondary"
+              type="button"
+              disabled={pending || busy !== null}
+              onClick={() => void socialSignIn(provider.id, provider.label)}
+            >
+              {busy === provider.id ? "正在連線..." : provider.label}
+            </button>
+          ))}
+        </div>
+
         {error ? <div className="notice notice-error">{error}</div> : null}
         <p className="invite-note">
           <ShieldCheck aria-hidden="true" />
-          目前採邀請制
+          登入即表示你同意
+          <a href="/tos">服務條款</a>與<a href="/pp">隱私權政策</a>
         </p>
       </main>
     </>
@@ -482,15 +596,18 @@ function ConsentView({
   clientId,
   userEmail,
   userName,
+  userImage,
 }: {
   clientId: string | null;
   userEmail: string;
   userName: string;
+  userImage: string | null;
 }) {
   const [busy, setBusy] = useState<"allow" | "deny" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [client, setClient] = useState<ConsentClientInfo | null>(null);
   const [clientLoading, setClientLoading] = useState(true);
+  const [reportOpen, setReportOpen] = useState(false);
   const scope =
     new URLSearchParams(window.location.search).get("scope") ?? "openid";
   // Only the scopes requested by this authorization request are listed. The
@@ -576,88 +693,137 @@ function ConsentView({
     <>
       <ThemeToggle floating />
       <main className="consent-shell" aria-busy={busy !== null || clientLoading}>
-        <Brand />
-        <div className="consent-heading">
-          <span className="app-glyph">
-            <MonitorSmartphone aria-hidden="true" />
-          </span>
-          <span className="eyebrow">應用程式授權</span>
-          <h1>允許 {appName} 存取帳號？</h1>
-          {client ? (
-            <p className="consent-developer">
-              開發者：{client.developerName ?? DEVELOPER_NAME_FALLBACK}
-            </p>
-          ) : null}
+        <div className="consent-brandbar">
+          <Brand />
         </div>
-        {client && client.redirectHosts.length > 0 ? (
-          <p className="consent-domain">
-            <Globe aria-hidden="true" />
-            <span>
-              授權後將前往{" "}
-              <strong>{client.redirectHosts.join("、")}</strong>
-              。這是該應用註冊時綁定的網域，請確認它是你信任的網站。
+        <section className="consent-card">
+          <header className="consent-app">
+            <span className="consent-app-glyph">
+              <MonitorSmartphone aria-hidden="true" />
             </span>
-          </p>
-        ) : null}
-        <h2 className="scope-heading">{appName} 將能夠：</h2>
-        <ul className="scope-list">
-          {scopes.map((item) => {
-            const details = SCOPE_DETAILS[item] ?? {
-              label: item,
-              description: "使用這項由應用程式要求的權限。",
-            };
-            return (
-              <li key={item}>
-                {scopeIcon(item)}
-                <span className="scope-copy">
-                  <strong>{details.label}</strong>
-                  <span>{details.description}</span>
-                  {item === "offline_access" ? (
-                    <span className="scope-offline-flag">
-                      {OFFLINE_ACCESS_NOTICE}
-                    </span>
-                  ) : null}
+            <div className="consent-app-meta">
+              <span className="eyebrow">應用程式授權</span>
+              <h1>{appName} 想要存取你的 PGID 帳號</h1>
+              {client ? (
+                <p className="consent-developer">
+                  由 <strong>{client.developerName ?? DEVELOPER_NAME_FALLBACK}</strong> 提供
+                </p>
+              ) : null}
+            </div>
+          </header>
+
+          {client && client.redirectHosts.length > 0 ? (
+            <div className="consent-domain">
+              <Globe aria-hidden="true" />
+              <div className="consent-domain-copy">
+                <span className="consent-domain-label">授權後將前往</span>
+                <strong className="consent-domain-value">
+                  {client.redirectHosts.join("、")}
+                </strong>
+                <span className="consent-domain-hint">
+                  這是此應用註冊時綁定的網域，請確認它是你信任的網站。
                 </span>
-              </li>
-            );
-          })}
-        </ul>
-        <dl className="trust-links">
-          <TrustLink label="服務條款" url={client?.termsOfServiceUrl ?? null} />
-          <TrustLink
-            label="隱私權政策"
-            url={client?.privacyPolicyUrl ?? null}
-          />
-        </dl>
-        <p className="consent-account">
-          將以 <strong>{userName}</strong>（{userEmail}）的身分繼續
-        </p>
-        {error ? (
-          <div className="notice notice-error" role="alert">
-            {error}
+              </div>
+            </div>
+          ) : null}
+
+          <div className="consent-account-card">
+            {userImage ? (
+              <img
+                className="consent-account-avatar"
+                src={userImage}
+                alt=""
+                referrerPolicy="no-referrer"
+              />
+            ) : (
+              <span className="consent-account-avatar avatar-fallback">
+                <UserRound aria-hidden="true" />
+              </span>
+            )}
+            <div className="consent-account-meta">
+              <span className="consent-account-label">目前登入身分</span>
+              <strong>{userName}</strong>
+              <span className="consent-account-email">{userEmail}</span>
+            </div>
           </div>
-        ) : null}
-        <div className="consent-actions">
+
+          <h2 className="scope-heading">{appName} 將能夠存取：</h2>
+          <ul className="scope-list">
+            {scopes.map((item) => {
+              const details = SCOPE_DETAILS[item] ?? {
+                label: item,
+                description: "使用這項由應用程式要求的權限。",
+              };
+              return (
+                <li key={item}>
+                  {scopeIcon(item)}
+                  <span className="scope-copy">
+                    <strong>{details.label}</strong>
+                    <span>{details.description}</span>
+                    {item === "offline_access" ? (
+                      <span className="scope-offline-flag">
+                        {OFFLINE_ACCESS_NOTICE}
+                      </span>
+                    ) : null}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+
+          <dl className="trust-links">
+            <TrustLink label="服務條款" url={client?.termsOfServiceUrl ?? null} />
+            <TrustLink
+              label="隱私權政策"
+              url={client?.privacyPolicyUrl ?? null}
+            />
+          </dl>
+
+          {error ? (
+            <div className="notice notice-error" role="alert">
+              {error}
+            </div>
+          ) : null}
+
+          <div className="consent-actions">
+            <button
+              type="button"
+              className="button button-secondary"
+              disabled={busy !== null || clientLoading || !clientId}
+              onClick={() => void decide(false)}
+            >
+              <X aria-hidden="true" />
+              {busy === "deny" ? "返回中..." : "取消"}
+            </button>
+            <button
+              type="button"
+              className="button button-primary"
+              disabled={busy !== null || clientLoading || !client}
+              onClick={() => void decide(true)}
+            >
+              <Check aria-hidden="true" />
+              {busy === "allow" ? "返回中..." : "允許"}
+            </button>
+          </div>
+
           <button
             type="button"
-            className="button button-secondary"
-            disabled={busy !== null || clientLoading || !clientId}
-            onClick={() => void decide(false)}
+            className="consent-report"
+            disabled={!clientId}
+            onClick={() => setReportOpen(true)}
           >
-            <X aria-hidden="true" />
-            {busy === "deny" ? "返回中..." : "取消"}
+            <ShieldAlert aria-hidden="true" />
+            這個應用有問題？檢舉或標記不信任
           </button>
-          <button
-            type="button"
-            className="button button-primary"
-            disabled={busy !== null || clientLoading || !client}
-            onClick={() => void decide(true)}
-          >
-            <Check aria-hidden="true" />
-            {busy === "allow" ? "返回中..." : "允許"}
-          </button>
-        </div>
+        </section>
       </main>
+      {reportOpen && clientId ? (
+        <ReportDialog
+          clientId={clientId}
+          clientName={appName}
+          onClose={() => setReportOpen(false)}
+        />
+      ) : null}
     </>
   );
 }
@@ -910,12 +1076,650 @@ function DeletePasskeyDialog({
   );
 }
 
+function ReportDialog({
+  clientId,
+  clientName,
+  onClose,
+}: {
+  clientId: string;
+  clientName: string;
+  onClose: () => void;
+}) {
+  const [reason, setReason] = useState<ReportReason>("impersonation");
+  const [detail, setDetail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+  const panelRef = useRef<HTMLElement>(null);
+  const busyRef = useRef(busy);
+
+  useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
+
+  useEffect(() => {
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busyRef.current) {
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab" || !panelRef.current) return;
+      const focusable = Array.from(
+        panelRef.current.querySelectorAll<HTMLElement>(
+          'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (!first || !last) return;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+      previousFocus?.focus();
+    };
+  }, [onClose]);
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/oauth/report", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientId, reason, detail: detail.trim() }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        setError(
+          payload.error === "rate_limited"
+            ? "檢舉太頻繁，請稍後再試。"
+            : "無法送出檢舉，請稍後再試。",
+        );
+        return;
+      }
+      setDone(true);
+    } catch {
+      setError("網路連線失敗，請稍後再試。");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className="dialog-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) onClose();
+      }}
+    >
+      <section
+        ref={panelRef}
+        className="dialog-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="report-title"
+        aria-busy={busy}
+      >
+        <div className="dialog-icon warning-icon">
+          <Flag aria-hidden="true" />
+        </div>
+        {done ? (
+          <>
+            <h2 id="report-title">檢舉已受理</h2>
+            <p>
+              感謝你的回報。我們已記錄對 <strong>{clientName}</strong>{" "}
+              的檢舉，團隊會盡快檢視。你隨時可以在「應用程式」頁撤銷它的授權。
+            </p>
+            <div className="dialog-actions">
+              <button
+                type="button"
+                className="button button-primary"
+                onClick={onClose}
+              >
+                完成
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <h2 id="report-title">檢舉「{clientName}」</h2>
+            <p>
+              若你認為這個應用程式在冒名、釣魚或濫用你的資料，請告訴我們原因。
+            </p>
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (!busy) void submit();
+              }}
+            >
+              <fieldset className="report-reasons" disabled={busy}>
+                <legend>原因</legend>
+                {REPORT_REASONS.map((item) => (
+                  <label key={item.id} className="report-reason">
+                    <input
+                      type="radio"
+                      name="report-reason"
+                      value={item.id}
+                      checked={reason === item.id}
+                      onChange={() => setReason(item.id)}
+                    />
+                    <span>{item.label}</span>
+                  </label>
+                ))}
+              </fieldset>
+              <label className="report-detail">
+                <span>補充說明（選填）</span>
+                <textarea
+                  rows={3}
+                  maxLength={1000}
+                  value={detail}
+                  disabled={busy}
+                  onChange={(event) => setDetail(event.target.value)}
+                  placeholder="描述你觀察到的問題，例如假冒的網域或要求的異常權限。"
+                />
+              </label>
+              {error ? (
+                <div className="dialog-error" role="alert">
+                  {error}
+                </div>
+              ) : null}
+              <div className="dialog-actions">
+                <button
+                  type="button"
+                  className="button button-secondary"
+                  disabled={busy}
+                  onClick={onClose}
+                >
+                  取消
+                </button>
+                <button
+                  type="submit"
+                  className="button button-danger"
+                  disabled={busy}
+                >
+                  <Flag aria-hidden="true" />
+                  {busy ? "送出中..." : "送出檢舉"}
+                </button>
+              </div>
+            </form>
+          </>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function PublicPageShell({
+  title,
+  lead,
+  icon,
+  children,
+}: {
+  title: string;
+  lead: string;
+  icon: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <>
+      <ThemeToggle floating />
+      <div className="public-shell">
+        <header className="public-header">
+          <Brand />
+          <a className="public-back" href="/">
+            <ArrowLeft aria-hidden="true" />
+            回到 PGID
+          </a>
+        </header>
+        <main className="public-main">
+          <div className="public-hero">
+            <span className="public-hero-icon">{icon}</span>
+            <h1>{title}</h1>
+            <p>{lead}</p>
+          </div>
+          <div className="public-body">{children}</div>
+        </main>
+        <footer className="public-footer">
+          <span>© {new Date().getFullYear()} PG72</span>
+          <span>
+            聯繫我們：<a href="mailto:contact@pg72.tw">contact@pg72.tw</a>
+          </span>
+        </footer>
+      </div>
+    </>
+  );
+}
+
+function DraftNotice() {
+  return (
+    <p className="public-placeholder">
+      <AlertTriangle aria-hidden="true" />
+      本文為草稿，尚待正式複核後生效；正式生效日期將於公開上線時填入。
+    </p>
+  );
+}
+
+function LegalMeta() {
+  return (
+    <p className="public-meta">
+      生效日期：待定（公開上線時填入） · 最後更新：2026-07-16
+    </p>
+  );
+}
+
+function TermsContent() {
+  return (
+    <>
+      <LegalMeta />
+      <DraftNotice />
+      <section className="public-section public-intro">
+        <p>
+          歡迎使用 PGID（以下稱「本服務」），由 PG72（以下稱「我們」）提供，網址為{" "}
+          <span className="mono">https://sso.pg72.tw</span>。PGID 是 PG72
+          自建的身分認證服務（Identity Provider），讓你以單一身分登入 PG72
+          旗下與已授權的第三方應用程式。
+        </p>
+        <p>使用本服務即表示你同意本條款。若你不同意，請勿使用本服務。</p>
+      </section>
+
+      <section className="public-section">
+        <h2>1. 服務內容</h2>
+        <p>本服務提供：</p>
+        <ul className="public-list">
+          <li>
+            以 Google、Passkey（無密碼）以及其他支援的社群帳號（如 Discord、GitHub、Facebook、Apple、Telegram）登入；
+          </li>
+          <li>
+            以 OAuth 2.1 / OpenID Connect 授權第三方應用程式存取你的基本身分資訊；
+          </li>
+          <li>
+            帳號中心：管理個人資料、登入方式、已授權應用程式、裝置工作階段（session）與安全活動記錄。
+          </li>
+        </ul>
+        <p>
+          本服務<strong>不儲存你的密碼</strong>；登入以 OAuth 提供者與 Passkey
+          憑證為準。
+        </p>
+      </section>
+
+      <section className="public-section">
+        <h2>2. 帳號資格與註冊</h2>
+        <ul className="public-list">
+          <li>本服務初期採<strong>邀請制</strong>，未來可能開放公開註冊。</li>
+          <li>你必須提供正確資訊，並就你帳號下的一切活動負責。</li>
+          <li>
+            你必須妥善保管你的登入方式（Passkey 裝置、社群帳號）。若懷疑帳號遭盜用，請立即透過第
+            10 條的聯絡方式通知我們。
+          </li>
+          <li>
+            我們保留於你違反本條款、或為保護服務與其他使用者安全時，
+            <strong>停權或終止</strong>帳號的權利。
+          </li>
+        </ul>
+      </section>
+
+      <section className="public-section">
+        <h2>3. 可接受使用</h2>
+        <p>你同意不會：</p>
+        <ul className="public-list">
+          <li>未經授權存取他人帳號或資料；</li>
+          <li>干擾、破壞、逆向或試圖繞過本服務的安全機制；</li>
+          <li>以自動化方式濫用註冊、登入或授權端點；</li>
+          <li>
+            冒充他人或 PG72，或以誤導方式註冊 OAuth
+            應用程式（例如以近似官方的名稱誘導使用者授權）；
+          </li>
+          <li>將本服務用於任何違法用途。</li>
+        </ul>
+        <p>
+          我們提供 OAuth 應用程式的<strong>檢舉</strong>機制；若你認為某應用程式不受信任或濫用授權，可於帳號中心檢舉，我們會審查並得停用該應用。
+        </p>
+      </section>
+
+      <section className="public-section">
+        <h2>4. 第三方登入與應用程式</h2>
+        <ul className="public-list">
+          <li>你透過第三方（如 Google）登入時，亦受該第三方之條款約束。</li>
+          <li>
+            你可授權第三方應用程式存取你的基本身分（依你於同意畫面核可的範圍）。你可隨時於帳號中心撤銷授權。
+          </li>
+          <li>
+            對於第三方應用程式如何使用你的資料，我們不負責；請於授權前檢視該應用的開發者、導向網域與請求權限。
+          </li>
+        </ul>
+      </section>
+
+      <section className="public-section">
+        <h2>5. 你的內容與資料</h2>
+        <p>
+          你對本服務的資料處理，適用我們的<a href="/pp">隱私權政策</a>。使用本服務即表示你亦同意該政策。
+        </p>
+      </section>
+
+      <section className="public-section">
+        <h2>6. 服務可用性與變更</h2>
+        <ul className="public-list">
+          <li>本服務目前處於早期階段，可能不定時維護、變更或中斷，恕不另行個別通知。</li>
+          <li>我們可能新增、修改或移除功能。重大變更會盡合理努力公告。</li>
+        </ul>
+      </section>
+
+      <section className="public-section">
+        <h2>7. 免責聲明</h2>
+        <p>
+          本服務按「現狀」與「現有」提供，不就可用性、無誤、安全性或適合特定用途作任何明示或默示保證。你理解自建身分服務仍在演進中，並自行承擔使用風險。
+        </p>
+      </section>
+
+      <section className="public-section">
+        <h2>8. 責任限制</h2>
+        <p>
+          在法律允許的最大範圍內，對於因使用或無法使用本服務所生之任何間接、附帶、衍生性損害，我們不負賠償責任。
+        </p>
+      </section>
+
+      <section className="public-section">
+        <h2>9. 條款修改</h2>
+        <p>
+          我們可能不時修訂本條款。修訂後將更新本頁「最後更新」日期；重大變更會另行公告。於變更生效後繼續使用本服務，即視為接受修訂後條款。
+        </p>
+      </section>
+
+      <section className="public-section">
+        <h2>10. 聯絡我們</h2>
+        <p>
+          有任何問題、帳號安全通報或條款疑義，請聯絡：
+          <br />
+          <a href="mailto:contact@pg72.tw">contact@pg72.tw</a>
+        </p>
+      </section>
+    </>
+  );
+}
+
+function PrivacyContent() {
+  return (
+    <>
+      <LegalMeta />
+      <DraftNotice />
+      <section className="public-section public-intro">
+        <p>
+          本政策說明 PGID（<span className="mono">https://sso.pg72.tw</span>，由 PG72
+          提供）如何蒐集、使用與保護你的個人資料。我們以「最小蒐集、集中控制、可撤銷」為原則設計本服務。
+        </p>
+      </section>
+
+      <section className="public-section">
+        <h2>1. 我們蒐集的資料</h2>
+        <p>
+          <strong>你登入時，依登入方式取得：</strong>
+        </p>
+        <ul className="public-list">
+          <li>
+            <strong>不可變使用者識別碼（sub）</strong>：我們以此穩定識別你，而非以 Email。
+          </li>
+          <li>
+            <strong>Email 與是否已驗證</strong>：用於帳號識別與通知；僅接受已驗證的 Email。
+          </li>
+          <li>
+            <strong>顯示名稱與頭像</strong>：來自你的登入提供者，或你自行設定／上傳。
+          </li>
+          <li>
+            <strong>登入提供者資訊</strong>：你連結的 Google 或其他社群帳號的提供者識別。
+          </li>
+          <li>
+            <strong>Passkey 憑證公開資訊</strong>：Passkey 的公鑰與中繼資料（我們<strong>不持有</strong>你的私鑰或生物特徵）。
+          </li>
+        </ul>
+        <p>
+          <strong>你使用服務時，我們記錄：</strong>
+        </p>
+        <ul className="public-list">
+          <li>
+            <strong>工作階段（session）資料</strong>：host-only cookie 對應的 session
+            識別、建立／到期時間。
+          </li>
+          <li>
+            <strong>安全與稽核事件</strong>：登入、授權、撤銷授權、session
+            撤銷、個人資料與登入方式變更等。為安全目的，我們可能記錄<strong>遮蔽後的 IP</strong>
+            與粗略的裝置／瀏覽器類型；我們<strong>不會</strong>在稽核記錄中儲存完整 Email、存取權杖或其他機密。
+          </li>
+          <li>
+            <strong>OAuth 授權記錄</strong>：你授權了哪些應用程式、核可的權限範圍。
+          </li>
+        </ul>
+        <p>
+          <strong>我們不蒐集也不儲存：</strong>
+        </p>
+        <ul className="public-list">
+          <li>你的密碼（本服務無密碼登入）；</li>
+          <li>你的 Passkey 私鑰或生物特徵；</li>
+          <li>第三方應用程式在其自身系統內對你的資料處理。</li>
+        </ul>
+      </section>
+
+      <section className="public-section">
+        <h2>2. 我們如何使用資料</h2>
+        <ul className="public-list">
+          <li>提供登入與授權功能、維持你的工作階段；</li>
+          <li>讓你管理帳號、登入方式與已授權應用程式；</li>
+          <li>保障帳號與服務安全（偵測濫用、節流、稽核、撤銷）；</li>
+          <li>在必要時與你聯繫（安全通知、重大服務變更）。</li>
+        </ul>
+        <p>
+          我們<strong>不會</strong>販售你的個人資料。
+        </p>
+      </section>
+
+      <section className="public-section">
+        <h2>3. Cookie 與工作階段</h2>
+        <ul className="public-list">
+          <li>
+            我們使用<strong>必要的</strong> host-only、<span className="mono">Secure</span>、
+            <span className="mono">HttpOnly</span> cookie 維持登入狀態，不跨子網域共用。
+          </li>
+          <li>我們不使用第三方廣告追蹤 cookie。</li>
+          <li>登入頁可能載入來自你所選登入提供者（如 Google）的資源以完成登入。</li>
+        </ul>
+      </section>
+
+      <section className="public-section">
+        <h2>4. 第三方登入與應用程式</h2>
+        <ul className="public-list">
+          <li>你以第三方（Google、社群帳號）登入時，該提供者會依其隱私政策處理你的資料。</li>
+          <li>
+            你授權的第三方應用程式，會依你核可的範圍取得你的基本身分（如 sub、名稱、Email）；這些應用對你資料的後續使用受其自身隱私政策約束。你可隨時於帳號中心撤銷授權。
+          </li>
+        </ul>
+      </section>
+
+      <section className="public-section">
+        <h2>5. 資料分享</h2>
+        <p>除下列情形外，我們不對外分享你的個人資料：</p>
+        <ul className="public-list">
+          <li>
+            <strong>經你授權</strong>：你明確授權的第三方應用程式，取得你核可範圍內的身分資訊；
+          </li>
+          <li>
+            <strong>法律要求</strong>：於法律要求或為保護服務、使用者與公眾安全之必要範圍內；
+          </li>
+          <li>
+            <strong>服務營運</strong>：我們自行掌控的基礎設施（Cloudflare Workers／D1
+            等）用於運行本服務；我們不將身分資料委外作行銷用途。
+          </li>
+        </ul>
+      </section>
+
+      <section className="public-section">
+        <h2>6. 資料保留</h2>
+        <ul className="public-list">
+          <li>帳號資料於帳號存續期間保留。</li>
+          <li>
+            你可於帳號中心<strong>自助刪除帳號</strong>（需近期重新驗證）；刪除後，你的帳號記錄與其連結身分會被移除，已授權應用程式將無法再以你的身分取得資料。
+          </li>
+          <li>為安全與防濫用目的，部分稽核／安全事件可能在去識別化或遮蔽後保留一段合理期間。</li>
+        </ul>
+      </section>
+
+      <section className="public-section">
+        <h2>7. 你的權利</h2>
+        <p>你可以：</p>
+        <ul className="public-list">
+          <li>檢視與更新你的個人資料（名稱、頭像）；</li>
+          <li>檢視並撤銷已授權的應用程式與其權杖；</li>
+          <li>檢視與撤銷裝置工作階段（單一或全部）；</li>
+          <li>管理你的 Passkey 與登入方式；</li>
+          <li>查看你的個人安全活動記錄；</li>
+          <li>刪除你的帳號。</li>
+        </ul>
+        <p>如需行使上述以外的權利或有疑問，請透過第 9 條聯絡我們。</p>
+      </section>
+
+      <section className="public-section">
+        <h2>8. 資料安全</h2>
+        <ul className="public-list">
+          <li>傳輸全程 HTTPS；嚴格的安全標頭與內容安全政策（CSP）。</li>
+          <li>敏感的提供者權杖於儲存時加密；session 以中央可撤銷機制管理。</li>
+          <li>
+            Passkey 綁定於 <span className="mono">sso.pg72.tw</span>，採用 WebAuthn。
+          </li>
+          <li>我們持續強化安全控制；公開註冊開放前會進行額外的安全審查。</li>
+        </ul>
+        <p>
+          沒有任何系統能保證絕對安全；我們會盡合理努力保護你的資料，並在發生重大事件時依法通知。
+        </p>
+      </section>
+
+      <section className="public-section">
+        <h2>9. 聯絡我們</h2>
+        <p>
+          有關隱私的任何問題、資料查詢或刪除請求，請聯絡：
+          <br />
+          <a href="mailto:contact@pg72.tw">contact@pg72.tw</a>
+        </p>
+      </section>
+
+      <section className="public-section">
+        <h2>10. 政策變更</h2>
+        <p>
+          我們可能不時更新本政策。更新後將修改本頁「最後更新」日期；重大變更會另行公告。
+        </p>
+      </section>
+    </>
+  );
+}
+
+function LegalPage({ kind }: { kind: "pp" | "tos" }) {
+  const isTerms = kind === "tos";
+  return (
+    <PublicPageShell
+      title={isTerms ? "服務條款" : "隱私權政策"}
+      lead={
+        isTerms
+          ? "使用 PGID 前，請閱讀以下服務條款。"
+          : "PGID 如何蒐集、使用與保護你的資料。"
+      }
+      icon={
+        isTerms ? (
+          <FileText aria-hidden="true" />
+        ) : (
+          <ShieldCheck aria-hidden="true" />
+        )
+      }
+    >
+      {isTerms ? <TermsContent /> : <PrivacyContent />}
+    </PublicPageShell>
+  );
+}
+
+function AboutPage() {
+  return (
+    <PublicPageShell
+      title="關於 PGID"
+      lead="一組帳號，安全登入 PG72 的所有服務。"
+      icon={<Sparkles aria-hidden="true" />}
+    >
+      <section className="public-section">
+        <h2>PGID 是什麼？</h2>
+        <p>
+          PGID（PG72 ID）是 PG72 自建的單一登入（SSO）與身分中心。你只需要一組
+          PGID 帳號，就能登入 PG72 旗下的各項服務，不必為每個網站重複註冊。
+        </p>
+      </section>
+      <section className="public-section">
+        <h2>怎麼使用？</h2>
+        <p>
+          以 Google 或 Passkey 登入 PGID 後，前往其他 PG72
+          服務時會導向這裡完成授權，再安全地返回原本的應用程式。你可以在帳號中心管理
+          Passkey、裝置 session、已授權的應用程式與安全活動。
+        </p>
+      </section>
+      <section className="public-section">
+        <h2>為什麼選擇 PGID？</h2>
+        <ul className="public-list">
+          <li>
+            <strong>更安全</strong>
+            ：支援 Passkey 無密碼登入，token 不進入瀏覽器儲存。
+          </li>
+          <li>
+            <strong>你掌控授權</strong>
+            ：清楚看到每個應用程式取得哪些資料，並可隨時撤銷或檢舉。
+          </li>
+          <li>
+            <strong>一致的體驗</strong>
+            ：一個帳號登入所有 PG72 服務，個人資料集中管理。
+          </li>
+        </ul>
+      </section>
+      <section className="public-section">
+        <h2>開始使用</h2>
+        <p>
+          前往 <a href="/">登入頁</a>，以 Google 或 Passkey
+          登入即可。相關條款請見 <a href="/tos">服務條款</a> 與{" "}
+          <a href="/pp">隱私權政策</a>。
+        </p>
+      </section>
+    </PublicPageShell>
+  );
+}
+
 export function App() {
   const sessionQuery = authClient.useSession();
   const passkeysQuery = authClient.useListPasskeys();
   const [tab, setTab] = useState<Tab>("account");
+  const [navOpen, setNavOpen] = useState(false);
   const [sessions, setSessions] = useState<DeviceSession[]>([]);
-  const [audit, setAudit] = useState<AuditEvent[]>([]);
+  const [activityEvents, setActivityEvents] = useState<SecurityActivityEvent[]>(
+    [],
+  );
+  const [activityState, setActivityState] = useState<LoadState>("loading");
+  const [activityCursor, setActivityCursor] = useState<string | null>(null);
+  const [activityLoadingMore, setActivityLoadingMore] = useState(false);
+  const [reportTarget, setReportTarget] = useState<{
+    clientId: string;
+    name: string;
+  } | null>(null);
+  const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
+  const [avatarFileName, setAvatarFileName] = useState<string | null>(null);
+  const [avatarError, setAvatarError] = useState<string | null>(null);
+  const avatarInputRef = useRef<HTMLInputElement>(null);
   const [authorizations, setAuthorizations] = useState<AuthorizedApplication[]>([]);
   const [authorizationsState, setAuthorizationsState] =
     useState<LoadState>("loading");
@@ -989,16 +1793,55 @@ export function App() {
     if (result.data) setSessions(result.data);
   }, []);
 
-  const loadAudit = useCallback(async () => {
-    const response = await fetch("/api/account/audit", {
-      credentials: "include",
-      headers: { Accept: "application/json" },
-    });
-    if (response.ok) {
-      const data = (await response.json()) as AuditResponse;
-      setAudit(data.events);
+  const loadSecurityActivity = useCallback(async () => {
+    setActivityState("loading");
+    try {
+      const response = await fetch("/api/account/security-activity", {
+        credentials: "include",
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) {
+        throw new Error(`Unable to load activity (${response.status})`);
+      }
+      const data = (await response.json()) as SecurityActivityResponse;
+      if (!Array.isArray(data.events)) {
+        throw new Error("Invalid activity response");
+      }
+      setActivityEvents(data.events);
+      setActivityCursor(data.nextCursor ?? null);
+      setActivityState("ready");
+    } catch {
+      setActivityState("error");
     }
   }, []);
+
+  const loadMoreSecurityActivity = useCallback(async () => {
+    if (!activityCursor) return;
+    setActivityLoadingMore(true);
+    try {
+      const params = new URLSearchParams({ cursor: activityCursor });
+      const response = await fetch(`/api/account/security-activity?${params}`, {
+        credentials: "include",
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) {
+        throw new Error(`Unable to load activity (${response.status})`);
+      }
+      const data = (await response.json()) as SecurityActivityResponse;
+      if (!Array.isArray(data.events)) {
+        throw new Error("Invalid activity response");
+      }
+      setActivityEvents((current) => [...current, ...data.events]);
+      setActivityCursor(data.nextCursor ?? null);
+    } catch {
+      // Keep the events already shown; surface a soft failure via cursor reset.
+      setActivityCursor(null);
+    } finally {
+      setActivityLoadingMore(false);
+    }
+  }, [activityCursor]);
 
   const loadAuthorizations = useCallback(async () => {
     setAuthorizationsState("loading");
@@ -1128,7 +1971,7 @@ export function App() {
   useEffect(() => {
     if (session) {
       void loadSessions();
-      void loadAudit();
+      void loadSecurityActivity();
       void loadAuthorizations();
       void loadProfile();
       void loadLoginMethods();
@@ -1144,7 +1987,7 @@ export function App() {
     canManageUsers,
     loadAdminClients,
     loadAdminUsers,
-    loadAudit,
+    loadSecurityActivity,
     loadAuthorizations,
     loadLoginMethods,
     loadProfile,
@@ -1152,8 +1995,15 @@ export function App() {
     session,
   ]);
 
-  const isConsent = window.location.pathname === "/consent";
+  const pathname = window.location.pathname;
+  const isConsent = pathname === "/consent";
   const clientId = new URLSearchParams(window.location.search).get("client_id");
+
+  // Public informational pages render without a session so they are linkable
+  // from consent, sign-in and third-party sites.
+  if (pathname === "/tos") return <LegalPage kind="tos" />;
+  if (pathname === "/pp") return <LegalPage kind="pp" />;
+  if (pathname === "/about") return <AboutPage />;
 
   if (sessionQuery.isPending) {
     return (
@@ -1177,6 +2027,7 @@ export function App() {
         clientId={clientId}
         userEmail={session.user.email}
         userName={session.user.name}
+        userImage={session.user.image ?? null}
       />
     );
   }
@@ -1382,31 +2233,128 @@ export function App() {
     }
   };
 
-  const chooseAvatar = async (avatar: "generated" | "google") => {
+  const AVATAR_MODE_LABEL: Record<AvatarSource, string> = {
+    generated: "已改用生成頭貼。",
+    google: "已改用 Google 頭貼。",
+    upload: "已改用上傳的頭貼。",
+  };
+
+  const chooseAvatar = async (avatar: AvatarSource) => {
     setBusy("profile:avatar");
     setNotice(null);
     setProfileError(null);
+    setAvatarError(null);
     try {
-      const response = await fetch("/api/account/profile", {
+      // Preferred contract: dedicated avatar-mode endpoint understands all three
+      // sources (identicon/google/upload).
+      const mode = avatar === "generated" ? "identicon" : avatar;
+      let response = await fetch("/api/account/avatar/mode", {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ avatar }),
+        body: JSON.stringify({ mode }),
       });
+      // Fallback to the legacy profile endpoint while the mode endpoint is not
+      // yet deployed (only generated/google are representable there).
+      if (
+        (response.status === 404 || response.status === 405) &&
+        avatar !== "upload"
+      ) {
+        response = await fetch("/api/account/profile", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ avatar }),
+        });
+      }
       if (!response.ok) {
-        const payload = (await response.json()) as { error?: string };
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
         setProfileError(
           payload.error === "rate_limited"
             ? "操作太頻繁,請稍後再試。"
-            : "無法更新頭貼,請稍後再試。",
+            : payload.error === "no_uploaded_avatar"
+              ? "尚未上傳頭貼，請先上傳圖片。"
+              : "無法更新頭貼,請稍後再試。",
         );
         return;
       }
-      setNotice(avatar === "generated" ? "已改用生成頭貼。" : "已改用 Google 頭貼。");
+      setNotice(AVATAR_MODE_LABEL[avatar]);
       await loadProfile();
       await sessionQuery.refetch();
     } catch (avatarError: unknown) {
       setProfileError(messageFrom(avatarError, "網路連線失敗,請稍後再試。"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const clearAvatarSelection = () => {
+    setAvatarPreview(null);
+    setAvatarFileName(null);
+    setAvatarError(null);
+    if (avatarInputRef.current) avatarInputRef.current.value = "";
+  };
+
+  const onAvatarFileSelected = (file: File | null) => {
+    setAvatarError(null);
+    if (!file) {
+      clearAvatarSelection();
+      return;
+    }
+    if (!ACCEPTED_AVATAR_TYPES.includes(file.type)) {
+      setAvatarError("格式不支援，請選擇 PNG、JPG 或 WebP 圖片。");
+      return;
+    }
+    if (file.size > MAX_AVATAR_BYTES) {
+      setAvatarError("檔案太大，請選擇 2 MB 以內的圖片。");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      setAvatarPreview(typeof reader.result === "string" ? reader.result : null);
+      setAvatarFileName(file.name);
+    };
+    reader.onerror = () => setAvatarError("無法讀取檔案，請重新選擇。");
+    reader.readAsDataURL(file);
+  };
+
+  const uploadAvatar = async () => {
+    if (!avatarPreview) return;
+    setBusy("profile:avatar");
+    setNotice(null);
+    setProfileError(null);
+    setAvatarError(null);
+    try {
+      const response = await fetch("/api/account/avatar", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dataUrl: avatarPreview }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        setAvatarError(
+          payload.error === "rate_limited"
+            ? "操作太頻繁，請稍後再試。"
+            : payload.error === "invalid_image" ||
+                payload.error === "invalid_request"
+              ? "圖片無效，請改用其他 PNG、JPG 或 WebP 圖片。"
+              : payload.error === "image_too_large"
+                ? "檔案太大，請選擇 2 MB 以內的圖片。"
+                : "無法上傳頭貼，請稍後再試。",
+        );
+        return;
+      }
+      clearAvatarSelection();
+      setNotice("頭貼已更新。");
+      await loadProfile();
+      await sessionQuery.refetch();
+    } catch (uploadError: unknown) {
+      setAvatarError(messageFrom(uploadError, "網路連線失敗，請稍後再試。"));
     } finally {
       setBusy(null);
     }
@@ -1839,6 +2787,56 @@ export function App() {
     }
   };
 
+  const navGroups: {
+    heading: string;
+    items: { id: Tab; label: string; icon: ReactNode }[];
+  }[] = [
+    {
+      heading: "帳號中心",
+      items: [
+        { id: "account", label: "帳號", icon: <UserRound aria-hidden="true" /> },
+        {
+          id: "security",
+          label: "安全性",
+          icon: <ShieldCheck aria-hidden="true" />,
+        },
+        {
+          id: "activity",
+          label: "安全活動",
+          icon: <Activity aria-hidden="true" />,
+        },
+        {
+          id: "apps",
+          label: "應用程式",
+          icon: <MonitorSmartphone aria-hidden="true" />,
+        },
+      ],
+    },
+  ];
+  const advancedItems: { id: Tab; label: string; icon: ReactNode }[] = [];
+  if (canManageClients) {
+    advancedItems.push({
+      id: "developer",
+      label: "開發者",
+      icon: <Code2 aria-hidden="true" />,
+    });
+  }
+  if (canManageUsers) {
+    advancedItems.push({
+      id: "admin",
+      label: "管理",
+      icon: <Users aria-hidden="true" />,
+    });
+  }
+  if (advancedItems.length > 0) {
+    navGroups.push({ heading: "進階", items: advancedItems });
+  }
+
+  const selectTab = (next: Tab) => {
+    setTab(next);
+    setNavOpen(false);
+  };
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -1866,33 +2864,43 @@ export function App() {
       </header>
 
       <div className="workspace">
-        <aside className="sidebar" aria-label="帳號中心">
-          <h1>帳號中心</h1>
-          <nav className="nav-tabs">
+        <aside
+          className={`sidebar${navOpen ? " sidebar-open" : ""}`}
+          aria-label="帳號中心導覽"
+        >
+          <div className="sidebar-head">
+            <h1>帳號中心</h1>
             <button
               type="button"
-              className={tab === "account" ? "active" : ""}
-              onClick={() => setTab("account")}
+              className="icon-button sidebar-toggle"
+              aria-label={navOpen ? "收合選單" : "展開選單"}
+              aria-expanded={navOpen}
+              title="選單"
+              onClick={() => setNavOpen((open) => !open)}
             >
-              <UserRound aria-hidden="true" />
-              帳號
+              {navOpen ? <X aria-hidden="true" /> : <Activity aria-hidden="true" />}
             </button>
-            <button
-              type="button"
-              className={tab === "security" ? "active" : ""}
-              onClick={() => setTab("security")}
-            >
-              <ShieldCheck aria-hidden="true" />
-              安全性
-            </button>
-            <button
-              type="button"
-              className={tab === "activity" ? "active" : ""}
-              onClick={() => setTab("activity")}
-            >
-              <Activity aria-hidden="true" />
-              活動
-            </button>
+          </div>
+          <nav className="nav-groups">
+            {navGroups.map((group) => (
+              <div className="nav-group" key={group.heading}>
+                <span className="nav-group-heading">{group.heading}</span>
+                <div className="nav-tabs">
+                  {group.items.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className={tab === item.id ? "active" : ""}
+                      aria-current={tab === item.id ? "page" : undefined}
+                      onClick={() => selectTab(item.id)}
+                    >
+                      {item.icon}
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
           </nav>
         </aside>
 
@@ -1930,75 +2938,71 @@ export function App() {
                   <span>{profileError}</span>
                 </div>
               ) : null}
+              <div className="profile-field">
+                <span className="profile-field-label">顯示名稱</span>
+                {editingName ? (
+                  <form
+                    className="profile-edit"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      if (busy !== "profile:name") void saveDisplayName();
+                    }}
+                  >
+                    <input
+                      autoFocus
+                      type="text"
+                      className="profile-edit-input"
+                      maxLength={64}
+                      value={nameDraft}
+                      aria-label="顯示名稱"
+                      disabled={busy === "profile:name"}
+                      onChange={(event) => setNameDraft(event.target.value)}
+                    />
+                    <div className="profile-edit-actions">
+                      <button
+                        type="button"
+                        className="button button-secondary button-compact"
+                        disabled={busy === "profile:name"}
+                        onClick={() => {
+                          setEditingName(false);
+                          setNameDraft("");
+                          setProfileError(null);
+                        }}
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="submit"
+                        className="button button-primary button-compact"
+                        disabled={busy === "profile:name" || !nameDraft.trim()}
+                      >
+                        <Check aria-hidden="true" />
+                        {busy === "profile:name" ? "儲存中..." : "儲存"}
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <div className="profile-field-value">
+                    <span>{session.user.name}</span>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label="編輯顯示名稱"
+                      title="編輯顯示名稱"
+                      disabled={busy?.startsWith("profile:") === true}
+                      onClick={() => {
+                        setProfileError(null);
+                        setNameDraft(session.user.name);
+                        setEditingName(true);
+                      }}
+                    >
+                      <Pencil aria-hidden="true" />
+                    </button>
+                  </div>
+                )}
+              </div>
+
               <dl className="profile-grid">
-                <div>
-                  <dt>顯示名稱</dt>
-                  <dd className="profile-name-row">
-                    {editingName ? (
-                      <>
-                        <form
-                          className="passkey-rename-form"
-                          onSubmit={(event) => {
-                            event.preventDefault();
-                            if (busy !== "profile:name") void saveDisplayName();
-                          }}
-                        >
-                          <input
-                            autoFocus
-                            type="text"
-                            maxLength={64}
-                            value={nameDraft}
-                            aria-label="顯示名稱"
-                            disabled={busy === "profile:name"}
-                            onChange={(event) => setNameDraft(event.target.value)}
-                          />
-                        </form>
-                        <button
-                          type="button"
-                          className="icon-button"
-                          aria-label="儲存顯示名稱"
-                          title="儲存"
-                          disabled={busy === "profile:name" || !nameDraft.trim()}
-                          onClick={() => void saveDisplayName()}
-                        >
-                          <Check aria-hidden="true" />
-                        </button>
-                        <button
-                          type="button"
-                          className="icon-button"
-                          aria-label="取消編輯顯示名稱"
-                          title="取消"
-                          disabled={busy === "profile:name"}
-                          onClick={() => {
-                            setEditingName(false);
-                            setNameDraft("");
-                            setProfileError(null);
-                          }}
-                        >
-                          <X aria-hidden="true" />
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <span>{session.user.name}</span>
-                        <button
-                          type="button"
-                          className="icon-button"
-                          aria-label="編輯顯示名稱"
-                          title="編輯顯示名稱"
-                          disabled={busy?.startsWith("profile:") === true}
-                          onClick={() => {
-                            setProfileError(null);
-                            setNameDraft(session.user.name);
-                            setEditingName(true);
-                          }}
-                        >
-                          <Pencil aria-hidden="true" />
-                        </button>
-                      </>
-                    )}
-                  </dd>
-                </div>
                 <div>
                   <dt>Email</dt>
                   <dd>{session.user.email}</dd>
@@ -2023,9 +3027,27 @@ export function App() {
                   </p>
                 </div>
               </div>
-              <div className="item-list">
-                {profileInfo ? (
-                  <>
+              {profileInfo ? (
+                <>
+                  <div className="avatar-current">
+                    <img
+                      className="avatar-current-img"
+                      src={profileInfo.image ?? profileInfo.generatedAvatarUrl}
+                      alt="目前的頭貼"
+                      referrerPolicy="no-referrer"
+                    />
+                    <div className="avatar-current-meta">
+                      <strong>目前頭貼</strong>
+                      <span>
+                        {profileInfo.avatarSource === "google"
+                          ? "使用 Google 頭貼"
+                          : profileInfo.avatarSource === "upload"
+                            ? "使用你上傳的頭貼"
+                            : "使用生成頭貼"}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="item-list">
                     <div className="list-item">
                       <img
                         className="avatar-choice"
@@ -2033,7 +3055,7 @@ export function App() {
                         alt=""
                       />
                       <div className="item-copy">
-                        <strong>生成頭貼</strong>
+                        <strong>生成頭貼（identicon）</strong>
                         <span>依帳號識別碼產生的固定圖案。</span>
                       </div>
                       {profileInfo.avatarSource === "generated" ? (
@@ -2079,16 +3101,142 @@ export function App() {
                         )}
                       </div>
                     ) : null}
-                  </>
-                ) : (
+                    {profileInfo.uploadedAvatarUrl ? (
+                      <div className="list-item">
+                        <img
+                          className="avatar-choice"
+                          src={profileInfo.uploadedAvatarUrl}
+                          alt=""
+                        />
+                        <div className="item-copy">
+                          <strong>上傳的頭貼</strong>
+                          <span>你自行上傳的圖片。</span>
+                        </div>
+                        {profileInfo.avatarSource === "upload" ? (
+                          <span className="status-badge">
+                            <span /> 使用中
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            className="button button-secondary button-compact"
+                            disabled={busy?.startsWith("profile:") === true}
+                            onClick={() => void chooseAvatar("upload")}
+                          >
+                            使用
+                          </button>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="avatar-upload">
+                    <div className="avatar-upload-preview">
+                      {avatarPreview ? (
+                        <img src={avatarPreview} alt="待上傳頭貼預覽" />
+                      ) : (
+                        <span className="avatar-upload-placeholder">
+                          <ImagePlus aria-hidden="true" />
+                        </span>
+                      )}
+                    </div>
+                    <div className="avatar-upload-body">
+                      <strong>上傳新頭貼</strong>
+                      <span className="section-description">
+                        {ACCEPTED_AVATAR_HINT} 圖片會以正方形裁切顯示。
+                      </span>
+                      {avatarFileName ? (
+                        <span className="avatar-upload-filename">
+                          已選擇：{avatarFileName}
+                        </span>
+                      ) : null}
+                      <input
+                        ref={avatarInputRef}
+                        type="file"
+                        className="visually-hidden"
+                        accept="image/png,image/jpeg,image/webp"
+                        onChange={(event) =>
+                          onAvatarFileSelected(event.target.files?.[0] ?? null)
+                        }
+                      />
+                      {avatarError ? (
+                        <div className="passkey-inline-error" role="alert">
+                          <ShieldOff aria-hidden="true" />
+                          <span>{avatarError}</span>
+                        </div>
+                      ) : null}
+                      <div className="avatar-upload-actions">
+                        <button
+                          type="button"
+                          className="button button-secondary button-compact"
+                          disabled={busy === "profile:avatar"}
+                          onClick={() => avatarInputRef.current?.click()}
+                        >
+                          <Upload aria-hidden="true" />
+                          選擇圖片
+                        </button>
+                        {avatarPreview ? (
+                          <>
+                            <button
+                              type="button"
+                              className="button button-primary button-compact"
+                              disabled={busy === "profile:avatar"}
+                              onClick={() => void uploadAvatar()}
+                            >
+                              <ImageIcon aria-hidden="true" />
+                              {busy === "profile:avatar" ? "上傳中..." : "上傳並套用"}
+                            </button>
+                            <button
+                              type="button"
+                              className="button button-secondary button-compact"
+                              disabled={busy === "profile:avatar"}
+                              onClick={clearAvatarSelection}
+                            >
+                              清除
+                            </button>
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="item-list">
                   <div className="empty-state">
                     <RefreshCw aria-hidden="true" className="is-spinning" />
                     <span>正在載入頭貼設定...</span>
                   </div>
-                )}
-              </div>
+                </div>
+              )}
 
-              <div className="section-heading authorization-heading">
+              <div className="danger-row account-delete-row">
+                <div>
+                  <strong>刪除帳號</strong>
+                  <span>
+                    {canDeleteAccount === false
+                      ? "Bootstrap administrator 是系統復原帳號，不能刪除。"
+                      : "永久刪除帳號及所有 PGID 驗證資料。"}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="button button-danger"
+                  disabled={canDeleteAccount !== true}
+                  onClick={() => {
+                    setDeleteError(null);
+                    setDeleteDialogOpen(true);
+                  }}
+                >
+                  <Trash2 aria-hidden="true" />
+                  {canDeleteAccount === null ? "確認中..." : "刪除帳號"}
+                </button>
+              </div>
+            </section>
+          ) : null}
+
+          {tab === "apps" ? (
+            <section className="page-section">
+              <div className="section-heading">
                 <div>
                   <span className="eyebrow">Connected apps</span>
                   <h2>已授權的應用程式</h2>
@@ -2154,17 +3302,33 @@ export function App() {
                               授權於 {formatDate(authorization.createdAt)}
                             </time>
                           </div>
-                          <button
-                            type="button"
-                            className="button button-secondary button-compact"
-                            disabled={authorizationBusy}
-                            onClick={() =>
-                              void revokeAuthorization(authorization)
-                            }
-                          >
-                            <ShieldOff aria-hidden="true" />
-                            {authorizationBusy ? "撤銷中..." : "撤銷"}
-                          </button>
+                          <div className="authorization-actions">
+                            <button
+                              type="button"
+                              className="button button-secondary button-compact"
+                              disabled={authorizationBusy}
+                              onClick={() =>
+                                setReportTarget({
+                                  clientId: authorization.clientId,
+                                  name: authorization.name,
+                                })
+                              }
+                            >
+                              <Flag aria-hidden="true" />
+                              檢舉
+                            </button>
+                            <button
+                              type="button"
+                              className="button button-secondary button-compact"
+                              disabled={authorizationBusy}
+                              onClick={() =>
+                                void revokeAuthorization(authorization)
+                              }
+                            >
+                              <ShieldOff aria-hidden="true" />
+                              {authorizationBusy ? "撤銷中..." : "撤銷"}
+                            </button>
+                          </div>
                         </div>
                       );
                     })
@@ -2197,9 +3361,17 @@ export function App() {
                   </div>
                 ) : null}
               </div>
+              <p className="section-note">
+                <ShieldAlert aria-hidden="true" />
+                看到冒名或可疑的應用程式？點該應用的「檢舉」回報，我們會盡快處理。
+              </p>
+            </section>
+          ) : null}
 
+          {tab === "admin" ? (
+            <section className="page-section">
               {canManageUsers ? (
-                <div className="admin-band">
+                <div className="admin-band admin-band-flush">
                   <div>
                     <span className="eyebrow">Administration</span>
                     <h3>建立邀請資格</h3>
@@ -2493,9 +3665,13 @@ export function App() {
                   ) : null}
                 </div>
               ) : null}
+            </section>
+          ) : null}
 
+          {tab === "developer" ? (
+            <section className="page-section">
               {canManageClients ? (
-                <div className="admin-band">
+                <div className="admin-band admin-band-flush">
                   <div>
                     <span className="eyebrow">Administration</span>
                     <h3>OAuth Clients</h3>
@@ -2881,27 +4057,39 @@ export function App() {
                 </div>
               ) : null}
 
-              <div className="danger-row account-delete-row">
-                <div>
-                  <strong>刪除帳號</strong>
-                  <span>
-                    {canDeleteAccount === false
-                      ? "Bootstrap administrator 是系統復原帳號，不能刪除。"
-                      : "永久刪除帳號及所有 PGID 驗證資料。"}
+              <div className="developer-resources">
+                <div className="section-heading developer-resources-heading">
+                  <div>
+                    <span className="eyebrow">Resources</span>
+                    <h3>開發者資源</h3>
+                    <p className="section-description">
+                      串接 PGID 所需的說明文件與規範。
+                    </p>
+                  </div>
+                  <span className="item-icon key-icon">
+                    <BookOpen aria-hidden="true" />
                   </span>
                 </div>
-                <button
-                  type="button"
-                  className="button button-danger"
-                  disabled={canDeleteAccount !== true}
-                  onClick={() => {
-                    setDeleteError(null);
-                    setDeleteDialogOpen(true);
-                  }}
-                >
-                  <Trash2 aria-hidden="true" />
-                  {canDeleteAccount === null ? "確認中..." : "刪除帳號"}
-                </button>
+                <div className="item-list">
+                  {DEVELOPER_RESOURCES.map((resource) => (
+                    <a
+                      className="list-item resource-item"
+                      key={resource.href}
+                      href={resource.href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <span className="item-icon">
+                        <Code2 aria-hidden="true" />
+                      </span>
+                      <div className="item-copy">
+                        <strong>{resource.label}</strong>
+                        <span>{resource.description}</span>
+                      </div>
+                      <ExternalLink aria-hidden="true" className="chevron" />
+                    </a>
+                  ))}
+                </div>
               </div>
             </section>
           ) : null}
@@ -3251,33 +4439,90 @@ export function App() {
                 <div>
                   <span className="eyebrow">Audit</span>
                   <h2>安全活動</h2>
+                  <p className="section-description">
+                    登入、授權、Passkey 與個資變更等事件。裝置與來源摘要已去識別化。
+                  </p>
                 </div>
                 <button
                   type="button"
                   className="icon-button"
                   aria-label="重新整理活動"
                   title="重新整理"
-                  onClick={loadAudit}
+                  disabled={activityState === "loading"}
+                  onClick={() => void loadSecurityActivity()}
                 >
-                  <RefreshCw aria-hidden="true" />
+                  <RefreshCw
+                    aria-hidden="true"
+                    className={
+                      activityState === "loading" ? "is-spinning" : undefined
+                    }
+                  />
                 </button>
               </div>
-              <div className="activity-table" role="table">
-                {audit.map((event) => (
-                  <div className="activity-row" role="row" key={event.id}>
-                    <span className={`outcome-dot ${event.outcome}`} />
-                    <strong>{event.event_type}</strong>
-                    <span>{event.outcome}</span>
-                    <time>{formatDate(event.occurred_at)}</time>
-                  </div>
-                ))}
-                {audit.length === 0 ? (
-                  <div className="empty-state">
+              <ol
+                className="activity-timeline"
+                aria-busy={activityState === "loading"}
+              >
+                {activityState === "ready"
+                  ? activityEvents.map((event) => (
+                      <li className="activity-item" key={event.id}>
+                        <span className="activity-marker" aria-hidden="true" />
+                        <div className="activity-body">
+                          <strong>{securityActivityLabel(event.type)}</strong>
+                          {event.summary ? (
+                            <span>{event.summary}</span>
+                          ) : null}
+                          <time dateTime={event.at}>
+                            {formatDate(event.at)}
+                            {event.provider ? ` · ${providerLabel(event.provider)}` : ""}
+                          </time>
+                        </div>
+                      </li>
+                    ))
+                  : null}
+                {activityState === "loading" ? (
+                  <li className="empty-state">
+                    <RefreshCw aria-hidden="true" className="is-spinning" />
+                    <span>正在載入安全活動...</span>
+                  </li>
+                ) : null}
+                {activityState === "error" ? (
+                  <li className="empty-state empty-state-error" role="alert">
+                    <ShieldOff aria-hidden="true" />
+                    <span>無法載入安全活動。</span>
+                    <button
+                      type="button"
+                      className="button button-secondary button-compact"
+                      onClick={() => void loadSecurityActivity()}
+                    >
+                      <RefreshCw aria-hidden="true" />
+                      重試
+                    </button>
+                  </li>
+                ) : null}
+                {activityState === "ready" && activityEvents.length === 0 ? (
+                  <li className="empty-state">
                     <Activity aria-hidden="true" />
                     <span>尚無安全活動</span>
-                  </div>
+                  </li>
                 ) : null}
-              </div>
+              </ol>
+              {activityState === "ready" && activityCursor ? (
+                <div className="activity-more">
+                  <button
+                    type="button"
+                    className="button button-secondary button-compact"
+                    disabled={activityLoadingMore}
+                    onClick={() => void loadMoreSecurityActivity()}
+                  >
+                    <RefreshCw
+                      aria-hidden="true"
+                      className={activityLoadingMore ? "is-spinning" : undefined}
+                    />
+                    {activityLoadingMore ? "載入中..." : "載入更多"}
+                  </button>
+                </div>
+              ) : null}
             </section>
           ) : null}
         </main>
@@ -3301,6 +4546,13 @@ export function App() {
             setPasskeyToDelete(null);
           }}
           onConfirm={() => void deletePasskey()}
+        />
+      ) : null}
+      {reportTarget ? (
+        <ReportDialog
+          clientId={reportTarget.clientId}
+          clientName={reportTarget.name}
+          onClose={() => setReportTarget(null)}
         />
       ) : null}
     </div>

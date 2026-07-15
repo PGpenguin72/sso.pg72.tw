@@ -296,11 +296,16 @@ const DEVELOPER_RESOURCES: { label: string; description: string; href: string }[
     {
       label: "OAuth / OIDC 串接手冊",
       description: "Authorization Code + PKCE、scopes 與 token 交換說明。",
-      href: "https://wiki.sso.pg72.tw/oauth",
+      href: "https://wiki.sso.pg72.tw/developers/oidc-flow",
+    },
+    {
+      label: "建立 OAuth Client",
+      description: "client 設定、redirect URI 規範與最佳實務。",
+      href: "https://wiki.sso.pg72.tw/developers/register-client",
     },
     {
       label: "PGID 開發者 Wiki",
-      description: "client 設定、redirect URI 規範與最佳實務。",
+      description: "完整開發者文件與 FAQ。",
       href: "https://wiki.sso.pg72.tw",
     },
   ];

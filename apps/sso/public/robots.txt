@@ -1,0 +1,14 @@
+User-agent: *
+Allow: /$
+Allow: /about
+Allow: /tos
+Allow: /pp
+Allow: /.well-known/
+# Authenticated and OAuth surfaces are per-user and must not be indexed.
+Disallow: /api/
+Disallow: /oauth2/
+Disallow: /callback/
+Disallow: /sign-in/
+Disallow: /passkey/
+
+Sitemap: https://sso.pg72.tw/sitemap.xml

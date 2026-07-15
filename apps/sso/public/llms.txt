@@ -1,0 +1,21 @@
+# PGID
+
+> PGID 是 PG72 自建的單一登入（SSO）身分服務，issuer 為 https://sso.pg72.tw。
+> 以 OpenID Connect / OAuth 2.1（Authorization Code + PKCE S256）提供身分驗證，
+> 日常登入方式為 Google 與 Passkey（無密碼），另支援 Discord/GitHub/Facebook/Apple/Telegram。
+> Email 不是主鍵，所有服務以不可變的 OIDC `sub` 識別使用者。
+
+## 給開發者（串接 PGID）
+
+- OpenID discovery: https://sso.pg72.tw/.well-known/openid-configuration
+- JWKS: https://sso.pg72.tw/.well-known/jwks.json
+- 端點：/oauth2/authorize、/oauth2/token、/oauth2/userinfo、/oauth2/introspect、/oauth2/revoke
+- Scopes：openid、profile、email、offline_access
+- Client 認證：使用 client_secret_post（token endpoint 對 HTTP Basic 的解析不做 RFC 6749 percent-decode）
+- Client 由管理員建立（無 dynamic client registration）；redirect URI 精確比對；consent 不可略過。
+- 完整串接手冊（端點、claims、token 壽命、可複製範例）：docs/api/PGID-integration.md
+- 開發者教學 Wiki：https://wiki.sso.pg72.tw
+
+## 聯絡
+
+- contact@pg72.tw

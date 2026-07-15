@@ -63,6 +63,51 @@ interface AuthorizationsResponse {
   canDeleteAccount: boolean;
 }
 
+interface AdminOAuthClient {
+  clientId: string;
+  name: string;
+  uri: string | null;
+  disabled: boolean;
+  public: boolean;
+  scopes: string[];
+  redirectUris: string[];
+  grantTypes: string[];
+  tokenEndpointAuthMethod: string | null;
+  hasSecret: boolean;
+  trusted: boolean;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+interface AdminClientsResponse {
+  clients: AdminOAuthClient[];
+}
+
+interface CreatedAdminClientResponse {
+  client: AdminOAuthClient;
+  clientSecret?: string;
+}
+
+const ADMIN_CLIENT_ERROR_MESSAGES: Record<string, string> = {
+  client_exists: "這個 Client ID 已存在。",
+  invalid_client_id: "Client ID 格式無效（小寫英數、-、_、.，3-64 字元）。",
+  invalid_client_name: "名稱不能是空白且不可超過 64 字元。",
+  invalid_redirect_uri:
+    "Redirect URI 必須是完整的 HTTPS URL，不允許 wildcard 或 fragment。",
+  invalid_scopes: "Scopes 只能是 openid/profile/email/offline_access。",
+  rate_limited: "操作太頻繁，請稍後再試。",
+  refresh_token_requires_offline_access:
+    "啟用 refresh token 時必須包含 offline_access scope。",
+  skip_consent_not_allowed: "所有 client 都必須經過使用者同意。",
+  trusted_client_locked: "Trusted client 只能透過 seed 或 migration 調整。",
+};
+
+function adminClientErrorMessage(code: unknown, fallback: string): string {
+  return typeof code === "string"
+    ? (ADMIN_CLIENT_ERROR_MESSAGES[code] ?? fallback)
+    : fallback;
+}
+
 type Tab = "account" | "security" | "activity";
 type Theme = "dark" | "light";
 type LoadState = "error" | "loading" | "ready";
@@ -719,6 +764,24 @@ export function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<"admin" | "user">("user");
+  const [adminClients, setAdminClients] = useState<AdminOAuthClient[]>([]);
+  const [adminClientsState, setAdminClientsState] =
+    useState<LoadState>("loading");
+  const [adminClientsError, setAdminClientsError] = useState<string | null>(null);
+  const [clientName, setClientName] = useState("");
+  const [clientIdDraft, setClientIdDraft] = useState("");
+  const [clientRedirectUrisDraft, setClientRedirectUrisDraft] = useState("");
+  const [clientTypeDraft, setClientTypeDraft] = useState<
+    "confidential" | "public"
+  >("confidential");
+  const [clientOfflineDraft, setClientOfflineDraft] = useState(false);
+  const [issuedClientSecret, setIssuedClientSecret] = useState<{
+    clientId: string;
+    secret: string;
+  } | null>(null);
+  const [clientPendingDelete, setClientPendingDelete] = useState<string | null>(
+    null,
+  );
 
   const closeDeleteDialog = useCallback(() => {
     setDeleteError(null);
@@ -769,13 +832,38 @@ export function App() {
     }
   }, []);
 
+  const loadAdminClients = useCallback(async () => {
+    setAdminClientsState("loading");
+    try {
+      const response = await fetch("/api/admin/clients", {
+        credentials: "include",
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) {
+        throw new Error(`Unable to load clients (${response.status})`);
+      }
+      const data = (await response.json()) as AdminClientsResponse;
+      if (!Array.isArray(data.clients)) {
+        throw new Error("Invalid clients response");
+      }
+      setAdminClients(data.clients);
+      setAdminClientsState("ready");
+    } catch {
+      setAdminClientsState("error");
+    }
+  }, []);
+
   useEffect(() => {
     if (session) {
       void loadSessions();
       void loadAudit();
       void loadAuthorizations();
+      if (session.user.role === "admin") {
+        void loadAdminClients();
+      }
     }
-  }, [loadAudit, loadAuthorizations, loadSessions, session]);
+  }, [loadAdminClients, loadAudit, loadAuthorizations, loadSessions, session]);
 
   const isConsent = window.location.pathname === "/consent";
   const clientId = new URLSearchParams(window.location.search).get("client_id");
@@ -973,6 +1061,163 @@ export function App() {
       setNotice("無法建立邀請資格。 ");
     }
     setBusy(null);
+  };
+
+  const createAdminClient = async () => {
+    setBusy("client:create");
+    setAdminClientsError(null);
+    setIssuedClientSecret(null);
+    try {
+      const redirectUris = clientRedirectUrisDraft
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      const isPublic = clientTypeDraft === "public";
+      const body: Record<string, unknown> = {
+        name: clientName.trim(),
+        redirectUris,
+        public: isPublic,
+        scopes: clientOfflineDraft
+          ? ["openid", "profile", "email", "offline_access"]
+          : ["openid", "profile", "email"],
+        grantTypes: clientOfflineDraft
+          ? ["authorization_code", "refresh_token"]
+          : ["authorization_code"],
+      };
+      const clientId = clientIdDraft.trim();
+      if (clientId) body.clientId = clientId;
+
+      const response = await fetch("/api/admin/clients", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const payload = (await response.json()) as CreatedAdminClientResponse & {
+        error?: string;
+      };
+      if (!response.ok) {
+        setAdminClientsError(
+          adminClientErrorMessage(payload.error, "無法建立 client。"),
+        );
+        return;
+      }
+      if (payload.clientSecret) {
+        setIssuedClientSecret({
+          clientId: payload.client.clientId,
+          secret: payload.clientSecret,
+        });
+      }
+      setClientName("");
+      setClientIdDraft("");
+      setClientRedirectUrisDraft("");
+      setClientOfflineDraft(false);
+      setClientTypeDraft("confidential");
+      setNotice(`Client ${payload.client.clientId} 已建立。`);
+      await loadAdminClients();
+    } catch {
+      setAdminClientsError("網路連線失敗，請稍後再試。");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const rotateAdminClientSecret = async (client: AdminOAuthClient) => {
+    setBusy(`client:${client.clientId}`);
+    setAdminClientsError(null);
+    setIssuedClientSecret(null);
+    try {
+      const response = await fetch(
+        `/api/admin/clients/${encodeURIComponent(client.clientId)}/rotate-secret`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { Accept: "application/json" },
+        },
+      );
+      const payload = (await response.json()) as {
+        clientSecret?: string;
+        error?: string;
+      };
+      if (!response.ok || !payload.clientSecret) {
+        setAdminClientsError(
+          adminClientErrorMessage(payload.error, "無法重設 client secret。"),
+        );
+        return;
+      }
+      setIssuedClientSecret({
+        clientId: client.clientId,
+        secret: payload.clientSecret,
+      });
+      setNotice(`已重設 ${client.clientId} 的 secret，舊 secret 立即失效。`);
+      await loadAdminClients();
+    } catch {
+      setAdminClientsError("網路連線失敗，請稍後再試。");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const toggleAdminClientStatus = async (client: AdminOAuthClient) => {
+    setBusy(`client:${client.clientId}`);
+    setAdminClientsError(null);
+    try {
+      const response = await fetch(
+        `/api/admin/clients/${encodeURIComponent(client.clientId)}/status`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ disabled: !client.disabled }),
+        },
+      );
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string };
+        setAdminClientsError(
+          adminClientErrorMessage(payload.error, "無法更新 client 狀態。"),
+        );
+        return;
+      }
+      setNotice(
+        client.disabled
+          ? `Client ${client.clientId} 已重新啟用。`
+          : `Client ${client.clientId} 已停用，tokens 已撤銷。`,
+      );
+      await loadAdminClients();
+    } catch {
+      setAdminClientsError("網路連線失敗，請稍後再試。");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const deleteAdminClient = async (client: AdminOAuthClient) => {
+    setBusy(`client:${client.clientId}`);
+    setAdminClientsError(null);
+    try {
+      const response = await fetch(
+        `/api/admin/clients/${encodeURIComponent(client.clientId)}`,
+        {
+          method: "DELETE",
+          credentials: "include",
+          headers: { Accept: "application/json" },
+        },
+      );
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string };
+        setAdminClientsError(
+          adminClientErrorMessage(payload.error, "無法刪除 client。"),
+        );
+        return;
+      }
+      setNotice(`Client ${client.clientId} 已刪除，tokens 與 consents 已移除。`);
+      await loadAdminClients();
+    } catch {
+      setAdminClientsError("網路連線失敗，請稍後再試。");
+    } finally {
+      setClientPendingDelete(null);
+      setBusy(null);
+    }
   };
 
   return (
@@ -1229,6 +1474,253 @@ export function App() {
                       <Plus aria-hidden="true" />
                       建立
                     </button>
+                  </div>
+                </div>
+              ) : null}
+
+              {session.user.role === "admin" ? (
+                <div className="admin-band">
+                  <div>
+                    <span className="eyebrow">Administration</span>
+                    <h3>OAuth Clients</h3>
+                    <p className="section-description">
+                      管理 OIDC 應用程式。Client secret 只會在建立或重設時顯示一次，
+                      請立即存入應用程式的 secret 管理機制。
+                    </p>
+                  </div>
+
+                  {adminClientsError ? (
+                    <div className="authorization-inline-error" role="alert">
+                      <ShieldOff aria-hidden="true" />
+                      <span>{adminClientsError}</span>
+                    </div>
+                  ) : null}
+
+                  {issuedClientSecret ? (
+                    <div className="client-secret-panel" role="status">
+                      <div>
+                        <strong>
+                          {issuedClientSecret.clientId} 的 client secret
+                        </strong>
+                        <span>只會顯示這一次，關閉後無法再取得。</span>
+                        <code className="mono">{issuedClientSecret.secret}</code>
+                      </div>
+                      <button
+                        type="button"
+                        className="icon-button"
+                        aria-label="關閉 secret 顯示"
+                        title="關閉"
+                        onClick={() => setIssuedClientSecret(null)}
+                      >
+                        <X aria-hidden="true" />
+                      </button>
+                    </div>
+                  ) : null}
+
+                  <div className="invite-form client-form">
+                    <label>
+                      <span>名稱</span>
+                      <input
+                        type="text"
+                        maxLength={64}
+                        value={clientName}
+                        onChange={(event) => setClientName(event.target.value)}
+                        autoComplete="off"
+                      />
+                    </label>
+                    <label>
+                      <span>Client ID（選填，留空自動產生）</span>
+                      <input
+                        type="text"
+                        maxLength={64}
+                        value={clientIdDraft}
+                        onChange={(event) => setClientIdDraft(event.target.value)}
+                        autoComplete="off"
+                        placeholder="pg72-copy"
+                      />
+                    </label>
+                    <label className="client-form-full">
+                      <span>Redirect URIs（每行一個，production 僅接受 HTTPS）</span>
+                      <textarea
+                        rows={3}
+                        value={clientRedirectUrisDraft}
+                        onChange={(event) =>
+                          setClientRedirectUrisDraft(event.target.value)
+                        }
+                        placeholder="https://copy.pg72.tw/api/auth/callback/pg72-id"
+                        spellCheck={false}
+                      />
+                    </label>
+                    <label>
+                      <span>類型</span>
+                      <select
+                        value={clientTypeDraft}
+                        onChange={(event) =>
+                          setClientTypeDraft(
+                            event.target.value as "confidential" | "public",
+                          )
+                        }
+                      >
+                        <option value="confidential">
+                          Confidential（server-side，發 secret）
+                        </option>
+                        <option value="public">Public（PKCE，無 secret）</option>
+                      </select>
+                    </label>
+                    <label className="client-checkbox">
+                      <span>Refresh token</span>
+                      <span className="client-checkbox-row">
+                        <input
+                          type="checkbox"
+                          checked={clientOfflineDraft}
+                          onChange={(event) =>
+                            setClientOfflineDraft(event.target.checked)
+                          }
+                        />
+                        啟用 offline_access 與 refresh_token
+                      </span>
+                    </label>
+                    <button
+                      type="button"
+                      className="button button-primary"
+                      disabled={
+                        !clientName.trim() ||
+                        !clientRedirectUrisDraft.trim() ||
+                        busy === "client:create"
+                      }
+                      onClick={() => void createAdminClient()}
+                    >
+                      <Plus aria-hidden="true" />
+                      {busy === "client:create" ? "建立中..." : "建立"}
+                    </button>
+                  </div>
+
+                  <div
+                    className="item-list"
+                    aria-busy={adminClientsState === "loading"}
+                  >
+                    {adminClientsState === "ready"
+                      ? adminClients.map((client) => {
+                          const clientBusy = busy === `client:${client.clientId}`;
+                          return (
+                            <div
+                              className="list-item"
+                              key={client.clientId}
+                              aria-busy={clientBusy}
+                            >
+                              <span className="item-icon authorization-icon">
+                                <MonitorSmartphone aria-hidden="true" />
+                              </span>
+                              <div className="item-copy">
+                                <strong>{client.name}</strong>
+                                <span className="mono">{client.clientId}</span>
+                                <span>
+                                  {client.public
+                                    ? "Public · PKCE"
+                                    : "Confidential · client_secret_basic"}
+                                  {client.grantTypes.includes("refresh_token")
+                                    ? " · refresh_token"
+                                    : ""}
+                                  {client.trusted ? " · Trusted" : ""}
+                                  {client.disabled ? " · 已停用" : ""}
+                                </span>
+                                <span className="mono">
+                                  {client.redirectUris.join(" ")}
+                                </span>
+                              </div>
+                              <div className="passkey-actions">
+                                {!client.trusted && !client.public ? (
+                                  <button
+                                    type="button"
+                                    className="icon-button"
+                                    aria-label={`重設 ${client.clientId} 的 secret`}
+                                    title="重設 secret"
+                                    disabled={clientBusy}
+                                    onClick={() =>
+                                      void rotateAdminClientSecret(client)
+                                    }
+                                  >
+                                    <KeyRound aria-hidden="true" />
+                                  </button>
+                                ) : null}
+                                {!client.trusted ? (
+                                  <button
+                                    type="button"
+                                    className="icon-button"
+                                    aria-label={
+                                      client.disabled
+                                        ? `啟用 ${client.clientId}`
+                                        : `停用 ${client.clientId}`
+                                    }
+                                    title={client.disabled ? "啟用" : "停用並撤銷 tokens"}
+                                    disabled={clientBusy}
+                                    onClick={() =>
+                                      void toggleAdminClientStatus(client)
+                                    }
+                                  >
+                                    {client.disabled ? (
+                                      <ShieldCheck aria-hidden="true" />
+                                    ) : (
+                                      <ShieldOff aria-hidden="true" />
+                                    )}
+                                  </button>
+                                ) : null}
+                                {!client.trusted ? (
+                                  clientPendingDelete === client.clientId ? (
+                                    <button
+                                      type="button"
+                                      className="button button-danger button-compact"
+                                      disabled={clientBusy}
+                                      onClick={() => void deleteAdminClient(client)}
+                                    >
+                                      確認刪除
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      className="icon-button danger-icon"
+                                      aria-label={`刪除 ${client.clientId}`}
+                                      title="刪除（連帶撤銷 tokens 與 consents）"
+                                      disabled={clientBusy}
+                                      onClick={() =>
+                                        setClientPendingDelete(client.clientId)
+                                      }
+                                    >
+                                      <Trash2 aria-hidden="true" />
+                                    </button>
+                                  )
+                                ) : null}
+                              </div>
+                            </div>
+                          );
+                        })
+                      : null}
+                    {adminClientsState === "loading" ? (
+                      <div className="empty-state">
+                        <RefreshCw aria-hidden="true" className="is-spinning" />
+                        <span>正在載入 clients...</span>
+                      </div>
+                    ) : null}
+                    {adminClientsState === "error" ? (
+                      <div className="empty-state empty-state-error" role="alert">
+                        <ShieldOff aria-hidden="true" />
+                        <span>無法載入 OAuth clients。</span>
+                        <button
+                          type="button"
+                          className="button button-secondary button-compact"
+                          onClick={() => void loadAdminClients()}
+                        >
+                          <RefreshCw aria-hidden="true" />
+                          重試
+                        </button>
+                      </div>
+                    ) : null}
+                    {adminClientsState === "ready" && adminClients.length === 0 ? (
+                      <div className="empty-state">
+                        <MonitorSmartphone aria-hidden="true" />
+                        <span>尚未建立任何 OAuth client</span>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               ) : null}

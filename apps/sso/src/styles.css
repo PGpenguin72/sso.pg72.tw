@@ -1264,6 +1264,20 @@ svg {
     flex: 1;
   }
 
+  .manage-list .list-item {
+    grid-template-columns: 42px minmax(0, 1fr);
+  }
+
+  .manage-actions {
+    grid-column: 1 / -1;
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .manage-actions .role-select {
+    flex: 1 1 120px;
+  }
+
   .empty-state-error {
     align-content: center;
     flex-direction: column;
@@ -1324,6 +1338,20 @@ svg {
 
 .role-select:disabled {
   opacity: 0.55;
+}
+
+/*
+ * Actions column for the admin user and OAuth client rows. Unlike
+ * `.passkey-actions` (fixed 76px for two icon buttons) these rows carry a role
+ * select plus several icon/confirm buttons, so the column is content-sized and
+ * wraps instead of overflowing onto the middle column.
+ */
+.manage-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 .pagination-row {

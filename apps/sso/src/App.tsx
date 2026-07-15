@@ -3587,7 +3587,7 @@ export function App() {
                   </form>
 
                   <div
-                    className="item-list"
+                    className="item-list manage-list"
                     aria-busy={adminUsersState === "loading"}
                   >
                     {adminUsersState === "ready"
@@ -3635,7 +3635,7 @@ export function App() {
                                     : " · 沒有 session 紀錄"}
                                 </span>
                               </div>
-                              <div className="passkey-actions">
+                              <div className="manage-actions">
                                 <select
                                   className="role-select"
                                   aria-label={`變更 ${user.email} 的角色`}
@@ -3948,7 +3948,7 @@ export function App() {
                   </div>
 
                   <div
-                    className="item-list"
+                    className="item-list manage-list"
                     aria-busy={adminClientsState === "loading"}
                   >
                     {adminClientsState === "ready"
@@ -4059,7 +4059,7 @@ export function App() {
                                   </form>
                                 ) : null}
                               </div>
-                              <div className="passkey-actions">
+                              <div className="manage-actions">
                                 {!client.trusted ? (
                                   <button
                                     type="button"

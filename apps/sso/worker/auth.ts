@@ -35,7 +35,10 @@ export function createAuth(
     baseURL: config.authBaseUrl,
     basePath: "/",
     database,
-    disabledPaths: ["/token"],
+    // `/update-user` is disabled so profile changes can only go through the
+    // validated, audited first-party route in worker/account.ts (name
+    // normalization and the avatar policy cannot be bypassed).
+    disabledPaths: ["/token", "/update-user"],
     secret: env.BETTER_AUTH_SECRET,
     trustedOrigins: [config.authBaseUrl],
     socialProviders: {

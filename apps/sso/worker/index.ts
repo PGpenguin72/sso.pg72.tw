@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 
+import { accountRoutes } from "./account";
 import { adminClientRoutes } from "./admin-clients";
 import {
   consumeSecurityEvents,
@@ -54,6 +55,9 @@ interface OAuthMetadata {
   [key: string]: unknown;
 }
 
+// `/update-user` is intentionally absent (and listed in `disabledPaths` in
+// auth.ts): profile updates go through the validated first-party route in
+// worker/account.ts instead.
 const AUTH_EXACT_PATHS = new Set([
   "/change-email",
   "/delete-user",
@@ -70,7 +74,6 @@ const AUTH_EXACT_PATHS = new Set([
   "/revoke-sessions",
   "/sign-out",
   "/unlink-account",
-  "/update-user",
 ]);
 
 const AUTH_PATH_PREFIXES = [
@@ -280,6 +283,9 @@ app.use("*", async (c, next) => {
   const pathname = new URL(c.req.url).pathname;
   if (pathname.startsWith("/.well-known/")) {
     c.header("Cache-Control", "public, max-age=300, stale-while-revalidate=60");
+  } else if (pathname.startsWith("/api/avatar/")) {
+    // Generated avatars are deterministic public images; the route sets its
+    // own long-lived Cache-Control instead of the API no-store default.
   } else if (isAuthPath(pathname) || pathname.startsWith("/api/")) {
     c.header("Cache-Control", "no-store");
   }
@@ -322,6 +328,7 @@ app.use("/api/admin/*", async (c, next) => {
 });
 
 app.route("/api/admin/clients", adminClientRoutes);
+app.route("/", accountRoutes);
 
 app.use(
   "/oauth2/token",

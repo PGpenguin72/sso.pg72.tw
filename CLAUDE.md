@@ -1,4 +1,4 @@
-# PG72 ID 實作守則
+# PGID 實作守則
 
 本檔案是 coding-agent 與 contributor 的精簡守則。完整且唯一的架構規格是 [`codex.md`](./codex.md)；若本檔案、issue、舊程式或註解與 `codex.md` 衝突，以 `codex.md` 為準，並在同一變更中修正過期文件。
 
@@ -102,7 +102,7 @@ File Browser/Roundcube production 部署必須從鎖定版本、checksum/image d
 - 移除長效 6 位數 code login。
 - 移除 auth/security identifier 中的 `Math.random()`。
 - 將 Email ownership key migration 至 SSO `sub`。
-- 以 PG72 ID OIDC 取代 NextAuth Google provider。
+- 以 PGID OIDC 取代 NextAuth Google provider。
 
 ### Link
 

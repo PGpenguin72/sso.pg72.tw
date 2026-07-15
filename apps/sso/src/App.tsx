@@ -131,9 +131,9 @@ function friendlyDevice(userAgent?: string | null): string {
 
 function Brand() {
   return (
-    <a className="brand" href="/" aria-label="PG72 ID">
+    <a className="brand" href="/" aria-label="PGID">
       <span className="brand-mark" aria-hidden="true">🐧</span>
-      <span>PG72 ID</span>
+      <span>PGID</span>
     </a>
   );
 }
@@ -214,7 +214,7 @@ function SignInView({ pending }: { pending: boolean }) {
         <div className="sign-in-heading">
           <Brand />
           <span className="eyebrow">Secure account</span>
-          <h1>{oauthQuery ? "繼續登入" : "登入 PG72 ID"}</h1>
+          <h1>{oauthQuery ? "繼續登入" : "登入 PGID"}</h1>
           <p>使用你的 Google 帳號或已註冊的 Passkey。</p>
         </div>
 
@@ -252,7 +252,7 @@ function SignInView({ pending }: { pending: boolean }) {
 const SCOPE_DETAILS: Record<string, { label: string; description: string }> = {
   openid: {
     label: "確認你的身分",
-    description: "以唯一識別碼辨識你的 PG72 ID 帳號。",
+    description: "以唯一識別碼辨識你的 PGID 帳號。",
   },
   profile: {
     label: "查看基本個人資料",
@@ -531,7 +531,7 @@ function DeleteAccountDialog({
         <div className="dialog-icon danger-icon">
           <Trash2 aria-hidden="true" />
         </div>
-        <h2 id="delete-account-title">永久刪除 PG72 ID？</h2>
+        <h2 id="delete-account-title">永久刪除 PGID？</h2>
         <p id="delete-account-description">
           帳號、Passkeys、sessions、授權與 OAuth tokens 都會永久刪除，且無法復原。
         </p>
@@ -1070,7 +1070,7 @@ export function App() {
                   <dd>{session.user.email}</dd>
                 </div>
                 <div>
-                  <dt>PG72 ID</dt>
+                  <dt>PGID</dt>
                   <dd className="mono">{session.user.id}</dd>
                 </div>
                 <div>
@@ -1239,7 +1239,7 @@ export function App() {
                   <span>
                     {canDeleteAccount === false
                       ? "Bootstrap administrator 是系統復原帳號，不能刪除。"
-                      : "永久刪除帳號及所有 PG72 ID 驗證資料。"}
+                      : "永久刪除帳號及所有 PGID 驗證資料。"}
                   </span>
                 </div>
                 <button

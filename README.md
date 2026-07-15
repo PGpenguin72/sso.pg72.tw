@@ -1,6 +1,6 @@
-# PG72 ID
+# PGID
 
-PG72 ID is the custom identity provider for PG72 services. Phase 0 runs on Cloudflare Workers and D1 and provides:
+PGID is the custom identity provider for PG72 services. Phase 0 runs on Cloudflare Workers and D1 and provides:
 
 - Google sign-in and Passkey authentication;
 - OAuth 2.1 / OpenID Connect Authorization Code with PKCE S256;
@@ -13,7 +13,7 @@ The canonical architecture and migration decisions are in [`codex.md`](./codex.m
 ## Workspace
 
 ```text
-apps/sso       PG72 ID Worker, React account center, D1 migrations
+apps/sso       PGID Worker, React account center, D1 migrations
 apps/test-rp   Independent OIDC protocol relying party
 ```
 
@@ -60,7 +60,7 @@ pnpm dev
 pnpm dev:rp
 ```
 
-- PG72 ID: `http://localhost:5173`
+- PGID: `http://localhost:5173`
 - OIDC test RP: `http://localhost:5174`
 
 The local test RP is a public client. It has no client secret; its transaction state, nonce, and PKCE verifier are stored in its D1 database, and its browser receives only an HttpOnly transaction cookie.

@@ -1,6 +1,6 @@
 # Security Policy
 
-PG72 ID is in Phase 0 and is not approved for production identity traffic yet.
+PGID is in Phase 0 and is not approved for production identity traffic yet.
 
 ## Reporting
 
@@ -27,7 +27,7 @@ A production release requires:
 `GHSA-p2fr-6hmx-4528` affects `@better-auth/oauth-provider@1.6.23`. The stable `1.6.x` line has no patched release; the current fix is pre-release only.
 
 - Severity: Moderate.
-- Owner: PG72 ID maintainer.
+- Owner: PGID maintainer.
 - Exposure: resource indicators could otherwise select an audience not bound to the original grant.
 - Controls: exactly one `validAudiences` entry; the Worker rejects every `resource` parameter at `/oauth2/authorize` and `/oauth2/token`; v1 resource servers must require an exact single audience and must not use RFC 8707 resource indicators as an authorization boundary.
 - Exit condition: upgrade core and all Better Auth plugins together to the first audited stable release containing the fix, run its schema migration, remove the temporary edge rejection only after protocol regression tests pass.

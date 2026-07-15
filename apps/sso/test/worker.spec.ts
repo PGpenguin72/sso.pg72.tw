@@ -105,7 +105,7 @@ async function createPasskey(userId: string, name: string): Promise<string> {
   return id;
 }
 
-describe("PG72 ID Worker", () => {
+describe("PGID Worker", () => {
   it("serves health with hardened browser headers", async () => {
     const response = await exports.default.fetch("http://sso.test/health");
 

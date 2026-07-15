@@ -166,7 +166,7 @@ function page(
             <div class="brand"><span class="mark">RP</span>OIDC Test RP</div>
             <span class="env">Phase 0</span>
           </header>
-          <h1>${session ? "OIDC session established" : "PG72 ID protocol check"}</h1>
+          <h1>${session ? "OIDC session established" : "PGID protocol check"}</h1>
           <p class="lead">Authorization Code + PKCE S256</p>
           <div class="protocol">
             <div class="field"><span>Issuer</span><strong>${config.issuer.href.replace(/\/$/, "")}</strong></div>
@@ -191,7 +191,7 @@ function page(
                   <a class="button" href="/login">Run again</a>
                 </div>`
             : html`<div class="actions">
-                <a class="button" href="/login">Sign in with PG72 ID</a>
+                <a class="button" href="/login">Sign in with PGID</a>
               </div>`}
         </main>
       </body>

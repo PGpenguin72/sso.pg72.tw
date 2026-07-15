@@ -1,8 +1,8 @@
-# PG72 ID SSO 架構規格
+# PGID SSO 架構規格
 
 > 狀態：Canonical Architecture Baseline  
 > 最後更新：2026-07-15  
-> 預定服務名稱：PG72 ID  
+> 預定服務名稱：PGID  
 > 預定 Issuer：`https://sso.pg72.tw`
 
 ## 0. Phase 0 實作狀態
@@ -98,7 +98,7 @@ File Browser 與 Roundcube 的目錄是整合研究用上游原始碼，不視�
 | Secrets | Wrangler secrets 或 Secrets Store，不進 Git/D1 明文 |
 | Deployment | Wrangler，preview 與 production 完全分離 |
 
-Better Auth 僅作為協議與驗證引擎。PG72 ID 自行實作產品介面、邀請政策、角色、稽核、client 管理、全域登出協調與 legacy gateway contract。
+Better Auth 僅作為協議與驗證引擎。PGID 自行實作產品介面、邀請政策、角色、稽核、client 管理、全域登出協調與 legacy gateway contract。
 
 ### 5.1 Workers production rules
 
@@ -142,7 +142,7 @@ GitHub issue 內的 workaround 不是正式安全保證。任何 workaround 必�
                                v
 +-------------+       +----------------------+       +------------------+
 | User Agent  | <---> | sso.pg72.tw Worker   | <---> | D1               |
-| Browser     |       | PG72 ID / OIDC OP    |       | Identity DB      |
+| Browser     |       | PGID / OIDC OP    |       | Identity DB      |
 +------+------+       +----+------------+----+       +------------------+
        |                   |            |
        |                   |            +----------> Queue
@@ -164,7 +164,7 @@ GitHub issue 內的 workaround 不是正式安全保證。任何 workaround 必�
 
 ## 7. 核心元件
 
-### 7.1 PG72 ID Worker
+### 7.1 PGID Worker
 
 單一 Worker 初期同時承擔：
 
@@ -552,7 +552,7 @@ Better Auth 曾出現 OAuth/OIDC 與 account linking 相關安全公告。因此
 
 適用於可修改的 Copy、Link 及其他第一方服務。
 
-- App 導向 PG72 ID authorize endpoint。
+- App 導向 PGID authorize endpoint。
 - Backend 交換 authorization code。
 - 驗證 ID token signature、`iss`、`aud`、`exp`、`nonce`。
 - 以 `sub` 對應本機帳號。
@@ -574,8 +574,8 @@ Better Auth 曾出現 OAuth/OIDC 與 account linking 相關安全公告。因此
 
 #### Copy
 
-- 已完成 Preview：NextAuth 改為 PG72 ID OIDC confidential client + PKCE + consent，Copy 不再直接使用 Google client secret。
-- 六位數 code 依需求保留為獨立訪客帳號，不與 PG72 ID 用戶、Email 或 `sub` 合併；代碼使用 Web Crypto 產生並有 D1 rate limit 與 `auth_version` session 失效機制。
+- 已完成 Preview：NextAuth 改為 PGID OIDC confidential client + PKCE + consent，Copy 不再直接使用 Google client secret。
+- 六位數 code 依需求保留為獨立訪客帳號，不與 PGID 用戶、Email 或 `sub` 合併；代碼使用 Web Crypto 產生並有 D1 rate limit 與 `auth_version` session 失效機制。
 - `users.id` 已成為內部 ownership key，SSO 帳號以 issuer `sub` 綁定，Email 不參與授權。
 - Auth.js JWT 只保存 opaque vault session ID；access/refresh token 以獨立 key 做 AES-GCM 加密後存 D1。
 - Refresh 使用 `active -> refreshing -> active` 與 lease/generation CAS；timeout、5xx、write-back unknown 或 abandoned refresh 不重用舊 token，只允許 terminal reauthentication。
@@ -624,7 +624,7 @@ Better Auth 曾出現 OAuth/OIDC 與 account linking 相關安全公告。因此
 
 Webmail 仍須分成兩個問題：
 
-- Web UI 以 PG72 ID OIDC 登入。
+- Web UI 以 PGID OIDC 登入。
 - IMAP/SMTP server 是否支援 OAuth2/OIDC，或仍需 app password。
 
 在取得實際 IMAP/SMTP server 類型與設定前，不承諾瀏覽器 SSO 能完全取代郵件帳密。若 mail backend 不支援 `XOAUTH2`/`OAUTHBEARER`，需明確設計短效 mail credential bridge 或保留獨立 app password，不能把 SSO access token 當一般密碼轉送。
@@ -715,7 +715,7 @@ Webmail 仍須分成兩個問題：
 .
 ├── codex.md
 ├── apps/
-│   └── sso/                  # PG72 ID Worker + frontend
+│   └── sso/                  # PGID Worker + frontend
 ├── packages/
 │   ├── oidc-client/          # 第一方服務共用 OIDC helpers
 │   ├── logout-contract/      # sid / logout token / webhook contract
@@ -735,7 +735,7 @@ Webmail 仍須分成兩個問題：
 
 | 項目 | 建議預設 | 狀態 |
 | --- | --- | --- |
-| 產品顯示名稱 | PG72 ID | 待確認 |
+| 產品顯示名稱 | PGID | 待確認 |
 | 公開服務撤銷 SLA | 30 秒內 | 待確認 |
 | 管理服務撤銷 SLA | 立即，fail closed | 待確認 |
 | Audit retention | 365 天 | 待確認 |

@@ -26,7 +26,7 @@ export function createAuth(
   const config = readRuntimeConfig(env);
 
   return betterAuth({
-    appName: "PG72 ID",
+    appName: "PGID",
     baseURL: config.authBaseUrl,
     basePath: "/",
     database,
@@ -184,7 +184,7 @@ export function createAuth(
               );
               throw new APIError("FORBIDDEN", {
                 code: "INVITATION_REQUIRED",
-                message: "This PG72 ID account requires an invitation.",
+                message: "This PGID account requires an invitation.",
               });
             }
 
@@ -254,7 +254,7 @@ export function createAuth(
       }),
       passkey({
         rpID: config.passkeyRpId,
-        rpName: "PG72 ID",
+        rpName: "PGID",
         origin: config.passkeyOrigin,
         authenticatorSelection: {
           residentKey: "preferred",

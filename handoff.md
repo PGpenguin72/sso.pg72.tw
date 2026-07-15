@@ -1,4 +1,4 @@
-# PG72 ID Engineering Handoff
+# PGID Engineering Handoff
 
 > Snapshot: 2026-07-15 21:17 CST (Asia/Taipei, UTC+08:00)  
 > Production issuer: `https://sso.pg72.tw`  
@@ -6,7 +6,7 @@
 > Active Worker version at handoff: `eafd3330-9299-44f6-baa5-df57bfa41ad6`  
 > Status: friends/invite beta; do not enable public registration yet
 
-This file is the operational handoff for the PG72 ID SSO project. It records the
+This file is the operational handoff for the PGID SSO project. It records the
 state that was verified on 2026-07-15, the decisions that must not be silently
 changed, the safe deployment/rollback procedure, and the next integration work.
 It intentionally contains no secret values, OAuth tokens, session cookies,
@@ -18,7 +18,7 @@ design. When the two disagree, stop and reconcile them before deploying.
 
 ## 1. Executive Summary
 
-PG72 ID is a first-party OAuth 2.1/OpenID Connect identity provider running on
+PGID is a first-party OAuth 2.1/OpenID Connect identity provider running on
 Cloudflare Workers and D1. Authentication currently supports Google and Passkey.
 The account center supports sessions, OAuth consent revocation, invitations,
 account deletion, audit display, and Passkey management.
@@ -50,8 +50,8 @@ The final deployed Passkey management UI can:
 - write `passkey.renamed`, `passkey.deleted`, and denied final-deletion audit
   events.
 
-Important: Copy production has not yet switched to PG72 ID. The Copy source has
-the PG72 ID implementation, but the current central SSO database has zero OAuth
+Important: Copy production has not yet switched to PGID. The Copy source has
+the PGID implementation, but the current central SSO database has zero OAuth
 clients and the current Pages production environment still exposes only the old
 Google/NextAuth binding names. The completed end-to-end Copy validation was in
 Preview, and that Preview was intentionally retired. Do not claim production
@@ -66,14 +66,14 @@ The following requirements came directly from the owner and must be preserved:
   workload or upstream service genuinely requires it.
 - Daily user authentication is Google plus Passkey.
 - This is a custom SSO system. Do not replace it with Cloudflare Access.
-- New OAuth clients must always show a PG72 ID consent screen. No first-party
+- New OAuth clients must always show a PGID consent screen. No first-party
   client may silently skip initial/new-scope consent.
 - Users must be able to view and revoke previously authorized applications.
 - Users may delete their own accounts after fresh authentication.
 - The bootstrap administrator is the recovery owner and cannot self-delete.
 - Other `user` and `admin` accounts may self-delete.
 - Copy's six-digit guest code is intentional and must not be removed. Guest-code
-  users remain separate from PG72 ID users and must never be merged by email.
+  users remain separate from PGID users and must never be merged by email.
 - Preview and production must use separate Cloudflare accounts/resources. Never
   bind a Preview deployment to a production D1 database.
 - File Browser and Roundcube sources are upstream reference snapshots. Production
@@ -167,7 +167,7 @@ There were eight D1 databases at handoff:
 - `night-study-db`
 - `nightstudy`
 - `ns-db`
-- `pg72-id-preview` (live production PG72 ID database)
+- `pg72-id-preview` (live production PGID database)
 - `study-city-db`
 - `xugou_db`
 
@@ -207,7 +207,7 @@ sso.pg72.tw/
 ├── pnpm-lock.yaml             exact dependency resolution
 ├── pnpm-workspace.yaml
 ├── apps/
-│   ├── sso/                   PG72 ID Worker + React account center
+│   ├── sso/                   PGID Worker + React account center
 │   │   ├── src/               browser UI
 │   │   ├── worker/            Hono edge entrypoint, auth, audit, config
 │   │   ├── migrations/        production D1 migrations
@@ -263,7 +263,7 @@ without a separate GO/NO-GO review.
 
 ### Copy
 
-Copy uses Next.js 15.5.20 and NextAuth 5 beta. Its SSO changes introduce PG72 ID
+Copy uses Next.js 15.5.20 and NextAuth 5 beta. Its SSO changes introduce PGID
 OIDC, a D1-encrypted server-side token vault, refresh-token leasing/CAS, and a
 separate guest-code identity path. The code exists locally but production has not
 been cut over.
@@ -647,7 +647,7 @@ pnpm dev:rp
 
 Local URLs:
 
-- PG72 ID: `http://localhost:5173`
+- PGID: `http://localhost:5173`
 - OIDC test RP: `http://localhost:5174`
 
 ## 14. Verification and Release Gate
@@ -800,7 +800,7 @@ credentials, client IDs and active signing keys.
 The Copy source integration is substantial and should not be reimplemented from
 scratch. It already includes:
 
-- PG72 ID OIDC confidential provider;
+- PGID OIDC confidential provider;
 - Authorization Code + PKCE + state + nonce;
 - verified email requirement at the callback;
 - stable SSO `sub` binding to a local Copy user;
@@ -847,7 +847,7 @@ Safe cutover order:
 12. Deploy Copy production without deleting the six-digit provider.
 13. Test a new PG72 user, an existing bound user, guest-code login, refresh,
     authorization revoke, sign-out, file ownership and error/retry states.
-14. Remove the old direct Google provider/secrets only after PG72 ID production
+14. Remove the old direct Google provider/secrets only after PGID production
     login and rollback are proven.
 
 Do not reuse the deleted `pg72-copy-preview` client or its secret.
@@ -1009,7 +1009,7 @@ Do not:
 - Final-Passkey deletion requires a fresh session.
 - SSO Worker version `eafd3330-9299-44f6-baa5-df57bfa41ad6` is active.
 - Production health/session/discovery/JWKS/asset smoke tests pass.
-- Copy production remains available but is not yet a PG72 ID client.
+- Copy production remains available but is not yet a PGID client.
 - All old production-account Preview Pages bindings are empty and automatic
   Preview is disabled.
 - D1 count is eight; the live PG72 identity D1 retains the historical name

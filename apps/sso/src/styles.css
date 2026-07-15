@@ -11,7 +11,7 @@
   --text: light-dark(#17191d, #edf0f3);
   --text-subtle: light-dark(#454a52, #c5cbd2);
   --text-muted: light-dark(#6b7078, #a4abb4);
-  --text-faint: light-dark(#838992, #838c97);
+  --text-faint: light-dark(#6f747c, #838c97);
   --border: light-dark(#e1e4e8, #343a40);
   --border-soft: light-dark(#e2e5e9, #30363c);
   --border-strong: light-dark(#cfd3d9, #4b535d);
@@ -263,8 +263,7 @@ svg {
   margin-bottom: 56px;
 }
 
-.sign-in-heading h1,
-.consent-heading h1 {
+.sign-in-heading h1 {
   margin: 8px 0 10px;
   font-size: 30px;
   line-height: 1.2;
@@ -355,53 +354,11 @@ svg {
   margin-bottom: 68px;
 }
 
-.consent-heading {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-}
-
-.consent-heading h1 {
-  overflow-wrap: anywhere;
-}
-
-.consent-heading .eyebrow {
-  margin-top: 22px;
-}
-
 .consent-developer {
   margin: 0;
   color: var(--text-muted);
   font-size: 13px;
   overflow-wrap: anywhere;
-}
-
-.consent-domain {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  margin: 22px 0 0;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface);
-  padding: 12px 14px;
-  color: var(--text-subtle);
-  font-size: 13px;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-}
-
-.consent-domain svg {
-  width: 16px;
-  height: 16px;
-  margin-top: 2px;
-  flex: 0 0 auto;
-  color: var(--accent);
-}
-
-.consent-domain strong {
-  color: var(--text);
-  font-weight: 600;
 }
 
 .scope-offline-flag {
@@ -464,41 +421,16 @@ svg {
   gap: 8px;
 }
 
-.consent-account {
-  margin: 30px 0 0;
-  border-top: 1px solid var(--border-soft);
-  border-bottom: 1px solid var(--border-soft);
-  padding: 14px 2px;
-  color: var(--text-muted);
-  font-size: 13px;
-  overflow-wrap: anywhere;
-}
-
-.consent-account strong {
-  color: var(--text);
-  font-weight: 600;
-}
-
 .scope-heading {
   margin: 28px 0 0;
   font-size: 14px;
   font-weight: 600;
 }
 
-.app-glyph,
 .item-icon,
 .avatar-fallback {
   display: grid;
   place-items: center;
-}
-
-.app-glyph {
-  width: 48px;
-  height: 48px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--accent);
 }
 
 .scope-list {
@@ -555,7 +487,7 @@ svg {
 }
 
 .consent-shell[aria-busy="true"] .scope-list,
-.consent-shell[aria-busy="true"] .consent-account {
+.consent-shell[aria-busy="true"] .consent-account-card {
   opacity: 0.78;
 }
 
@@ -1215,40 +1147,6 @@ svg {
   margin-top: 26px;
 }
 
-.activity-table {
-  margin-top: 18px;
-}
-
-.activity-row {
-  display: grid;
-  grid-template-columns: 10px minmax(150px, 1fr) 90px 170px;
-  align-items: center;
-  gap: 12px;
-  border-bottom: 1px solid var(--border);
-  padding: 15px 6px;
-  font-size: 12px;
-}
-
-.activity-row strong {
-  font-size: 13px;
-}
-
-.activity-row > span:not(.outcome-dot),
-.activity-row time {
-  color: var(--text-muted);
-}
-
-.outcome-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--text-faint);
-}
-
-.outcome-dot.success { background: var(--success-dot); }
-.outcome-dot.denied { background: var(--warning); }
-.outcome-dot.failure { background: var(--danger); }
-
 @media (max-width: 760px) {
   .topbar {
     padding: 0 16px;
@@ -1317,14 +1215,6 @@ svg {
   .invite-form .button {
     width: 100%;
   }
-
-  .activity-row {
-    grid-template-columns: 10px minmax(0, 1fr) 76px;
-  }
-
-  .activity-row time {
-    grid-column: 2 / -1;
-  }
 }
 
 @media (max-width: 480px) {
@@ -1372,6 +1262,20 @@ svg {
 
   .authorization-actions .button {
     flex: 1;
+  }
+
+  .manage-list .list-item {
+    grid-template-columns: 42px minmax(0, 1fr);
+  }
+
+  .manage-actions {
+    grid-column: 1 / -1;
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .manage-actions .role-select {
+    flex: 1 1 120px;
   }
 
   .empty-state-error {
@@ -1434,6 +1338,20 @@ svg {
 
 .role-select:disabled {
   opacity: 0.55;
+}
+
+/*
+ * Actions column for the admin user and OAuth client rows. Unlike
+ * `.passkey-actions` (fixed 76px for two icon buttons) these rows carry a role
+ * select plus several icon/confirm buttons, so the column is content-sized and
+ * wraps instead of overflowing onto the middle column.
+ */
+.manage-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 .pagination-row {
@@ -2046,6 +1964,12 @@ span.consent-account-avatar {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+}
+
+.public-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .public-back {

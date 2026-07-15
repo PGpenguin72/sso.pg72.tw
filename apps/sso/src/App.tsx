@@ -16,6 +16,7 @@ import {
   LogIn,
   LogOut,
   Mail,
+  Menu,
   MonitorSmartphone,
   Moon,
   Pencil,
@@ -437,37 +438,30 @@ const SOCIAL_SIGN_IN_PROVIDERS: { id: string; label: string }[] = [
   { id: "apple", label: "Apple" },
 ];
 
+interface TelegramConfig {
+  enabled: boolean;
+  botUsername: string | null;
+}
+
 /**
  * Telegram Login Widget button. Telegram authenticates via its own widget, which
  * posts a signed payload; we forward it to the Worker's `/api/auth/telegram`
- * endpoint (which verifies the HMAC server-side). The widget needs the bot
- * username, fetched from the public config endpoint. When Telegram is not yet
- * configured (no bot token/username), the button renders disabled.
+ * endpoint (which verifies the HMAC server-side). The bot username comes from
+ * the public config endpoint, fetched once by the parent so the whole social
+ * section can be hidden when Telegram is not configured.
  */
-function TelegramLogin({ disabled }: { disabled: boolean }) {
+function TelegramLogin({
+  config,
+  disabled,
+}: {
+  config: TelegramConfig;
+  disabled: boolean;
+}) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [config, setConfig] = useState<
-    { enabled: boolean; botUsername: string | null } | null
-  >(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
-    fetch("/api/auth/telegram/config", { headers: { accept: "application/json" } })
-      .then((r) => (r.ok ? r.json() : { enabled: false, botUsername: null }))
-      .then((c) => {
-        if (!cancelled) setConfig(c);
-      })
-      .catch(() => {
-        if (!cancelled) setConfig({ enabled: false, botUsername: null });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!config?.enabled || !config.botUsername || !containerRef.current) return;
+    if (!config.enabled || !config.botUsername || !containerRef.current) return;
     const container = containerRef.current;
     // Telegram invokes this global with the signed auth payload.
     const cbName = "onTelegramAuth";
@@ -505,13 +499,9 @@ function TelegramLogin({ disabled }: { disabled: boolean }) {
     };
   }, [config]);
 
-  if (config && !config.enabled) {
-    return (
-      <button className="button button-secondary" type="button" disabled title="Telegram 登入尚未設定">
-        Telegram（尚未設定）
-      </button>
-    );
-  }
+  // The parent only mounts this when Telegram is configured; render nothing
+  // otherwise so a stray disabled button never appears.
+  if (!config.enabled) return null;
   return (
     <div className="telegram-login" aria-disabled={disabled}>
       <div ref={containerRef} />
@@ -524,6 +514,9 @@ function SignInView({ pending }: { pending: boolean }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [enabledSocial, setEnabledSocial] = useState<string[] | null>(null);
+  const [telegramConfig, setTelegramConfig] = useState<TelegramConfig | null>(
+    null,
+  );
   const query = new URLSearchParams(window.location.search);
   const oauthQuery = query.has("client_id") && query.has("sig");
 
@@ -542,9 +535,36 @@ function SignInView({ pending }: { pending: boolean }) {
     };
   }, []);
 
-  const visibleSocial = SOCIAL_SIGN_IN_PROVIDERS.filter(
-    (p) => enabledSocial === null || enabledSocial.includes(p.id),
-  );
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/auth/telegram/config", { headers: { accept: "application/json" } })
+      .then((r) => (r.ok ? r.json() : { enabled: false, botUsername: null }))
+      .then((c: TelegramConfig) => {
+        if (!cancelled) {
+          setTelegramConfig({
+            enabled: c.enabled === true,
+            botUsername: c.botUsername ?? null,
+          });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setTelegramConfig({ enabled: false, botUsername: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Wait for both config fetches before showing any social buttons so the row
+  // does not flash a full set and then collapse as unconfigured ones drop out.
+  const socialConfigReady = enabledSocial !== null && telegramConfig !== null;
+  const visibleSocial = enabledSocial
+    ? SOCIAL_SIGN_IN_PROVIDERS.filter((p) => enabledSocial.includes(p.id))
+    : [];
+  const telegramEnabled = telegramConfig?.enabled === true;
+  // Hide the divider + grid entirely when nothing in the section is available.
+  const showSocialSection =
+    socialConfigReady && (visibleSocial.length > 0 || telegramEnabled);
 
   const socialSignIn = async (provider: string, label: string) => {
     setBusy(provider);
@@ -603,30 +623,41 @@ function SignInView({ pending }: { pending: boolean }) {
           </button>
         </div>
 
-        <div className="auth-divider" role="separator">
-          <span>或使用其他帳號</span>
-        </div>
+        {showSocialSection ? (
+          <>
+            <div className="auth-divider" role="separator">
+              <span>或使用其他帳號</span>
+            </div>
 
-        <div className="social-grid" aria-busy={pending || busy !== null}>
-          {visibleSocial.map((provider) => (
-            <button
-              key={provider.id}
-              className="button button-secondary"
-              type="button"
-              disabled={pending || busy !== null}
-              onClick={() => void socialSignIn(provider.id, provider.label)}
-            >
-              {busy === provider.id ? "正在連線..." : provider.label}
-            </button>
-          ))}
-          <TelegramLogin disabled={pending || busy !== null} />
-        </div>
+            <div className="social-grid" aria-busy={pending || busy !== null}>
+              {visibleSocial.map((provider) => (
+                <button
+                  key={provider.id}
+                  className="button button-secondary"
+                  type="button"
+                  disabled={pending || busy !== null}
+                  onClick={() => void socialSignIn(provider.id, provider.label)}
+                >
+                  {busy === provider.id ? "正在連線..." : provider.label}
+                </button>
+              ))}
+              {telegramEnabled && telegramConfig ? (
+                <TelegramLogin
+                  config={telegramConfig}
+                  disabled={pending || busy !== null}
+                />
+              ) : null}
+            </div>
+          </>
+        ) : null}
 
         {error ? <div className="notice notice-error">{error}</div> : null}
         <p className="invite-note">
           <ShieldCheck aria-hidden="true" />
           登入即表示你同意
           <a href="/tos">服務條款</a>與<a href="/pp">隱私權政策</a>
+          <span aria-hidden="true"> · </span>
+          <a href="/about">了解 PGID</a>
         </p>
       </main>
     </>
@@ -1204,6 +1235,7 @@ function ReportDialog({
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
   const panelRef = useRef<HTMLElement>(null);
+  const doneButtonRef = useRef<HTMLButtonElement>(null);
   const busyRef = useRef(busy);
 
   useEffect(() => {
@@ -1214,6 +1246,11 @@ function ReportDialog({
     const previousFocus = document.activeElement as HTMLElement | null;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
+    // Move focus into the dialog on open (first radio, falling back to the
+    // first control) so keyboard and screen-reader users start inside it.
+    panelRef.current
+      ?.querySelector<HTMLElement>("input, button, textarea")
+      ?.focus();
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !busyRef.current) {
@@ -1244,6 +1281,12 @@ function ReportDialog({
       previousFocus?.focus();
     };
   }, [onClose]);
+
+  // After a successful report the form is replaced by a confirmation; move
+  // focus to its primary action so the keyboard focus is not left orphaned.
+  useEffect(() => {
+    if (done) doneButtonRef.current?.focus();
+  }, [done]);
 
   const submit = async () => {
     setBusy(true);
@@ -1302,6 +1345,7 @@ function ReportDialog({
             </p>
             <div className="dialog-actions">
               <button
+                ref={doneButtonRef}
                 type="button"
                 className="button button-primary"
                 onClick={onClose}
@@ -1391,32 +1435,41 @@ function PublicPageShell({
   children: ReactNode;
 }) {
   return (
-    <>
-      <ThemeToggle floating />
-      <div className="public-shell">
-        <header className="public-header">
-          <Brand />
+    <div className="public-shell">
+      <header className="public-header">
+        <Brand />
+        {/* Inline (non-floating) controls so the fixed theme toggle never
+            overlaps the back link on narrow screens. */}
+        <div className="public-header-actions">
           <a className="public-back" href="/">
             <ArrowLeft aria-hidden="true" />
             回到 PGID
           </a>
-        </header>
-        <main className="public-main">
-          <div className="public-hero">
-            <span className="public-hero-icon">{icon}</span>
-            <h1>{title}</h1>
-            <p>{lead}</p>
-          </div>
-          <div className="public-body">{children}</div>
-        </main>
-        <footer className="public-footer">
-          <span>© {new Date().getFullYear()} PG72</span>
-          <span>
-            聯繫我們：<a href="mailto:contact@pg72.tw">contact@pg72.tw</a>
-          </span>
-        </footer>
-      </div>
-    </>
+          <ThemeToggle />
+        </div>
+      </header>
+      <main className="public-main">
+        <div className="public-hero">
+          <span className="public-hero-icon">{icon}</span>
+          <h1>{title}</h1>
+          <p>{lead}</p>
+        </div>
+        <div className="public-body">{children}</div>
+      </main>
+      <footer className="public-footer">
+        <span>© {new Date().getFullYear()} PG72</span>
+        <span className="public-footer-links">
+          <a href="/about">關於 PGID</a>
+          <span aria-hidden="true"> · </span>
+          <a href="/tos">服務條款</a>
+          <span aria-hidden="true"> · </span>
+          <a href="/pp">隱私權政策</a>
+        </span>
+        <span>
+          聯繫我們：<a href="mailto:contact@pg72.tw">contact@pg72.tw</a>
+        </span>
+      </footer>
+    </div>
   );
 }
 
@@ -1813,18 +1866,158 @@ function AboutPage() {
   );
 }
 
+/**
+ * Passkey list for the security tab. `useListPasskeys` triggers a
+ * `/passkey/list-user-passkeys` fetch on mount, so it lives in a component that
+ * is only rendered for an authenticated session — otherwise the sign-in and
+ * public pages would fire a guaranteed-401 request on every load.
+ */
+function PasskeyList({
+  busy,
+  editingPasskeyId,
+  passkeyName,
+  onBeginRename,
+  onRenameChange,
+  onRenameSubmit,
+  onRenameCancel,
+  onRequestDelete,
+}: {
+  busy: string | null;
+  editingPasskeyId: string | null;
+  passkeyName: string;
+  onBeginRename: (passkey: Passkey) => void;
+  onRenameChange: (value: string) => void;
+  onRenameSubmit: (passkey: Passkey) => void;
+  onRenameCancel: () => void;
+  onRequestDelete: (passkey: Passkey) => void;
+}) {
+  const passkeysQuery = authClient.useListPasskeys();
+  return (
+    <div
+      className="item-list passkey-list"
+      aria-busy={busy?.startsWith("passkey:") === true}
+    >
+      {(passkeysQuery.data ?? []).map((passkey: Passkey) => {
+        const editing = editingPasskeyId === passkey.id;
+        const updating = busy === `passkey:update:${passkey.id}`;
+        return (
+          <div className="list-item" key={passkey.id}>
+            <span className="item-icon key-icon">
+              <KeyRound aria-hidden="true" />
+            </span>
+            <div className="item-copy">
+              {editing ? (
+                <form
+                  className="passkey-rename-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if (!updating) onRenameSubmit(passkey);
+                  }}
+                >
+                  <input
+                    autoFocus
+                    type="text"
+                    maxLength={64}
+                    value={passkeyName}
+                    aria-label="Passkey 名稱"
+                    disabled={updating}
+                    onChange={(event) => onRenameChange(event.target.value)}
+                  />
+                </form>
+              ) : (
+                <strong>{passkey.name?.trim() || "未命名 Passkey"}</strong>
+              )}
+              <span>{passkeyMetadata(passkey)}</span>
+              <time>
+                {passkey.createdAt
+                  ? `建立於 ${formatDate(passkey.createdAt)}`
+                  : "建立時間不明"}
+              </time>
+            </div>
+            <div className="passkey-actions">
+              {editing ? (
+                <>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label="儲存 Passkey 名稱"
+                    title="儲存"
+                    disabled={updating || !passkeyName.trim()}
+                    onClick={() => onRenameSubmit(passkey)}
+                  >
+                    <Check aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label="取消重新命名"
+                    title="取消"
+                    disabled={updating}
+                    onClick={onRenameCancel}
+                  >
+                    <X aria-hidden="true" />
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label={`重新命名 ${passkey.name?.trim() || "Passkey"}`}
+                    title="重新命名"
+                    disabled={busy?.startsWith("passkey:") === true}
+                    onClick={() => onBeginRename(passkey)}
+                  >
+                    <Pencil aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-button danger-icon"
+                    aria-label={`刪除 ${passkey.name?.trim() || "Passkey"}`}
+                    title="刪除"
+                    disabled={busy?.startsWith("passkey:") === true}
+                    onClick={() => onRequestDelete(passkey)}
+                  >
+                    <Trash2 aria-hidden="true" />
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })}
+      {passkeysQuery.isPending ? (
+        <div className="empty-state">
+          <RefreshCw aria-hidden="true" className="is-spinning" />
+          <span>載入 Passkeys...</span>
+        </div>
+      ) : null}
+      {!passkeysQuery.isPending &&
+      (passkeysQuery.data?.length ?? 0) === 0 ? (
+        <div className="empty-state">
+          <KeyRound aria-hidden="true" />
+          <span>尚未註冊 Passkey</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function App() {
   const sessionQuery = authClient.useSession();
-  const passkeysQuery = authClient.useListPasskeys();
   const [tab, setTab] = useState<Tab>("account");
   const [navOpen, setNavOpen] = useState(false);
   const [sessions, setSessions] = useState<DeviceSession[]>([]);
+  const [sessionsState, setSessionsState] = useState<LoadState>("loading");
   const [activityEvents, setActivityEvents] = useState<SecurityActivityEvent[]>(
     [],
   );
   const [activityState, setActivityState] = useState<LoadState>("loading");
   const [activityCursor, setActivityCursor] = useState<string | null>(null);
   const [activityLoadingMore, setActivityLoadingMore] = useState(false);
+  const [activityMoreError, setActivityMoreError] = useState<string | null>(
+    null,
+  );
   const [reportTarget, setReportTarget] = useState<{
     clientId: string;
     name: string;
@@ -1902,12 +2095,19 @@ export function App() {
   const session = sessionQuery.data;
 
   const loadSessions = useCallback(async () => {
+    setSessionsState("loading");
     const result = await authClient.listSessions();
-    if (result.data) setSessions(result.data);
+    if (result.error) {
+      setSessionsState("error");
+      return;
+    }
+    setSessions(result.data ?? []);
+    setSessionsState("ready");
   }, []);
 
   const loadSecurityActivity = useCallback(async () => {
     setActivityState("loading");
+    setActivityMoreError(null);
     try {
       const response = await fetch("/api/account/security-activity", {
         credentials: "include",
@@ -1932,6 +2132,7 @@ export function App() {
   const loadMoreSecurityActivity = useCallback(async () => {
     if (!activityCursor) return;
     setActivityLoadingMore(true);
+    setActivityMoreError(null);
     try {
       const params = new URLSearchParams({ cursor: activityCursor });
       const response = await fetch(`/api/account/security-activity?${params}`, {
@@ -1949,8 +2150,10 @@ export function App() {
       setActivityEvents((current) => [...current, ...data.events]);
       setActivityCursor(data.nextCursor ?? null);
     } catch {
-      // Keep the events already shown; surface a soft failure via cursor reset.
-      setActivityCursor(null);
+      // Keep the events already shown and the cursor intact so the user can
+      // retry; surfacing an error avoids the false impression of reaching the
+      // end of the timeline.
+      setActivityMoreError("無法載入更多活動，請重試。");
     } finally {
       setActivityLoadingMore(false);
     }
@@ -2111,6 +2314,20 @@ export function App() {
   const pathname = window.location.pathname;
   const isConsent = pathname === "/consent";
   const clientId = new URLSearchParams(window.location.search).get("client_id");
+
+  // Per-route document title. Public/consent routes are keyed off the path;
+  // the root route depends on whether a session resolved (account center vs.
+  // sign-in). Runs on every render before the route-specific early returns.
+  useEffect(() => {
+    let title: string;
+    if (pathname === "/about") title = "關於 PGID";
+    else if (pathname === "/tos") title = "服務條款 — PGID";
+    else if (pathname === "/pp") title = "隱私權政策 — PGID";
+    else if (pathname === "/consent") title = "授權 — PGID";
+    else if (session) title = "PGID 帳號中心";
+    else title = "PGID — PG72 單一登入";
+    document.title = title;
+  }, [pathname, session]);
 
   // Public informational pages render without a session so they are linkable
   // from consent, sign-in and third-party sites.
@@ -2324,7 +2541,9 @@ export function App() {
         body: JSON.stringify({ name }),
       });
       if (!response.ok) {
-        const payload = (await response.json()) as { error?: string };
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
         setProfileError(
           payload.error === "invalid_name"
             ? "名稱無效:去除控制字元與前後空白後必須是 1-64 個字元。"
@@ -2489,7 +2708,9 @@ export function App() {
         },
       );
       if (!response.ok) {
-        const payload = (await response.json()) as { error?: string };
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
         setLoginMethodsError(
           payload.error === "last_login_method"
             ? "這是帳號僅存的登入方式,無法解除連結。"
@@ -2584,7 +2805,9 @@ export function App() {
         },
       );
       if (!response.ok) {
-        const payload = (await response.json()) as { error?: string };
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
         setAdminUsersError(
           adminUserErrorMessage(payload.error, "無法變更角色。"),
         );
@@ -2614,7 +2837,9 @@ export function App() {
         },
       );
       if (!response.ok) {
-        const payload = (await response.json()) as { error?: string };
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
         setAdminUsersError(
           adminUserErrorMessage(payload.error, "無法更新使用者狀態。"),
         );
@@ -2679,7 +2904,9 @@ export function App() {
         },
       );
       if (!response.ok) {
-        const payload = (await response.json()) as { error?: string };
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
         setAdminUsersError(
           adminUserErrorMessage(payload.error, "無法刪除使用者。"),
         );
@@ -2788,7 +3015,9 @@ export function App() {
         },
       );
       if (!response.ok) {
-        const payload = (await response.json()) as { error?: string };
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
         setAdminClientsError(
           adminClientErrorMessage(payload.error, "無法更新 client 資訊。"),
         );
@@ -2854,7 +3083,9 @@ export function App() {
         },
       );
       if (!response.ok) {
-        const payload = (await response.json()) as { error?: string };
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
         setAdminClientsError(
           adminClientErrorMessage(payload.error, "無法更新 client 狀態。"),
         );
@@ -2886,7 +3117,9 @@ export function App() {
         },
       );
       if (!response.ok) {
-        const payload = (await response.json()) as { error?: string };
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
         setAdminClientsError(
           adminClientErrorMessage(payload.error, "無法刪除 client。"),
         );
@@ -2993,7 +3226,7 @@ export function App() {
               title="選單"
               onClick={() => setNavOpen((open) => !open)}
             >
-              {navOpen ? <X aria-hidden="true" /> : <Activity aria-hidden="true" />}
+              {navOpen ? <X aria-hidden="true" /> : <Menu aria-hidden="true" />}
             </button>
           </div>
           <nav className="nav-groups">
@@ -3587,7 +3820,7 @@ export function App() {
                   </form>
 
                   <div
-                    className="item-list"
+                    className="item-list manage-list"
                     aria-busy={adminUsersState === "loading"}
                   >
                     {adminUsersState === "ready"
@@ -3635,7 +3868,7 @@ export function App() {
                                     : " · 沒有 session 紀錄"}
                                 </span>
                               </div>
-                              <div className="passkey-actions">
+                              <div className="manage-actions">
                                 <select
                                   className="role-select"
                                   aria-label={`變更 ${user.email} 的角色`}
@@ -3948,7 +4181,7 @@ export function App() {
                   </div>
 
                   <div
-                    className="item-list"
+                    className="item-list manage-list"
                     aria-busy={adminClientsState === "loading"}
                   >
                     {adminClientsState === "ready"
@@ -4059,7 +4292,7 @@ export function App() {
                                   </form>
                                 ) : null}
                               </div>
-                              <div className="passkey-actions">
+                              <div className="manage-actions">
                                 {!client.trusted ? (
                                   <button
                                     type="button"
@@ -4380,117 +4613,23 @@ export function App() {
                 </div>
               ) : null}
 
-              <div className="item-list passkey-list" aria-busy={busy?.startsWith("passkey:") === true}>
-                {(passkeysQuery.data ?? []).map((passkey: Passkey) => {
-                  const editing = editingPasskeyId === passkey.id;
-                  const updating = busy === `passkey:update:${passkey.id}`;
-                  return (
-                    <div className="list-item" key={passkey.id}>
-                      <span className="item-icon key-icon">
-                        <KeyRound aria-hidden="true" />
-                      </span>
-                      <div className="item-copy">
-                        {editing ? (
-                          <form
-                            className="passkey-rename-form"
-                            onSubmit={(event) => {
-                              event.preventDefault();
-                              if (!updating) void updatePasskeyName(passkey);
-                            }}
-                          >
-                            <input
-                              autoFocus
-                              type="text"
-                              maxLength={64}
-                              value={passkeyName}
-                              aria-label="Passkey 名稱"
-                              disabled={updating}
-                              onChange={(event) => setPasskeyName(event.target.value)}
-                            />
-                          </form>
-                        ) : (
-                          <strong>{passkey.name?.trim() || "未命名 Passkey"}</strong>
-                        )}
-                        <span>{passkeyMetadata(passkey)}</span>
-                        <time>
-                          {passkey.createdAt
-                            ? `建立於 ${formatDate(passkey.createdAt)}`
-                            : "建立時間不明"}
-                        </time>
-                      </div>
-                      <div className="passkey-actions">
-                        {editing ? (
-                          <>
-                            <button
-                              type="button"
-                              className="icon-button"
-                              aria-label="儲存 Passkey 名稱"
-                              title="儲存"
-                              disabled={updating || !passkeyName.trim()}
-                              onClick={() => void updatePasskeyName(passkey)}
-                            >
-                              <Check aria-hidden="true" />
-                            </button>
-                            <button
-                              type="button"
-                              className="icon-button"
-                              aria-label="取消重新命名"
-                              title="取消"
-                              disabled={updating}
-                              onClick={() => {
-                                setEditingPasskeyId(null);
-                                setPasskeyName("");
-                                setPasskeyError(null);
-                              }}
-                            >
-                              <X aria-hidden="true" />
-                            </button>
-                          </>
-                        ) : (
-                          <>
-                            <button
-                              type="button"
-                              className="icon-button"
-                              aria-label={`重新命名 ${passkey.name?.trim() || "Passkey"}`}
-                              title="重新命名"
-                              disabled={busy?.startsWith("passkey:") === true}
-                              onClick={() => beginPasskeyRename(passkey)}
-                            >
-                              <Pencil aria-hidden="true" />
-                            </button>
-                            <button
-                              type="button"
-                              className="icon-button danger-icon"
-                              aria-label={`刪除 ${passkey.name?.trim() || "Passkey"}`}
-                              title="刪除"
-                              disabled={busy?.startsWith("passkey:") === true}
-                              onClick={() => {
-                                setPasskeyDeleteError(null);
-                                setPasskeyToDelete(passkey);
-                              }}
-                            >
-                              <Trash2 aria-hidden="true" />
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-                {passkeysQuery.isPending ? (
-                  <div className="empty-state">
-                    <RefreshCw aria-hidden="true" className="is-spinning" />
-                    <span>載入 Passkeys...</span>
-                  </div>
-                ) : null}
-                {!passkeysQuery.isPending &&
-                (passkeysQuery.data?.length ?? 0) === 0 ? (
-                  <div className="empty-state">
-                    <KeyRound aria-hidden="true" />
-                    <span>尚未註冊 Passkey</span>
-                  </div>
-                ) : null}
-              </div>
+              <PasskeyList
+                busy={busy}
+                editingPasskeyId={editingPasskeyId}
+                passkeyName={passkeyName}
+                onBeginRename={beginPasskeyRename}
+                onRenameChange={setPasskeyName}
+                onRenameSubmit={(passkey) => void updatePasskeyName(passkey)}
+                onRenameCancel={() => {
+                  setEditingPasskeyId(null);
+                  setPasskeyName("");
+                  setPasskeyError(null);
+                }}
+                onRequestDelete={(passkey) => {
+                  setPasskeyDeleteError(null);
+                  setPasskeyToDelete(passkey);
+                }}
+              />
 
               <div className="section-heading session-heading">
                 <div>
@@ -4507,28 +4646,59 @@ export function App() {
                   <RefreshCw aria-hidden="true" />
                 </button>
               </div>
-              <div className="item-list">
-                {sessions.map((item) => (
-                  <div className="list-item" key={item.id}>
-                    <span className="item-icon">
-                      {deviceIcon(item.userAgent)}
-                    </span>
-                    <div className="item-copy">
-                      <strong>{friendlyDevice(item.userAgent)}</strong>
-                      <span>{formatDate(item.updatedAt)}</span>
-                    </div>
+              <div
+                className="item-list"
+                aria-busy={sessionsState === "loading"}
+              >
+                {sessionsState === "ready"
+                  ? sessions.map((item) => (
+                      <div className="list-item" key={item.id}>
+                        <span className="item-icon">
+                          {deviceIcon(item.userAgent)}
+                        </span>
+                        <div className="item-copy">
+                          <strong>{friendlyDevice(item.userAgent)}</strong>
+                          <span>{formatDate(item.updatedAt)}</span>
+                        </div>
+                        <button
+                          type="button"
+                          className="icon-button danger-icon"
+                          aria-label="撤銷此裝置"
+                          title="撤銷此裝置"
+                          disabled={busy === item.token}
+                          onClick={() => revokeSession(item.token)}
+                        >
+                          <Trash2 aria-hidden="true" />
+                        </button>
+                      </div>
+                    ))
+                  : null}
+                {sessionsState === "loading" ? (
+                  <div className="empty-state">
+                    <RefreshCw aria-hidden="true" className="is-spinning" />
+                    <span>正在載入裝置...</span>
+                  </div>
+                ) : null}
+                {sessionsState === "error" ? (
+                  <div className="empty-state empty-state-error" role="alert">
+                    <ShieldOff aria-hidden="true" />
+                    <span>無法載入登入中的裝置。</span>
                     <button
                       type="button"
-                      className="icon-button danger-icon"
-                      aria-label="撤銷此裝置"
-                      title="撤銷此裝置"
-                      disabled={busy === item.token}
-                      onClick={() => revokeSession(item.token)}
+                      className="button button-secondary button-compact"
+                      onClick={() => void loadSessions()}
                     >
-                      <Trash2 aria-hidden="true" />
+                      <RefreshCw aria-hidden="true" />
+                      重試
                     </button>
                   </div>
-                ))}
+                ) : null}
+                {sessionsState === "ready" && sessions.length === 0 ? (
+                  <div className="empty-state">
+                    <MonitorSmartphone aria-hidden="true" />
+                    <span>目前沒有登入中的裝置</span>
+                  </div>
+                ) : null}
               </div>
               <div className="danger-row">
                 <div>
@@ -4624,6 +4794,15 @@ export function App() {
               </ol>
               {activityState === "ready" && activityCursor ? (
                 <div className="activity-more">
+                  {activityMoreError ? (
+                    <div
+                      className="authorization-inline-error"
+                      role="alert"
+                    >
+                      <ShieldOff aria-hidden="true" />
+                      <span>{activityMoreError}</span>
+                    </div>
+                  ) : null}
                   <button
                     type="button"
                     className="button button-secondary button-compact"
@@ -4634,7 +4813,11 @@ export function App() {
                       aria-hidden="true"
                       className={activityLoadingMore ? "is-spinning" : undefined}
                     />
-                    {activityLoadingMore ? "載入中..." : "載入更多"}
+                    {activityLoadingMore
+                      ? "載入中..."
+                      : activityMoreError
+                        ? "重試"
+                        : "載入更多"}
                   </button>
                 </div>
               ) : null}

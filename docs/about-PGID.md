@@ -58,7 +58,7 @@ PGID 把「你是誰」這件事集中到一個由 PG72 自己掌控的地方，
 
 PGID 目前處於 Phase 0：production canary 已部署於 `https://sso.pg72.tw`，日常登入支援 Google 與 Passkey。以下為刻意的產品邊界：
 
-- v1 日常登入只有 Google 與 Passkey；不提供密碼、Email OTP、TOTP、GitHub 或 Discord 登入。
+- v1 日常登入主力是 Google 與 Passkey；另提供 Discord、GitHub、Facebook、Apple、Telegram 社群登入作為額外選項，各 provider 未設定 secret 時會自動隱藏。不提供密碼、Email OTP 或 TOTP 登入。
 - 服務的 OIDC client 由管理員 / developer 明確建立，不開放動態自助註冊。
 - back-channel logout（跨服務即時登出）與部分公開註冊的安全項目仍在進行中，完整清單見 [`codex.md`](../codex.md) §9.2。
 

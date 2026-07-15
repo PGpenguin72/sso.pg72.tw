@@ -1,56 +1,252 @@
+/*
+ * Inter — self-hosted variable font (OFL 1.1, see /fonts/Inter-LICENSE.txt).
+ * Served from the SSO origin so the design keeps working under `font-src 'self'`
+ * with no third-party font CDN. Latin + Latin-ext subsets only; CJK text falls
+ * back to the system stack in --font-sans.
+ */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("/fonts/inter-latin-wght-normal.woff2") format("woff2");
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("/fonts/inter-latin-ext-wght-normal.woff2") format("woff2");
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+    U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB,
+    U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
 :root {
-  color-scheme: light dark;
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    sans-serif;
-  --page-bg: light-dark(#f7f8fa, #151719);
-  --surface: light-dark(#fff, #1d2024);
-  --surface-soft: light-dark(#eef0f3, #25292e);
-  --surface-hover: light-dark(#f1f3f5, #292e34);
-  --surface-selected: light-dark(#e9edf4, #263348);
-  --text: light-dark(#17191d, #edf0f3);
-  --text-subtle: light-dark(#454a52, #c5cbd2);
-  --text-muted: light-dark(#6b7078, #a4abb4);
-  --text-faint: light-dark(#6f747c, #838c97);
-  --border: light-dark(#e1e4e8, #343a40);
-  --border-soft: light-dark(#e2e5e9, #30363c);
-  --border-strong: light-dark(#cfd3d9, #4b535d);
-  --topbar-bg: light-dark(rgba(255, 255, 255, 0.96), rgba(24, 27, 30, 0.96));
-  --primary-bg: light-dark(#17191d, #edf0f3);
-  --primary-hover: light-dark(#343840, #cfd5da);
-  --primary-text: light-dark(#fff, #17191d);
-  --accent: light-dark(#1f63da, #78a9ff);
-  --accent-text: light-dark(#183b74, #a9c8ff);
-  --accent-soft: light-dark(#eef4ff, #1e2b3e);
-  --focus-ring: light-dark(rgba(31, 99, 218, 0.24), rgba(120, 169, 255, 0.35));
-  --success: light-dark(#31804a, #7fd292);
-  --success-text: light-dark(#285c34, #9cdbab);
-  --success-bg: light-dark(#f0f8f2, #1b2a20);
-  --success-border: light-dark(#b7d2bd, #355a3e);
+  color-scheme: dark;
+  --font-sans:
+    "Inter", "Geist Sans", ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", "PingFang TC", "Noto Sans TC", sans-serif;
+  --font-mono:
+    ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+  font-family: var(--font-sans);
+
+  /* --- morden_dark canonical tokens (deep space + indigo accent) --- */
+  --background-deep: #020203;
+  --background-base: #050506;
+  --background-elevated: #0a0a0c;
+  --accent: #5e6ad2;
+  --accent-bright: #6872d9;
+  --accent-glow: rgba(94, 106, 210, 0.3);
+
+  /* radius scale */
+  --r-card: 16px;
+  --r-control: 8px;
+  --r-icon: 12px;
+  --r-pill: 999px;
+
+  /* motion */
+  --ease-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-quick: 200ms;
+  --dur-base: 300ms;
+
+  /* multi-layer shadow + glow formulas */
+  --shadow-card:
+    0 0 0 1px rgba(255, 255, 255, 0.06), 0 2px 20px rgba(0, 0, 0, 0.4),
+    0 0 40px rgba(0, 0, 0, 0.2);
+  --shadow-card-hover:
+    0 0 0 1px rgba(255, 255, 255, 0.1), 0 8px 40px rgba(0, 0, 0, 0.5),
+    0 0 80px rgba(94, 106, 210, 0.1);
+  --shadow-cta:
+    0 0 0 1px rgba(94, 106, 210, 0.5), 0 4px 12px rgba(94, 106, 210, 0.3),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.2);
+  --shadow-cta-hover:
+    0 0 0 1px rgba(94, 106, 210, 0.65), 0 6px 22px rgba(94, 106, 210, 0.45),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.25);
+  --shadow-inset-top: inset 0 1px 0 0 rgba(255, 255, 255, 0.1);
+  --shadow-dialog:
+    0 0 0 1px rgba(255, 255, 255, 0.08), 0 30px 90px rgba(0, 0, 0, 0.6),
+    0 0 120px rgba(94, 106, 210, 0.1);
+  /* frosted glass card face + top hairline highlight */
+  --card-face: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.08),
+    rgba(255, 255, 255, 0.02)
+  );
+
+  /* ambient background gradient (dark default; overridden for light theme) */
+  --ambient-gradient: radial-gradient(
+    ellipse at top,
+    #0a0a0f 0%,
+    #050506 50%,
+    #020203 100%
+  );
+  --ambient-noise-opacity: 0.015;
+  --ambient-grid-opacity: 0.02;
+  --ambient-blob-opacity: 1;
+
+  /* --- semantic tokens (light-dark keeps the toggle working; dark = brand) --- */
+  --page-bg: light-dark(#f6f7f9, #050506);
+  --surface: light-dark(#ffffff, rgba(255, 255, 255, 0.05));
+  --surface-soft: light-dark(#eef0f3, rgba(255, 255, 255, 0.035));
+  --surface-hover: light-dark(#f1f3f5, rgba(255, 255, 255, 0.08));
+  --surface-selected: light-dark(#e9edf4, rgba(94, 106, 210, 0.14));
+  --text: light-dark(#17191d, #ededef);
+  --text-subtle: light-dark(#3a3f47, rgba(255, 255, 255, 0.78));
+  --text-muted: light-dark(#5c626b, #8a8f98);
+  --text-faint: light-dark(#767c85, rgba(255, 255, 255, 0.45));
+  --border: light-dark(#e2e5e9, rgba(255, 255, 255, 0.08));
+  --border-soft: light-dark(#e6e9ed, rgba(255, 255, 255, 0.06));
+  --border-strong: light-dark(#cfd3d9, rgba(255, 255, 255, 0.14));
+  --border-hover: light-dark(#c2c6cc, rgba(255, 255, 255, 0.18));
+  --border-accent: rgba(94, 106, 210, 0.3);
+  --topbar-bg: light-dark(rgba(255, 255, 255, 0.85), rgba(8, 8, 10, 0.62));
+  --primary-bg: var(--accent);
+  --primary-hover: var(--accent-bright);
+  --primary-text: #ffffff;
+  --accent-text: light-dark(#3a45b5, #aeb5ef);
+  --accent-soft: light-dark(#eef0fb, rgba(94, 106, 210, 0.14));
+  --focus-ring: rgba(94, 106, 210, 0.55);
+  --input-bg: light-dark(#ffffff, #0f0f12);
+  --success: light-dark(#2f8047, #7fd292);
+  --success-text: light-dark(#26602f, #9cdbab);
+  --success-bg: light-dark(#eef8f1, rgba(53, 90, 62, 0.2));
+  --success-border: light-dark(#b7d2bd, rgba(98, 200, 120, 0.3));
   --success-dot: light-dark(#3c9552, #62c878);
-  --danger: light-dark(#a62c2c, #ff9b9b);
+  --danger: light-dark(#b5302f, #ff9b9b);
   --danger-strong: light-dark(#8d2525, #ffaaaa);
-  --danger-bg: light-dark(#fff2f2, #311d20);
-  --danger-hover: light-dark(#fff0f0, #3b2024);
-  --danger-border: light-dark(#e2b7b7, #704047);
-  --danger-divider: light-dark(#e4c8c8, #5a3439);
-  --warning: light-dark(#d49b2a, #e4b34f);
-  --warning-border: light-dark(#e5ac39, #d6a23a);
-  --brand-bg: light-dark(#e8f0f2, #263237);
-  --brand-border: light-dark(#d2dee2, #3d4e54);
+  --danger-bg: light-dark(#fdf1f1, rgba(120, 66, 74, 0.22));
+  --danger-hover: light-dark(#fbeeee, rgba(120, 66, 74, 0.3));
+  --danger-border: light-dark(#e2b7b7, rgba(120, 66, 74, 0.55));
+  --danger-divider: light-dark(#e4c8c8, rgba(120, 66, 74, 0.45));
+  --warning: light-dark(#c58a1f, #e4b34f);
+  --warning-border: light-dark(#e5ac39, rgba(214, 162, 58, 0.45));
+  --brand-bg: light-dark(#eef0fb, rgba(94, 106, 210, 0.16));
+  --brand-border: light-dark(#d2dae8, rgba(94, 106, 210, 0.3));
+
   color: var(--text);
-  background: var(--page-bg);
+  background: var(--background-base);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   letter-spacing: 0;
 }
 
 :root[data-theme="light"] {
   color-scheme: light;
+  --ambient-gradient: radial-gradient(
+    ellipse at top,
+    #ffffff 0%,
+    #f6f7f9 55%,
+    #eef1f5 100%
+  );
+  --ambient-noise-opacity: 0.02;
+  --ambient-grid-opacity: 0.035;
+  --ambient-blob-opacity: 0.5;
+  --card-face: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.9),
+    rgba(255, 255, 255, 0.6)
+  );
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
+}
+
+/* --- Signature: layered ambient background (fixed behind all content) --- */
+
+.ambient {
+  position: fixed;
+  z-index: -1;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background: var(--ambient-gradient);
+}
+
+.ambient-grid,
+.ambient-noise {
+  position: absolute;
+  inset: 0;
+}
+
+/* 64px technical grid overlay */
+.ambient-grid {
+  background-image:
+    linear-gradient(to right, currentColor 1px, transparent 1px),
+    linear-gradient(to bottom, currentColor 1px, transparent 1px);
+  background-size: 64px 64px;
+  color: light-dark(#1a2233, #ffffff);
+  opacity: var(--ambient-grid-opacity);
+}
+
+/* SVG feTurbulence noise (inline data-uri; covered by img-src data:) */
+.ambient-noise {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  opacity: var(--ambient-noise-opacity);
+}
+
+.ambient-blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(130px);
+  opacity: var(--ambient-blob-opacity);
+  will-change: transform;
+}
+
+.ambient-blob-1 {
+  top: -20%;
+  left: 50%;
+  width: 900px;
+  height: 620px;
+  margin-left: -450px;
+  background: radial-gradient(
+    circle,
+    rgba(94, 106, 210, 0.28) 0%,
+    rgba(94, 106, 210, 0) 70%
+  );
+  animation: blob-float-a 9s var(--ease-expo) infinite;
+}
+
+.ambient-blob-2 {
+  right: -8%;
+  bottom: -12%;
+  width: 620px;
+  height: 560px;
+  background: radial-gradient(
+    circle,
+    rgba(104, 114, 217, 0.18) 0%,
+    rgba(104, 114, 217, 0) 70%
+  );
+  animation: blob-float-b 11s var(--ease-expo) infinite;
+}
+
+@keyframes blob-float-a {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-24px) rotate(1deg);
+  }
+}
+
+@keyframes blob-float-b {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  50% {
+    transform: translateY(20px) rotate(-1.5deg);
+  }
 }
 
 * {
@@ -83,9 +279,11 @@ a {
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,
-select:focus-visible {
-  outline: 3px solid var(--focus-ring);
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--focus-ring);
 }
 
 svg {
@@ -100,8 +298,9 @@ svg {
   gap: 10px;
   color: var(--text);
   text-decoration: none;
-  font-weight: 760;
+  font-weight: 600;
   font-size: 16px;
+  letter-spacing: -0.01em;
 }
 
 .brand-mark {
@@ -110,8 +309,9 @@ svg {
   height: 34px;
   place-items: center;
   border: 1px solid var(--brand-border);
-  border-radius: 6px;
+  border-radius: var(--r-icon);
   background: var(--brand-bg);
+  box-shadow: var(--shadow-inset-top), 0 0 24px rgba(94, 106, 210, 0.18);
   font-family: "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
   font-size: 20px;
   line-height: 1;
@@ -119,9 +319,26 @@ svg {
 
 .eyebrow {
   color: var(--text-muted);
+  font-family: var(--font-mono);
   font-size: 11px;
-  font-weight: 760;
+  font-weight: 500;
+  letter-spacing: 0.2em;
   text-transform: uppercase;
+}
+
+/*
+ * Shared mono eyebrow/label treatment (technical small-caps). Applied only to
+ * standalone label text — never to <label> elements that wrap an <input>, since
+ * inputs use `font: inherit` and would otherwise pick up the mono face.
+ */
+.profile-grid dt,
+.profile-field-label,
+.consent-domain-label,
+.consent-account-label,
+.report-reasons legend {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  letter-spacing: 0.18em;
 }
 
 .button {
@@ -131,14 +348,21 @@ svg {
   justify-content: center;
   gap: 9px;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--r-control);
   padding: 9px 15px;
   cursor: pointer;
-  font-weight: 690;
+  font-weight: 600;
+  letter-spacing: -0.005em;
   transition:
-    background-color 120ms ease,
-    border-color 120ms ease,
-    color 120ms ease;
+    transform var(--dur-quick) var(--ease-expo),
+    background-color var(--dur-quick) var(--ease-expo),
+    border-color var(--dur-quick) var(--ease-expo),
+    box-shadow var(--dur-quick) var(--ease-expo),
+    color var(--dur-quick) var(--ease-expo);
+}
+
+.button:active:not(:disabled) {
+  transform: scale(0.98);
 }
 
 .button:disabled,
@@ -150,21 +374,31 @@ svg {
 .button-primary {
   background: var(--primary-bg);
   color: var(--primary-text);
+  box-shadow: var(--shadow-cta);
 }
 
 .button-primary:hover:not(:disabled) {
   background: var(--primary-hover);
+  box-shadow: var(--shadow-cta-hover);
+  transform: translateY(-1px);
+}
+
+.button-primary:active:not(:disabled) {
+  box-shadow: var(--shadow-cta);
+  transform: scale(0.98);
 }
 
 .button-secondary {
   border-color: var(--border-strong);
   background: var(--surface);
   color: var(--text);
+  box-shadow: var(--shadow-inset-top);
 }
 
 .button-secondary:hover:not(:disabled) {
-  border-color: var(--text-faint);
+  border-color: var(--border-hover);
   background: var(--surface-hover);
+  transform: translateY(-1px);
 }
 
 .button-danger {
@@ -175,6 +409,7 @@ svg {
 
 .button-danger:hover:not(:disabled) {
   background: var(--danger-bg);
+  transform: translateY(-1px);
 }
 
 .button-wide {
@@ -189,10 +424,13 @@ svg {
   flex: 0 0 auto;
   place-items: center;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--r-control);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
+  transition:
+    background-color var(--dur-quick) var(--ease-expo),
+    color var(--dur-quick) var(--ease-expo);
 }
 
 .icon-button:hover,
@@ -210,6 +448,8 @@ svg {
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text-subtle);
+  box-shadow: var(--shadow-inset-top);
+  backdrop-filter: blur(8px);
 }
 
 .theme-toggle-floating {
@@ -226,7 +466,7 @@ svg {
   justify-content: space-between;
   gap: 16px;
   border: 1px solid var(--success-border);
-  border-radius: 6px;
+  border-radius: var(--r-control);
   background: var(--success-bg);
   color: var(--success-text);
   padding: 10px 12px 10px 14px;
@@ -264,9 +504,27 @@ svg {
 }
 
 .sign-in-heading h1 {
-  margin: 8px 0 10px;
-  font-size: 30px;
-  line-height: 1.2;
+  margin: 10px 0 12px;
+  font-size: 32px;
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  background: linear-gradient(
+    to bottom,
+    #ffffff,
+    rgba(255, 255, 255, 0.72)
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+:root[data-theme="light"] .sign-in-heading h1,
+:root[data-theme="light"] .consent-app-meta h1 {
+  background: none;
+  -webkit-text-fill-color: currentColor;
+  color: var(--text);
 }
 
 .sign-in-heading p {
@@ -534,6 +792,7 @@ svg {
   justify-content: space-between;
   border-bottom: 1px solid var(--border);
   background: var(--topbar-bg);
+  backdrop-filter: blur(18px) saturate(140%);
   padding: 0 28px;
 }
 
@@ -568,7 +827,7 @@ svg {
   max-width: 180px;
   overflow: hidden;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -596,20 +855,24 @@ svg {
 }
 
 .nav-tabs button {
+  position: relative;
   display: flex;
   width: 100%;
   min-height: 40px;
   align-items: center;
   gap: 10px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--r-control);
   background: transparent;
   color: var(--text-muted);
   padding: 8px 10px;
   cursor: pointer;
   font-size: 13px;
-  font-weight: 630;
+  font-weight: 500;
   text-align: left;
+  transition:
+    background-color var(--dur-quick) var(--ease-expo),
+    color var(--dur-quick) var(--ease-expo);
 }
 
 .nav-tabs button:hover {
@@ -618,8 +881,26 @@ svg {
 }
 
 .nav-tabs button.active {
-  background: var(--surface-selected);
+  background: linear-gradient(
+    to right,
+    var(--surface-selected),
+    rgba(94, 106, 210, 0.04)
+  );
   color: var(--accent-text);
+  box-shadow: 0 0 24px rgba(94, 106, 210, 0.12);
+}
+
+/* accent left-edge light bar on the active nav item */
+.nav-tabs button.active::before {
+  content: "";
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 0;
+  width: 3px;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent-glow);
 }
 
 .content {
@@ -648,7 +929,9 @@ svg {
 .admin-band h3 {
   margin: 6px 0 0;
   font-size: 21px;
+  font-weight: 600;
   line-height: 1.25;
+  letter-spacing: -0.018em;
 }
 
 .section-description {
@@ -669,7 +952,7 @@ svg {
   color: var(--success-text);
   padding: 5px 9px;
   font-size: 11px;
-  font-weight: 720;
+  font-weight: 600;
 }
 
 .status-badge span {
@@ -698,7 +981,7 @@ svg {
 .profile-grid dt {
   color: var(--text-muted);
   font-size: 11px;
-  font-weight: 680;
+  font-weight: 500;
   text-transform: uppercase;
 }
 
@@ -706,7 +989,7 @@ svg {
   margin: 8px 0 0;
   overflow-wrap: anywhere;
   font-size: 14px;
-  font-weight: 610;
+  font-weight: 500;
 }
 
 .profile-name-row {
@@ -740,8 +1023,11 @@ svg {
 
 .admin-band {
   margin-top: 56px;
+  border: 1px solid var(--border);
   border-top: 3px solid var(--warning-border);
-  background: var(--surface);
+  border-radius: var(--r-card);
+  background: var(--card-face);
+  box-shadow: var(--shadow-card);
   padding: 22px 24px 24px;
 }
 
@@ -758,7 +1044,7 @@ svg {
   gap: 7px;
   color: var(--text-muted);
   font-size: 11px;
-  font-weight: 680;
+  font-weight: 500;
 }
 
 .input-with-icon {
@@ -843,8 +1129,9 @@ svg {
   gap: 12px;
   margin-top: 18px;
   border: 1px solid var(--warning-border);
-  border-radius: 6px;
+  border-radius: var(--r-control);
   background: var(--surface);
+  box-shadow: var(--shadow-inset-top);
   padding: 14px 16px;
 }
 
@@ -867,6 +1154,11 @@ svg {
 .item-list {
   display: grid;
   margin-top: 18px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
 }
 
 .list-item {
@@ -875,25 +1167,28 @@ svg {
   align-items: center;
   gap: 14px;
   border-bottom: 1px solid var(--border);
-  background: var(--surface);
-  padding: 14px 12px;
+  background: transparent;
+  padding: 14px 14px;
+  transition: background-color var(--dur-quick) var(--ease-expo);
 }
 
-.list-item:first-child {
-  border-top: 1px solid var(--border);
+.list-item:last-child {
+  border-bottom: 0;
 }
 
 .item-icon {
   width: 40px;
   height: 40px;
-  border-radius: 6px;
+  border-radius: var(--r-icon);
   background: var(--surface-soft);
   color: var(--text-subtle);
 }
 
 .key-icon {
+  border: 1px solid var(--border-accent);
   background: var(--accent-soft);
   color: var(--accent);
+  box-shadow: var(--shadow-inset-top), 0 0 18px rgba(94, 106, 210, 0.14);
 }
 
 .item-copy {
@@ -1017,6 +1312,11 @@ svg {
   font-size: 13px;
 }
 
+.item-list > .empty-state,
+.item-list > .empty-state:last-child {
+  border-bottom: 0;
+}
+
 .empty-state-error {
   flex-wrap: wrap;
   color: var(--danger);
@@ -1071,18 +1371,21 @@ svg {
   display: grid;
   place-items: center;
   background: rgb(0 0 0 / 62%);
+  backdrop-filter: blur(6px);
   padding: 20px;
 }
 
 .dialog-panel {
+  position: relative;
   width: min(100%, 440px);
   max-height: calc(100vh - 40px);
   max-height: calc(100dvh - 40px);
   overflow-y: auto;
   border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  background: var(--surface);
-  box-shadow: 0 24px 70px rgb(0 0 0 / 32%);
+  border-radius: var(--r-card);
+  background: var(--background-elevated);
+  background-image: var(--card-face);
+  box-shadow: var(--shadow-dialog);
   padding: 26px;
 }
 
@@ -1091,7 +1394,7 @@ svg {
   width: 42px;
   height: 42px;
   place-items: center;
-  border-radius: 6px;
+  border-radius: var(--r-icon);
   background: var(--danger-bg);
   color: var(--danger);
 }
@@ -1099,6 +1402,8 @@ svg {
 .dialog-panel h2 {
   margin: 20px 0 8px;
   font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -0.018em;
 }
 
 .dialog-panel > p {
@@ -1341,6 +1646,43 @@ svg {
 }
 
 /*
+ * Unified form-control surface (morden_dark inputs). Declared after the
+ * per-component input rules so it overrides their legacy surface/6px radius
+ * without touching layout. Focus is handled by the global :focus-visible ring
+ * plus an accent border below for pointer focus.
+ */
+.invite-form input,
+.invite-form select,
+.client-form textarea,
+.passkey-rename-form input,
+.confirmation-field input,
+.profile-edit-input,
+.role-select,
+.report-detail textarea,
+.user-search-form input {
+  border-color: var(--border-strong);
+  border-radius: var(--r-control);
+  background: var(--input-bg);
+  color: var(--text);
+  transition:
+    border-color var(--dur-quick) var(--ease-expo),
+    box-shadow var(--dur-quick) var(--ease-expo);
+}
+
+.invite-form input:focus,
+.invite-form select:focus,
+.client-form textarea:focus,
+.passkey-rename-form input:focus,
+.confirmation-field input:focus,
+.profile-edit-input:focus,
+.role-select:focus,
+.report-detail textarea:focus,
+.user-search-form input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+/*
  * Actions column for the admin user and OAuth client rows. Unlike
  * `.passkey-actions` (fixed 76px for two icon buttons) these rows carry a role
  * select plus several icon/confirm buttons, so the column is content-sized and
@@ -1408,9 +1750,10 @@ svg {
 .nav-group-heading {
   padding: 0 10px;
   color: var(--text-faint);
+  font-family: var(--font-mono);
   font-size: 10px;
-  font-weight: 760;
-  letter-spacing: 0.04em;
+  font-weight: 500;
+  letter-spacing: 0.22em;
   text-transform: uppercase;
 }
 
@@ -1422,8 +1765,9 @@ svg {
   gap: 9px;
   margin: 16px 0 0;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-control);
   background: var(--surface);
+  box-shadow: var(--shadow-inset-top);
   padding: 11px 13px;
   color: var(--text-muted);
   font-size: 12px;
@@ -1453,7 +1797,7 @@ svg {
 .profile-field-label {
   color: var(--text-muted);
   font-size: 11px;
-  font-weight: 680;
+  font-weight: 500;
   text-transform: uppercase;
 }
 
@@ -1462,7 +1806,7 @@ svg {
   align-items: center;
   gap: 8px;
   font-size: 14px;
-  font-weight: 610;
+  font-weight: 500;
 }
 
 .profile-field-value > span {
@@ -1504,8 +1848,9 @@ svg {
   gap: 14px;
   margin-top: 18px;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
+  border-radius: var(--r-card);
+  background: var(--card-face);
+  box-shadow: var(--shadow-card);
   padding: 14px 16px;
 }
 
@@ -1539,7 +1884,7 @@ svg {
   gap: 16px;
   margin-top: 18px;
   border: 1px dashed var(--border-strong);
-  border-radius: 8px;
+  border-radius: var(--r-card);
   background: var(--surface);
   padding: 16px;
 }
@@ -1552,7 +1897,7 @@ svg {
   place-items: center;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-icon);
   background: var(--surface-soft);
 }
 
@@ -1623,11 +1968,17 @@ svg {
 .resource-item {
   color: inherit;
   text-decoration: none;
-  transition: background-color 120ms ease;
+  transition:
+    background-color var(--dur-quick) var(--ease-expo),
+    color var(--dur-quick) var(--ease-expo);
 }
 
 .resource-item:hover {
   background: var(--surface-hover);
+}
+
+.resource-item:hover .chevron {
+  color: var(--accent);
 }
 
 .resource-item .chevron {
@@ -1711,10 +2062,29 @@ svg {
 }
 
 .consent-card {
+  position: relative;
   border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface);
+  border-radius: var(--r-card);
+  background: var(--card-face);
+  box-shadow: var(--shadow-card);
   padding: 26px 24px 22px;
+}
+
+/* 1px top-edge highlight shared by elevated card surfaces */
+.consent-card::before,
+.dialog-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 1px;
+  border-radius: var(--r-card) var(--r-card) 0 0;
+  background: linear-gradient(
+    to right,
+    transparent,
+    rgba(255, 255, 255, 0.18),
+    transparent
+  );
+  pointer-events: none;
 }
 
 .consent-app {
@@ -1729,10 +2099,11 @@ svg {
   height: 44px;
   flex: 0 0 auto;
   place-items: center;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface-soft);
+  border: 1px solid var(--border-accent);
+  border-radius: var(--r-icon);
+  background: var(--accent-soft);
   color: var(--accent);
+  box-shadow: var(--shadow-inset-top), 0 0 24px rgba(94, 106, 210, 0.16);
 }
 
 .consent-app-meta {
@@ -1744,8 +2115,15 @@ svg {
 .consent-app-meta h1 {
   margin: 2px 0 0;
   font-size: 20px;
+  font-weight: 600;
   line-height: 1.3;
+  letter-spacing: -0.018em;
   overflow-wrap: anywhere;
+  background: linear-gradient(to bottom, #ffffff, rgba(255, 255, 255, 0.74));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
 }
 
 .consent-app-meta .consent-developer {
@@ -1757,9 +2135,10 @@ svg {
   align-items: flex-start;
   gap: 10px;
   margin: 18px 0 0;
-  border: 1px solid var(--accent);
-  border-radius: 8px;
+  border: 1px solid var(--border-accent);
+  border-radius: var(--r-control);
   background: var(--accent-soft);
+  box-shadow: var(--shadow-inset-top);
   padding: 12px 14px;
 }
 
@@ -1780,14 +2159,14 @@ svg {
 .consent-domain-label {
   color: var(--text-muted);
   font-size: 11px;
-  font-weight: 680;
+  font-weight: 500;
   text-transform: uppercase;
 }
 
 .consent-domain-value {
   color: var(--accent-text);
   font-size: 15px;
-  font-weight: 720;
+  font-weight: 600;
   overflow-wrap: anywhere;
 }
 
@@ -1803,8 +2182,9 @@ svg {
   gap: 12px;
   margin-top: 16px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-control);
   background: var(--surface);
+  box-shadow: var(--shadow-inset-top);
   padding: 12px 14px;
 }
 
@@ -1830,7 +2210,7 @@ span.consent-account-avatar {
 .consent-account-label {
   color: var(--text-muted);
   font-size: 11px;
-  font-weight: 680;
+  font-weight: 500;
   text-transform: uppercase;
 }
 
@@ -1906,7 +2286,7 @@ span.consent-account-avatar {
   padding: 0;
   color: var(--text-muted);
   font-size: 12px;
-  font-weight: 680;
+  font-weight: 500;
 }
 
 .report-reason {
@@ -1914,11 +2294,24 @@ span.consent-account-avatar {
   align-items: center;
   gap: 10px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-control);
   background: var(--surface);
   padding: 10px 12px;
   cursor: pointer;
   font-size: 13px;
+  transition:
+    border-color var(--dur-quick) var(--ease-expo),
+    background-color var(--dur-quick) var(--ease-expo);
+}
+
+.report-reason:hover {
+  border-color: var(--border-hover);
+  background: var(--surface-hover);
+}
+
+.report-reason:has(input:checked) {
+  border-color: var(--border-accent);
+  background: var(--accent-soft);
 }
 
 .report-reason input {
@@ -2008,10 +2401,11 @@ span.consent-account-avatar {
   width: 46px;
   height: 46px;
   place-items: center;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
+  border: 1px solid var(--border-accent);
+  border-radius: var(--r-icon);
+  background: var(--accent-soft);
   color: var(--accent);
+  box-shadow: var(--shadow-inset-top), 0 0 24px rgba(94, 106, 210, 0.16);
 }
 
 .public-hero-icon svg {
@@ -2022,7 +2416,9 @@ span.consent-account-avatar {
 .public-hero h1 {
   margin: 6px 0 0;
   font-size: 28px;
+  font-weight: 600;
   line-height: 1.2;
+  letter-spacing: -0.02em;
 }
 
 .public-hero p {
@@ -2042,7 +2438,7 @@ span.consent-account-avatar {
   gap: 9px;
   margin: 24px 0 0;
   border: 1px solid var(--warning-border);
-  border-radius: 6px;
+  border-radius: var(--r-control);
   background: var(--surface);
   padding: 11px 13px;
   color: var(--text-subtle);

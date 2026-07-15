@@ -5,7 +5,12 @@ import { oauthProvider } from "@better-auth/oauth-provider";
 import { passkey } from "@better-auth/passkey";
 
 import { recordAudit, type WaitUntilContext } from "./audit";
-import { normalizeEmail, readRuntimeConfig } from "./config";
+import {
+  CLIENT_SECRET_PREFIX,
+  TRUSTED_CLIENT_IDS,
+  normalizeEmail,
+  readRuntimeConfig,
+} from "./config";
 
 interface InvitationRow {
   id: string;
@@ -267,7 +272,7 @@ export function createAuth(
         allowDynamicClientRegistration: false,
         allowUnauthenticatedClientRegistration: false,
         allowPublicClientPrelogin: true,
-        cachedTrustedClients: new Set(["pg72-test-rp"]),
+        cachedTrustedClients: new Set(TRUSTED_CLIENT_IDS),
         scopes: ["openid", "profile", "email", "offline_access"],
         validAudiences: ["https://api.pg72.tw"],
         accessTokenExpiresIn: 60 * 15,
@@ -278,7 +283,7 @@ export function createAuth(
         prefix: {
           opaqueAccessToken: "pg72_at_",
           refreshToken: "pg72_rt_",
-          clientSecret: "pg72_cs_",
+          clientSecret: CLIENT_SECRET_PREFIX,
         },
         customIdTokenClaims: ({ user }) => ({
           "https://pg72.tw/role": user.role,

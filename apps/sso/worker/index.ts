@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 
+import { adminClientRoutes } from "./admin-clients";
 import {
   consumeSecurityEvents,
   recordAudit,
@@ -305,11 +306,22 @@ app.use(
 
 app.use("/api/admin/*", async (c, next) => {
   const config = readRuntimeConfig(c.env);
-  if (c.req.header("origin") !== config.authBaseUrl) {
+  const origin = c.req.header("origin");
+  // Browsers omit Origin on same-origin GET fetches, so read-only requests
+  // only need to match when the header is present. Mutations always require
+  // the exact first-party origin.
+  const isReadOnly = c.req.method === "GET" || c.req.method === "HEAD";
+  if (
+    isReadOnly
+      ? origin !== undefined && origin !== config.authBaseUrl
+      : origin !== config.authBaseUrl
+  ) {
     return c.json({ error: "invalid_origin" }, 403);
   }
   await next();
 });
+
+app.route("/api/admin/clients", adminClientRoutes);
 
 app.use(
   "/oauth2/token",

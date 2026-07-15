@@ -1,5 +1,18 @@
 export type RegistrationMode = "invite" | "public";
 
+/**
+ * Plaintext client secrets are issued as `pg72_cs_<suffix>`; the provider
+ * strips this prefix before hashing/verification, so the database only stores
+ * the SHA-256 (base64url, unpadded) hash of the suffix.
+ */
+export const CLIENT_SECRET_PREFIX = "pg72_cs_";
+
+/**
+ * Clients cached in-memory by the OAuth provider. Their rows must not be
+ * mutated at runtime because stale cached copies would keep serving traffic.
+ */
+export const TRUSTED_CLIENT_IDS: ReadonlySet<string> = new Set(["pg72-test-rp"]);
+
 export interface RuntimeConfig {
   authBaseUrl: string;
   bootstrapAdminEmail: string;

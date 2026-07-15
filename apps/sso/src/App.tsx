@@ -178,12 +178,13 @@ interface SecurityActivityResponse {
   nextCursor?: string | null;
 }
 
-type ReportReason = "abuse" | "impersonation" | "other" | "phishing";
+// Ids must match the Worker's accepted enum in worker/oauth-reports.ts.
+type ReportReason = "scope_abuse" | "impersonation" | "other" | "phishing";
 
 const REPORT_REASONS: { id: ReportReason; label: string }[] = [
   { id: "impersonation", label: "冒名或假冒官方" },
   { id: "phishing", label: "釣魚或竊取帳號" },
-  { id: "abuse", label: "濫用權限或過度索取資料" },
+  { id: "scope_abuse", label: "濫用權限或過度索取資料" },
   { id: "other", label: "其他問題" },
 ];
 
@@ -283,9 +284,11 @@ type Tab =
 type Theme = "dark" | "light";
 type LoadState = "error" | "loading" | "ready";
 
-const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
+// Must not exceed the Worker's stored-avatar ceiling (256 KiB after decode) so
+// the client rejects oversized files before an upload the server would refuse.
+const MAX_AVATAR_BYTES = 256 * 1024;
 const ACCEPTED_AVATAR_TYPES = ["image/png", "image/jpeg", "image/webp"];
-const ACCEPTED_AVATAR_HINT = "支援 PNG、JPG 或 WebP，檔案上限 2 MB。";
+const ACCEPTED_AVATAR_HINT = "支援 PNG、JPG 或 WebP，檔案上限 256 KB、2048px。";
 
 /** Developer resource links; wiki/API handbook are produced by the docs agent. */
 const DEVELOPER_RESOURCES: { label: string; description: string; href: string }[] =
@@ -489,10 +492,11 @@ function TelegramLogin({ disabled }: { disabled: boolean }) {
     script.setAttribute("data-size", "large");
     script.setAttribute("data-radius", "8");
     script.setAttribute("data-onauth", `${cbName}(user)`);
-    script.setAttribute("data-request-access", "write");
+    // Sign-in needs identity only — do not request write (message-sending) access.
     container.appendChild(script);
     return () => {
       container.replaceChildren();
+      delete (window as unknown as Record<string, unknown>)[cbName];
     };
   }, [config]);
 
@@ -514,8 +518,28 @@ function TelegramLogin({ disabled }: { disabled: boolean }) {
 function SignInView({ pending }: { pending: boolean }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [enabledSocial, setEnabledSocial] = useState<string[] | null>(null);
   const query = new URLSearchParams(window.location.search);
   const oauthQuery = query.has("client_id") && query.has("sig");
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/auth/social-config", { headers: { accept: "application/json" } })
+      .then((r) => (r.ok ? r.json() : { enabled: [] }))
+      .then((c: { enabled?: string[] }) => {
+        if (!cancelled) setEnabledSocial(Array.isArray(c.enabled) ? c.enabled : []);
+      })
+      .catch(() => {
+        if (!cancelled) setEnabledSocial([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const visibleSocial = SOCIAL_SIGN_IN_PROVIDERS.filter(
+    (p) => enabledSocial === null || enabledSocial.includes(p.id),
+  );
 
   const socialSignIn = async (provider: string, label: string) => {
     setBusy(provider);
@@ -579,7 +603,7 @@ function SignInView({ pending }: { pending: boolean }) {
         </div>
 
         <div className="social-grid" aria-busy={pending || busy !== null}>
-          {SOCIAL_SIGN_IN_PROVIDERS.map((provider) => (
+          {visibleSocial.map((provider) => (
             <button
               key={provider.id}
               className="button button-secondary"
@@ -2358,7 +2382,7 @@ export function App() {
         setProfileError(
           payload.error === "rate_limited"
             ? "操作太頻繁,請稍後再試。"
-            : payload.error === "no_uploaded_avatar"
+            : payload.error === "no_avatar"
               ? "尚未上傳頭貼，請先上傳圖片。"
               : "無法更新頭貼,請稍後再試。",
         );
@@ -2392,7 +2416,7 @@ export function App() {
       return;
     }
     if (file.size > MAX_AVATAR_BYTES) {
-      setAvatarError("檔案太大，請選擇 2 MB 以內的圖片。");
+      setAvatarError("檔案太大，請選擇 256 KB 以內的圖片。");
       return;
     }
     const reader = new FileReader();
@@ -2424,11 +2448,13 @@ export function App() {
         setAvatarError(
           payload.error === "rate_limited"
             ? "操作太頻繁，請稍後再試。"
-            : payload.error === "invalid_image" ||
+            : payload.error === "unsupported_avatar_type" ||
+                payload.error === "empty_avatar" ||
                 payload.error === "invalid_request"
               ? "圖片無效，請改用其他 PNG、JPG 或 WebP 圖片。"
-              : payload.error === "image_too_large"
-                ? "檔案太大，請選擇 2 MB 以內的圖片。"
+              : payload.error === "avatar_too_large" ||
+                  payload.error === "avatar_dimensions_too_large"
+                ? "圖片太大，請選擇 256 KB、2048px 以內的 PNG、JPG 或 WebP。"
                 : "無法上傳頭貼，請稍後再試。",
         );
         return;

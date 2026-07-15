@@ -285,10 +285,18 @@ app.use("*", async (c, next) => {
 
   await next();
 
-  const scriptSource =
+  // The Telegram Login Widget loads a script from telegram.org and renders an
+  // iframe from oauth.telegram.org. Allow exactly those two hosts, and only when
+  // Telegram is actually configured, so the auth origin's CSP is not widened
+  // otherwise. Everything else stays 'self'.
+  const telegramEnabled = Boolean(c.env.TELEGRAM_BOT_TOKEN);
+  const scriptBase =
     c.env.ENVIRONMENT === "development"
       ? `script-src 'self' 'nonce-${DEV_CSP_NONCE}'`
       : "script-src 'self'";
+  const scriptSource = telegramEnabled
+    ? `${scriptBase} https://telegram.org`
+    : scriptBase;
   const styleSource =
     c.env.ENVIRONMENT === "development"
       ? `style-src 'self' 'nonce-${DEV_CSP_NONCE}'`
@@ -300,6 +308,7 @@ app.use("*", async (c, next) => {
     "font-src 'self'",
     "form-action 'self' https://accounts.google.com",
     "frame-ancestors 'none'",
+    telegramEnabled ? "frame-src https://oauth.telegram.org" : "frame-src 'none'",
     "img-src 'self' data: https://lh3.googleusercontent.com",
     "object-src 'none'",
     scriptSource,
@@ -404,6 +413,19 @@ app.get("/health", (c) =>
 app.get("/ready", async (c) => {
   await c.env.PG72_ID_DB.prepare("SELECT 1 AS ready").first();
   return c.json({ status: "ready" });
+});
+
+// Public: which optional social login providers are configured, so the sign-in
+// page only renders buttons that can actually complete. A provider activates
+// only when both its id and secret env vars are present (mirrors auth.ts). No
+// secret value is exposed. Telegram has its own /api/auth/telegram/config.
+app.get("/api/auth/social-config", (c) => {
+  const enabled: string[] = [];
+  if (c.env.DISCORD_CLIENT_ID && c.env.DISCORD_CLIENT_SECRET) enabled.push("discord");
+  if (c.env.GITHUB_CLIENT_ID && c.env.GITHUB_CLIENT_SECRET) enabled.push("github");
+  if (c.env.FACEBOOK_CLIENT_ID && c.env.FACEBOOK_CLIENT_SECRET) enabled.push("facebook");
+  if (c.env.APPLE_CLIENT_ID && c.env.APPLE_CLIENT_SECRET) enabled.push("apple");
+  return c.json({ enabled }, 200, { "Cache-Control": "no-store" });
 });
 
 app.post("/passkey/update-passkey", async (c) => {

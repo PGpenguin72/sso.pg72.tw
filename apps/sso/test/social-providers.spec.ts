@@ -29,4 +29,18 @@ describe("optional social providers", () => {
       expect(response.status).not.toBe(200);
     }
   });
+
+  it("reports no enabled social providers via the public config in the test env", async () => {
+    const response = await exports.default.fetch(
+      new Request(`${BASE_URL}/api/auth/social-config`, {
+        headers: { accept: "application/json" },
+      }),
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { enabled: string[] };
+    // No social secrets are configured in the test env, so the sign-in page
+    // must render no social buttons.
+    expect(body.enabled).toEqual([]);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
 });

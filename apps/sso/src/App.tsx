@@ -1391,32 +1391,41 @@ function PublicPageShell({
   children: ReactNode;
 }) {
   return (
-    <>
-      <ThemeToggle floating />
-      <div className="public-shell">
-        <header className="public-header">
-          <Brand />
+    <div className="public-shell">
+      <header className="public-header">
+        <Brand />
+        {/* Inline (non-floating) controls so the fixed theme toggle never
+            overlaps the back link on narrow screens. */}
+        <div className="public-header-actions">
           <a className="public-back" href="/">
             <ArrowLeft aria-hidden="true" />
             回到 PGID
           </a>
-        </header>
-        <main className="public-main">
-          <div className="public-hero">
-            <span className="public-hero-icon">{icon}</span>
-            <h1>{title}</h1>
-            <p>{lead}</p>
-          </div>
-          <div className="public-body">{children}</div>
-        </main>
-        <footer className="public-footer">
-          <span>© {new Date().getFullYear()} PG72</span>
-          <span>
-            聯繫我們：<a href="mailto:contact@pg72.tw">contact@pg72.tw</a>
-          </span>
-        </footer>
-      </div>
-    </>
+          <ThemeToggle />
+        </div>
+      </header>
+      <main className="public-main">
+        <div className="public-hero">
+          <span className="public-hero-icon">{icon}</span>
+          <h1>{title}</h1>
+          <p>{lead}</p>
+        </div>
+        <div className="public-body">{children}</div>
+      </main>
+      <footer className="public-footer">
+        <span>© {new Date().getFullYear()} PG72</span>
+        <span className="public-footer-links">
+          <a href="/about">關於 PGID</a>
+          <span aria-hidden="true"> · </span>
+          <a href="/tos">服務條款</a>
+          <span aria-hidden="true"> · </span>
+          <a href="/pp">隱私權政策</a>
+        </span>
+        <span>
+          聯繫我們：<a href="mailto:contact@pg72.tw">contact@pg72.tw</a>
+        </span>
+      </footer>
+    </div>
   );
 }
 

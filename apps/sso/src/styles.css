@@ -1966,6 +1966,12 @@ span.consent-account-avatar {
   gap: 16px;
 }
 
+.public-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .public-back {
   display: inline-flex;
   align-items: center;

@@ -49,16 +49,21 @@ export async function createSessionFor(userId: string) {
 export async function createAuthenticatedUser(
   email: string,
   role: TestPlatformRole = "user",
+  options: { googleAccount?: boolean } = {},
 ) {
   const userId = crypto.randomUUID();
+  // Real users sign up through Google, so a linked google account row exists
+  // by default; pass { googleAccount: false } to model passkey-only accounts.
+  const googleAccountId =
+    options.googleAccount === false ? null : crypto.randomUUID();
   const now = new Date();
 
-  await env.PG72_ID_DB.prepare(
-    `INSERT INTO user
-      (id, name, email, emailVerified, createdAt, updatedAt, role, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(
+  const statements = [
+    env.PG72_ID_DB.prepare(
+      `INSERT INTO user
+        (id, name, email, emailVerified, createdAt, updatedAt, role, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
       userId,
       "Test User",
       email,
@@ -67,10 +72,27 @@ export async function createAuthenticatedUser(
       now.toISOString(),
       role,
       "active",
-    )
-    .run();
+    ),
+  ];
+  if (googleAccountId) {
+    statements.push(
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO account
+          (id, accountId, providerId, userId, createdAt, updatedAt)
+         VALUES (?, ?, 'google', ?, ?, ?)`,
+      ).bind(
+        googleAccountId,
+        crypto.randomUUID(),
+        userId,
+        now.toISOString(),
+        now.toISOString(),
+      ),
+    );
+  }
+  await env.PG72_ID_DB.batch(statements);
 
-  return createSessionFor(userId);
+  const session = await createSessionFor(userId);
+  return { ...session, googleAccountId };
 }
 
 /**

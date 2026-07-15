@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 
+import { accountRoutes } from "./account";
 import { adminClientRoutes } from "./admin-clients";
 import { requireAdminPermission } from "./admin-gate";
 import {
@@ -58,6 +59,9 @@ interface OAuthMetadata {
   [key: string]: unknown;
 }
 
+// `/update-user` and `/unlink-account` are intentionally absent (and listed in
+// `disabledPaths` in auth.ts): profile updates and unlinking go through the
+// validated first-party routes in worker/account.ts instead.
 const AUTH_EXACT_PATHS = new Set([
   "/change-email",
   "/delete-user",
@@ -73,8 +77,6 @@ const AUTH_EXACT_PATHS = new Set([
   "/revoke-session",
   "/revoke-sessions",
   "/sign-out",
-  "/unlink-account",
-  "/update-user",
 ]);
 
 const AUTH_PATH_PREFIXES = [
@@ -284,6 +286,9 @@ app.use("*", async (c, next) => {
   const pathname = new URL(c.req.url).pathname;
   if (pathname.startsWith("/.well-known/")) {
     c.header("Cache-Control", "public, max-age=300, stale-while-revalidate=60");
+  } else if (pathname.startsWith("/api/avatar/")) {
+    // Generated avatars are deterministic public images; the route sets its
+    // own long-lived Cache-Control instead of the API no-store default.
   } else if (isAuthPath(pathname) || pathname.startsWith("/api/")) {
     c.header("Cache-Control", "no-store");
   }
@@ -327,6 +332,7 @@ app.use("/api/admin/*", async (c, next) => {
 
 app.route("/api/admin/clients", adminClientRoutes);
 app.route("/api/admin/users", adminUserRoutes);
+app.route("/", accountRoutes);
 
 app.use(
   "/oauth2/token",
@@ -458,6 +464,41 @@ app.post("/passkey/delete-passkey", async (c) => {
     .bind(session.user.id)
     .first<PasskeyCountRow>();
   if ((passkeyCount?.count ?? 0) <= 1) {
+    // Deleting the last passkey is forbidden outright when no linked account
+    // remains: the user must always keep at least one sign-in method.
+    const accountCount = await c.env.PG72_ID_DB.prepare(
+      "SELECT COUNT(*) AS count FROM account WHERE userId = ?",
+    )
+      .bind(session.user.id)
+      .first<PasskeyCountRow>();
+    if ((accountCount?.count ?? 0) === 0) {
+      try {
+        await recordAudit(
+          c.env,
+          {
+            eventType: "passkey.delete_blocked",
+            outcome: "denied",
+            subjectId: id,
+          },
+          c.executionCtx,
+        );
+      } catch (error) {
+        console.error(
+          JSON.stringify({
+            event: "passkey_delete_blocked_audit_failed",
+            error: error instanceof Error ? error.name : "UnknownError",
+          }),
+        );
+      }
+      return c.json(
+        {
+          error: "last_login_method",
+          message: "The last remaining sign-in method cannot be removed.",
+        },
+        409,
+      );
+    }
+
     const createdAt = new Date(session.session.createdAt).getTime();
     const sessionIsFresh =
       Number.isFinite(createdAt) && Date.now() - createdAt < FRESH_SESSION_MAX_AGE_MS;

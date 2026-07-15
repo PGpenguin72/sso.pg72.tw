@@ -32,7 +32,11 @@ export function createAuth(
     baseURL: config.authBaseUrl,
     basePath: "/",
     database,
-    disabledPaths: ["/token"],
+    // `/update-user` and `/unlink-account` are disabled so profile changes and
+    // unlinking can only go through the validated, audited first-party routes
+    // in worker/account.ts (name normalization, avatar policy, and the
+    // "keep at least one sign-in method" rule cannot be bypassed).
+    disabledPaths: ["/token", "/update-user", "/unlink-account"],
     secret: env.BETTER_AUTH_SECRET,
     trustedOrigins: [config.authBaseUrl],
     socialProviders: {
@@ -200,6 +204,32 @@ export function createAuth(
               },
               executionCtx,
             );
+          },
+        },
+      },
+      account: {
+        create: {
+          // Fires for the initial sign-up account and for every explicit
+          // `/link-social` completion (implicit linking stays disabled).
+          after: async (account) => {
+            try {
+              await recordAudit(
+                env,
+                {
+                  eventType: "account.linked",
+                  outcome: "success",
+                  subjectId: account.userId,
+                },
+                executionCtx,
+              );
+            } catch (error) {
+              console.error(
+                JSON.stringify({
+                  event: "account_link_audit_failed",
+                  error: error instanceof Error ? error.name : "UnknownError",
+                }),
+              );
+            }
           },
         },
       },

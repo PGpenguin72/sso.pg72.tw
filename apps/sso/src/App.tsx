@@ -138,6 +138,48 @@ interface AdminClientsResponse {
   clients: AdminOAuthClient[];
 }
 
+interface AccountProfileResponse {
+  name: string;
+  image: string | null;
+  avatarSource: "generated" | "google";
+  generatedAvatarUrl: string;
+  googleAvatarUrl: string | null;
+}
+
+interface LoginMethodProvider {
+  id: string;
+  provider: string;
+  createdAt: string;
+  canUnlink: boolean;
+}
+
+interface LoginMethodsResponse {
+  providers: LoginMethodProvider[];
+  passkeyCount: number;
+  linkable: string[];
+}
+
+/**
+ * Sign-in providers a user may explicitly link from the account center.
+ * Adding a future provider only requires a new entry here plus the Worker-side
+ * provider registration; listing/unlink policy is provider-agnostic.
+ */
+const LINKABLE_PROVIDER_DETAILS = {
+  google: { label: "Google" },
+} as const;
+
+type LinkableProviderId = keyof typeof LINKABLE_PROVIDER_DETAILS;
+
+function isLinkableProviderId(value: string): value is LinkableProviderId {
+  return value in LINKABLE_PROVIDER_DETAILS;
+}
+
+function providerLabel(provider: string): string {
+  return isLinkableProviderId(provider)
+    ? LINKABLE_PROVIDER_DETAILS[provider].label
+    : provider;
+}
+
 interface CreatedAdminClientResponse {
   client: AdminOAuthClient;
   clientSecret?: string;
@@ -817,6 +859,14 @@ export function App() {
   const [passkeyDeleteError, setPasskeyDeleteError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [profileInfo, setProfileInfo] = useState<AccountProfileResponse | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const [loginMethods, setLoginMethods] = useState<LoginMethodsResponse | null>(null);
+  const [loginMethodsState, setLoginMethodsState] = useState<LoadState>("loading");
+  const [loginMethodsError, setLoginMethodsError] = useState<string | null>(null);
+  const [unlinkPendingId, setUnlinkPendingId] = useState<string | null>(null);
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<PlatformRole>("user");
   const [adminUsers, setAdminUsers] = useState<AdminUserView[]>([]);
@@ -898,6 +948,44 @@ export function App() {
     }
   }, []);
 
+  const loadProfile = useCallback(async () => {
+    try {
+      const response = await fetch("/api/account/profile", {
+        credentials: "include",
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) throw new Error(`Unable to load profile (${response.status})`);
+      setProfileInfo((await response.json()) as AccountProfileResponse);
+    } catch {
+      setProfileInfo(null);
+    }
+  }, []);
+
+  const loadLoginMethods = useCallback(async () => {
+    setLoginMethodsState("loading");
+    setLoginMethodsError(null);
+    try {
+      const response = await fetch("/api/account/login-methods", {
+        credentials: "include",
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) {
+        throw new Error(`Unable to load login methods (${response.status})`);
+      }
+      const data = (await response.json()) as LoginMethodsResponse;
+      if (!Array.isArray(data.providers)) {
+        throw new Error("Invalid login methods response");
+      }
+      setLoginMethods(data);
+      setLoginMethodsState("ready");
+    } catch {
+      setLoginMethodsError("無法載入登入方式,請稍後重試。");
+      setLoginMethodsState("error");
+    }
+  }, []);
+
   const loadAdminClients = useCallback(async () => {
     setAdminClientsState("loading");
     try {
@@ -964,6 +1052,8 @@ export function App() {
       void loadSessions();
       void loadAudit();
       void loadAuthorizations();
+      void loadProfile();
+      void loadLoginMethods();
       if (canManageClients) {
         void loadAdminClients();
       }
@@ -978,6 +1068,8 @@ export function App() {
     loadAdminUsers,
     loadAudit,
     loadAuthorizations,
+    loadLoginMethods,
+    loadProfile,
     loadSessions,
     session,
   ]);
@@ -1020,6 +1112,7 @@ export function App() {
         return;
       }
       setNotice("Passkey 已新增。");
+      await loadLoginMethods();
     } catch (addError: unknown) {
       setPasskeyError(messageFrom(addError, "無法新增 Passkey。"));
     } finally {
@@ -1073,16 +1166,21 @@ export function App() {
       const result = await authClient.passkey.deletePasskey({ id: passkey.id });
       if (result.error) {
         const message = messageFrom(result.error, "無法刪除 Passkey。");
+        const normalizedMessage = message.toLowerCase();
         setPasskeyDeleteError(
-          message.toLowerCase().includes("fresh") ||
-            message.toLowerCase().includes("session_not_fresh")
-            ? "刪除最後一把 Passkey 前，請登出並重新登入。"
-            : message,
+          normalizedMessage.includes("last_login_method") ||
+            normalizedMessage.includes("sign-in method")
+            ? "帳號至少要保留一種登入方式,請先連結其他登入方式。"
+            : normalizedMessage.includes("fresh") ||
+                normalizedMessage.includes("session_not_fresh")
+              ? "刪除最後一把 Passkey 前，請登出並重新登入。"
+              : message,
         );
         return;
       }
       setPasskeyToDelete(null);
       setNotice("Passkey 已刪除。");
+      await loadLoginMethods();
     } catch (deleteError: unknown) {
       setPasskeyDeleteError(messageFrom(deleteError, "無法刪除 Passkey。"));
     } finally {
@@ -1158,6 +1256,134 @@ export function App() {
     } catch (deleteAccountError: unknown) {
       setDeleteError(messageFrom(deleteAccountError, "網路連線失敗，請稍後再試。"));
     } finally {
+      setBusy(null);
+    }
+  };
+
+  const saveDisplayName = async () => {
+    const name = nameDraft.trim();
+    if (!name) {
+      setProfileError("顯示名稱不能是空白。");
+      return;
+    }
+
+    setBusy("profile:name");
+    setNotice(null);
+    setProfileError(null);
+    try {
+      const response = await fetch("/api/account/profile", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string };
+        setProfileError(
+          payload.error === "invalid_name"
+            ? "名稱無效:去除控制字元與前後空白後必須是 1-64 個字元。"
+            : payload.error === "rate_limited"
+              ? "操作太頻繁,請稍後再試。"
+              : "無法更新顯示名稱,請稍後再試。",
+        );
+        return;
+      }
+      setEditingName(false);
+      setNameDraft("");
+      setNotice("顯示名稱已更新。");
+      await loadProfile();
+      await sessionQuery.refetch();
+    } catch (saveError: unknown) {
+      setProfileError(messageFrom(saveError, "網路連線失敗,請稍後再試。"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const chooseAvatar = async (avatar: "generated" | "google") => {
+    setBusy("profile:avatar");
+    setNotice(null);
+    setProfileError(null);
+    try {
+      const response = await fetch("/api/account/profile", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ avatar }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string };
+        setProfileError(
+          payload.error === "rate_limited"
+            ? "操作太頻繁,請稍後再試。"
+            : "無法更新頭貼,請稍後再試。",
+        );
+        return;
+      }
+      setNotice(avatar === "generated" ? "已改用生成頭貼。" : "已改用 Google 頭貼。");
+      await loadProfile();
+      await sessionQuery.refetch();
+    } catch (avatarError: unknown) {
+      setProfileError(messageFrom(avatarError, "網路連線失敗,請稍後再試。"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const unlinkLoginMethod = async (method: LoginMethodProvider) => {
+    setBusy(`login-method:${method.id}`);
+    setNotice(null);
+    setLoginMethodsError(null);
+    try {
+      const response = await fetch(
+        `/api/account/login-methods/${encodeURIComponent(method.id)}`,
+        {
+          method: "DELETE",
+          credentials: "include",
+          headers: { Accept: "application/json" },
+        },
+      );
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string };
+        setLoginMethodsError(
+          payload.error === "last_login_method"
+            ? "這是帳號僅存的登入方式,無法解除連結。"
+            : payload.error === "rate_limited"
+              ? "操作太頻繁,請稍後再試。"
+              : "無法解除連結,請稍後再試。",
+        );
+        return;
+      }
+      setNotice(`${providerLabel(method.provider)} 已解除連結。`);
+      await loadLoginMethods();
+    } catch {
+      setLoginMethodsError("網路連線失敗,請稍後再試。");
+    } finally {
+      setUnlinkPendingId(null);
+      setBusy(null);
+    }
+  };
+
+  const linkLoginMethod = async (provider: LinkableProviderId) => {
+    setBusy(`link:${provider}`);
+    setNotice(null);
+    setLoginMethodsError(null);
+    try {
+      const result = await authClient.linkSocial({
+        provider,
+        callbackURL: window.location.href,
+      });
+      if (result.error) {
+        setLoginMethodsError(messageFrom(result.error, "無法開始連結流程。"));
+        setBusy(null);
+        return;
+      }
+      // The client follows the provider redirect; assign as a fallback.
+      if (result.data?.url) {
+        window.location.assign(result.data.url);
+      }
+    } catch (linkError: unknown) {
+      setLoginMethodsError(messageFrom(linkError, "無法開始連結流程。"));
       setBusy(null);
     }
   };
@@ -1566,10 +1792,80 @@ export function App() {
                 </span>
               </div>
 
+              {profileError ? (
+                <div className="authorization-inline-error" role="alert">
+                  <ShieldOff aria-hidden="true" />
+                  <span>{profileError}</span>
+                </div>
+              ) : null}
               <dl className="profile-grid">
                 <div>
                   <dt>顯示名稱</dt>
-                  <dd>{session.user.name}</dd>
+                  <dd className="profile-name-row">
+                    {editingName ? (
+                      <>
+                        <form
+                          className="passkey-rename-form"
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            if (busy !== "profile:name") void saveDisplayName();
+                          }}
+                        >
+                          <input
+                            autoFocus
+                            type="text"
+                            maxLength={64}
+                            value={nameDraft}
+                            aria-label="顯示名稱"
+                            disabled={busy === "profile:name"}
+                            onChange={(event) => setNameDraft(event.target.value)}
+                          />
+                        </form>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          aria-label="儲存顯示名稱"
+                          title="儲存"
+                          disabled={busy === "profile:name" || !nameDraft.trim()}
+                          onClick={() => void saveDisplayName()}
+                        >
+                          <Check aria-hidden="true" />
+                        </button>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          aria-label="取消編輯顯示名稱"
+                          title="取消"
+                          disabled={busy === "profile:name"}
+                          onClick={() => {
+                            setEditingName(false);
+                            setNameDraft("");
+                            setProfileError(null);
+                          }}
+                        >
+                          <X aria-hidden="true" />
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <span>{session.user.name}</span>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          aria-label="編輯顯示名稱"
+                          title="編輯顯示名稱"
+                          disabled={busy?.startsWith("profile:") === true}
+                          onClick={() => {
+                            setProfileError(null);
+                            setNameDraft(session.user.name);
+                            setEditingName(true);
+                          }}
+                        >
+                          <Pencil aria-hidden="true" />
+                        </button>
+                      </>
+                    )}
+                  </dd>
                 </div>
                 <div>
                   <dt>Email</dt>
@@ -1584,6 +1880,81 @@ export function App() {
                   <dd>{ROLE_LABELS[sessionRole]}</dd>
                 </div>
               </dl>
+
+              <div className="section-heading authorization-heading">
+                <div>
+                  <span className="eyebrow">Avatar</span>
+                  <h2>頭貼</h2>
+                  <p className="section-description">
+                    你的選擇也會提供給已授權的應用程式。生成頭貼由 PGID
+                    產生,不載入任何外部資源。
+                  </p>
+                </div>
+              </div>
+              <div className="item-list">
+                {profileInfo ? (
+                  <>
+                    <div className="list-item">
+                      <img
+                        className="avatar-choice"
+                        src={profileInfo.generatedAvatarUrl}
+                        alt=""
+                      />
+                      <div className="item-copy">
+                        <strong>生成頭貼</strong>
+                        <span>依帳號識別碼產生的固定圖案。</span>
+                      </div>
+                      {profileInfo.avatarSource === "generated" ? (
+                        <span className="status-badge">
+                          <span /> 使用中
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="button button-secondary button-compact"
+                          disabled={busy?.startsWith("profile:") === true}
+                          onClick={() => void chooseAvatar("generated")}
+                        >
+                          使用
+                        </button>
+                      )}
+                    </div>
+                    {profileInfo.googleAvatarUrl ? (
+                      <div className="list-item">
+                        <img
+                          className="avatar-choice"
+                          src={profileInfo.googleAvatarUrl}
+                          alt=""
+                          referrerPolicy="no-referrer"
+                        />
+                        <div className="item-copy">
+                          <strong>Google 頭貼</strong>
+                          <span>來自你的 Google 帳號個人資料。</span>
+                        </div>
+                        {profileInfo.avatarSource === "google" ? (
+                          <span className="status-badge">
+                            <span /> 使用中
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            className="button button-secondary button-compact"
+                            disabled={busy?.startsWith("profile:") === true}
+                            onClick={() => void chooseAvatar("google")}
+                          >
+                            使用
+                          </button>
+                        )}
+                      </div>
+                    ) : null}
+                  </>
+                ) : (
+                  <div className="empty-state">
+                    <RefreshCw aria-hidden="true" className="is-spinning" />
+                    <span>正在載入頭貼設定...</span>
+                  </div>
+                )}
+              </div>
 
               <div className="section-heading authorization-heading">
                 <div>
@@ -2269,6 +2640,152 @@ export function App() {
           {tab === "security" ? (
             <section className="page-section">
               <div className="section-heading">
+                <div>
+                  <span className="eyebrow">Sign-in methods</span>
+                  <h2>登入方式</h2>
+                  <p className="section-description">
+                    只能在已登入時主動連結新的登入方式,且帳號至少要保留一種。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label="重新整理登入方式"
+                  title="重新整理"
+                  disabled={loginMethodsState === "loading"}
+                  onClick={() => void loadLoginMethods()}
+                >
+                  <RefreshCw
+                    aria-hidden="true"
+                    className={
+                      loginMethodsState === "loading" ? "is-spinning" : undefined
+                    }
+                  />
+                </button>
+              </div>
+              {loginMethodsError ? (
+                <div className="authorization-inline-error" role="alert">
+                  <ShieldOff aria-hidden="true" />
+                  <span>{loginMethodsError}</span>
+                </div>
+              ) : null}
+              <div
+                className="item-list"
+                aria-busy={loginMethodsState === "loading"}
+              >
+                {loginMethodsState === "ready" && loginMethods
+                  ? loginMethods.providers.map((method) => {
+                      const methodBusy = busy === `login-method:${method.id}`;
+                      return (
+                        <div
+                          className="list-item"
+                          key={method.id}
+                          aria-busy={methodBusy}
+                        >
+                          <span className="item-icon">
+                            <LogIn aria-hidden="true" />
+                          </span>
+                          <div className="item-copy">
+                            <strong>{providerLabel(method.provider)}</strong>
+                            <span>已連結</span>
+                            <time dateTime={method.createdAt}>
+                              連結於 {formatDate(method.createdAt)}
+                            </time>
+                          </div>
+                          {method.canUnlink ? (
+                            unlinkPendingId === method.id ? (
+                              <button
+                                type="button"
+                                className="button button-danger button-compact"
+                                disabled={methodBusy}
+                                onClick={() => void unlinkLoginMethod(method)}
+                              >
+                                {methodBusy ? "解除中..." : "確認解除"}
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                className="button button-secondary button-compact"
+                                disabled={methodBusy}
+                                onClick={() => setUnlinkPendingId(method.id)}
+                              >
+                                <ShieldOff aria-hidden="true" />
+                                解除連結
+                              </button>
+                            )
+                          ) : (
+                            <span className="section-description">
+                              唯一登入方式
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })
+                  : null}
+                {loginMethodsState === "ready" && loginMethods ? (
+                  <div className="list-item">
+                    <span className="item-icon key-icon">
+                      <KeyRound aria-hidden="true" />
+                    </span>
+                    <div className="item-copy">
+                      <strong>Passkeys</strong>
+                      <span>
+                        {loginMethods.passkeyCount > 0
+                          ? `${loginMethods.passkeyCount} 把,於下方管理。`
+                          : "尚未註冊,可於下方新增。"}
+                      </span>
+                    </div>
+                  </div>
+                ) : null}
+                {loginMethodsState === "ready" && loginMethods
+                  ? loginMethods.linkable
+                      .filter(isLinkableProviderId)
+                      .map((provider) => (
+                        <div className="list-item" key={`link-${provider}`}>
+                          <span className="item-icon">
+                            <Plus aria-hidden="true" />
+                          </span>
+                          <div className="item-copy">
+                            <strong>{providerLabel(provider)}</strong>
+                            <span>尚未連結</span>
+                          </div>
+                          <button
+                            type="button"
+                            className="button button-primary button-compact"
+                            disabled={busy === `link:${provider}`}
+                            onClick={() => void linkLoginMethod(provider)}
+                          >
+                            <LogIn aria-hidden="true" />
+                            {busy === `link:${provider}`
+                              ? "前往連結..."
+                              : `連結 ${providerLabel(provider)}`}
+                          </button>
+                        </div>
+                      ))
+                  : null}
+                {loginMethodsState === "loading" ? (
+                  <div className="empty-state">
+                    <RefreshCw aria-hidden="true" className="is-spinning" />
+                    <span>正在載入登入方式...</span>
+                  </div>
+                ) : null}
+                {loginMethodsState === "error" ? (
+                  <div className="empty-state empty-state-error" role="alert">
+                    <ShieldOff aria-hidden="true" />
+                    <span>{loginMethodsError}</span>
+                    <button
+                      type="button"
+                      className="button button-secondary button-compact"
+                      onClick={() => void loadLoginMethods()}
+                    >
+                      <RefreshCw aria-hidden="true" />
+                      重試
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="section-heading session-heading">
                 <div>
                   <span className="eyebrow">Authentication</span>
                   <h2>Passkeys</h2>

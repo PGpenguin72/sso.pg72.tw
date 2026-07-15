@@ -10,6 +10,20 @@ PGID is the custom identity provider for PG72 services. Phase 0 runs on Cloudfla
 
 The canonical architecture and migration decisions are in [`codex.md`](./codex.md). A production canary is deployed at `https://sso.pg72.tw`, but production relying parties must not switch traffic until the production Google login and newly registered `sso.pg72.tw` Passkey gate passes.
 
+## Registration Policy
+
+Registration is public (owner decision, 2026-07-16): `REGISTRATION_MODE` in `apps/sso/wrangler.jsonc` is `"public"`, and it takes effect when the owner deploys. Invitations remain fully functional; a pending invitation still assigns its role (for example `admin`) and is consumed on first sign-in. The `invite` mode code path is retained and tested.
+
+Current safeguards in public mode:
+
+- A first Google sign-in creates the account only when Google asserts a verified email; unverified emails are rejected in both modes.
+- Passkey registration still requires an existing account and an authenticated session.
+- New-account creation has its own per-IP Workers Rate Limiting budget (`REGISTRATION_RATE_LIMITER`, 5/min), stricter than the sign-in limiter (30/min). The budget is consumed before any denial audit write or invitation lookup so those cannot be spammed.
+- Suspended accounts and deleted (missing) users are blocked at session creation, so public mode does not bypass suspension. A deleted user who re-registers receives a brand-new `sub`.
+- Registration denials never reveal whether an account exists.
+
+Known-incomplete security gates, accepted by the owner when opening registration (tracked in `codex.md` §9.2): Turnstile/bot challenge (TODO), Terms/Privacy consent recording, abuse detection and response runbook, independent security review, OIDC conformance/security testing, DAST, SAST/secret/IaC scan gates, load testing, backup-restore and key-rotation drills, restricted state for new accounts, and full back-channel logout rollout.
+
 ## Workspace
 
 ```text

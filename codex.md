@@ -1,7 +1,7 @@
 # PGID SSO 架構規格
 
 > 狀態：Canonical Architecture Baseline  
-> 最後更新：2026-07-15  
+> 最後更新：2026-07-16  
 > 預定服務名稱：PGID  
 > 預定 Issuer：`https://sso.pg72.tw`
 
@@ -14,6 +14,8 @@
 遠端 test RP、已停用的 Arcant authentication Worker/D1，以及 Copy Preview 資源均在完整 SQL export 後退役，帳號 D1 數量由 11 降至 8。Cloud Clipboard 自動 Preview deployment 已關閉，Preview D1 binding 與 Preview-only OAuth client 已移除。Link 與 Status 的 Preview D1 尚未建立；後續 Preview 將使用獨立 Cloudflare account，不得以 production D1 代替 Preview。
 
 Status 原始碼曾包含硬編碼 Telegram bot credential；目前兩個 seed path 都已改為 disabled empty configuration，source secret scan 不再命中。該 credential 必須視為已外洩：若 Telegram 端仍有效，production owner 需旋轉/revoke，不能只依賴 Git 中刪除字串。SSO 的 Cloudflare Vite build 也已加入 post-build cleanup，production/preview artifact 不再保留 plugin 為 `vite preview` 複製的 `.dev.vars*`。
+
+2026-07-16 起 `REGISTRATION_MODE` 切換為 `public`（owner 決策）：Google 首次登入以 verified email 直接建帳號，邀請功能保留，新帳號建立加上獨立 per-IP `REGISTRATION_RATE_LIMITER`，suspended/deleted 使用者仍被 session 建立檢查擋下。公開註冊的完整安全 gate 尚未完成，未完成項目列於 §9.2，不得因文件更新而視為已完成。
 
 2026-07 的 dependency audit 另發現 `GHSA-p2fr-6hmx-4528`：Better Auth stable `1.6.x` 未綁定 RFC 8707 resource indicator 與原 authorization grant。Phase 0 保持單一 `validAudiences`，並在 Worker 邊界拒絕 authorize/token 的所有 `resource` 參數；v1 不以 resource indicator 作授權邊界。詳細 owner、補償控制與 exit condition 見 [`SECURITY.md`](./SECURITY.md)。第一個包含修正的 stable release 發布後，必須讓 core/plugins 一起升級、重產 migration 並重跑完整 protocol suite。
 
@@ -32,8 +34,8 @@ PG72 目前有多個需要登入的網站，每個服務各自使用 Google OAut
 
 ## 2. 已確認需求
 
-- 第一階段僅開放朋友，採邀請制。
-- 未來可切換成任何人皆可註冊。
+- 第一階段原採邀請制；owner 已於 2026-07-16 決定切換為公開註冊（邀請功能保留，見 §9）。
+- 公開註冊的完整安全 gate 尚未全部完成，未完成項目必須持續列於 §9.2 並如實維護。
 - 第一階段登入方式為 Google 與 Passkey。
 - 優先部署於 Cloudflare Workers 與 D1。
 - SSO 核心使用自己的網域、介面、使用者資料、政策與簽章金鑰。
@@ -264,21 +266,39 @@ invited -> active -> suspended -> deleted
 
 ## 9. 註冊與登入政策
 
-### 9.1 邀請階段
+> Owner 決策（2026-07-16）：`REGISTRATION_MODE` 由 `invite` 切換為 `public`，開放所有人註冊。
+> Owner 已知悉本規格原要求「公開註冊前先通過完整安全 gate」，並在 gate 未全部完成的情況下決定開放。
+> 本節如實記錄現行行為與尚未完成的 gate 項目；任何人不得以本節文字宣稱 gate 已完成。
 
-- `registration_mode = invite_only`。
+### 9.1 邀請功能（保留）
+
+- 邀請功能在公開註冊模式下保留且可用，與公開註冊不衝突。
 - 管理員以 Email 建立有時效且單次使用的邀請。
-- 第一次 Google 登入必須回傳已驗證且符合邀請的 Email。
-- 帳號建立後提示使用者新增 Passkey。
-- 邀請 token 只存 hash，使用後立即失效。
+- 有未消耗邀請的 Email 完成首次登入時，帳號取得邀請指定的角色（例如 `admin`），邀請立即標記為已消耗。
+- `REGISTRATION_MODE=invite` 程式路徑保留：未受邀 Email 拒絕建立帳號，回傳 `INVITATION_REQUIRED`，並寫入 `registration.denied` audit。
 
-### 9.2 公開註冊階段
+### 9.2 公開註冊（現行）
 
-- `registration_mode = open`。
-- 啟用 Turnstile、IP/device rate limits 與濫用偵測。
-- 要求同意 Terms 與 Privacy Policy，記錄版本與時間。
-- 新帳號可先進入限制狀態，再依產品需求開放敏感功能。
-- 公開前必須完成安全審查、備份還原演練與 abuse response 流程。
+現行行為（`REGISTRATION_MODE=public`）：
+
+- 第一次 Google 登入直接建立帳號；Google 必須回傳已驗證 Email（`email_verified`），否則拒絕（`EMAIL_NOT_VERIFIED`），兩種模式皆強制。
+- Passkey 註冊仍需先有帳號與已登入 session；公開註冊不開放無帳號的 Passkey 註冊。
+- 新帳號建立有獨立、比登入更嚴的 per-IP rate limit（Workers Rate Limiting binding `REGISTRATION_RATE_LIMITER`，5 次/60 秒；登入面為 `AUTH_RATE_LIMITER` 30 次/60 秒）。限流檢查在任何 denial audit 寫入與邀請查詢之前消耗額度，避免被濫刷。
+- 觸發限流寫入 `registration.rate_limited` audit；所有 registration 拒絕訊息不洩漏帳號是否存在。
+- `suspended` 使用者不因公開模式繞過管制：session 建立前一律檢查中央 `user.status`，非 `active`（含已刪除、user row 不存在）一律拒絕。
+- 已刪除帳號重新註冊會取得全新的 `sub`；RP 視其為新使用者，不會繼承舊資料。
+
+尚未完成的公開註冊安全 gate（owner 已知情，開放時未完成）：
+
+- [ ] Turnstile（或等效 bot challenge）於註冊/登入 flow。
+- [ ] Terms 與 Privacy Policy 同意、版本與時間記錄。
+- [ ] 濫用偵測與封鎖流程（abuse response runbook）。
+- [ ] 獨立安全審查與 OIDC conformance/security testing。
+- [ ] DAST 覆蓋 auth、OIDC、admin、gateway 與 logout endpoints。
+- [ ] SAST、secret scan、IaC/config scan 自動化 gate。
+- [ ] 負載測試、備份還原演練、key rotation 與 Queue retry/DLQ 演練。
+- [ ] 新帳號限制狀態（限縮敏感功能）機制。
+- [ ] Back-channel logout 全面上線與 DLQ 告警。
 
 ### 9.3 Google
 
@@ -507,8 +527,8 @@ Audit metadata 不得包含 access token、refresh token、session token、autho
 - 管理員至少具有兩種獨立復原方式，並保留受控 break-glass 程序。
 - CORS 採 allowlist，不對 credentialed endpoints 使用 `*`。
 - 所有 state-changing endpoints 使用 CSRF 保護或不依賴 cookie 的等效防護。
-- 登入、callback、token、Passkey、邀請與管理 endpoints 具獨立 rate limits。
-- 公開註冊前啟用 Turnstile、濫用偵測與封鎖流程。
+- 登入、callback、token、Passkey、邀請與管理 endpoints 具獨立 rate limits；新帳號建立另有更嚴的 per-IP `REGISTRATION_RATE_LIMITER`。
+- Turnstile、濫用偵測與封鎖流程尚未完成，屬 §9.2 的未完成 gate 項目（owner 已知情先行開放公開註冊）。
 - Error response 不洩漏帳號是否存在、token 狀態、secret 或內部 exception。
 - 日誌與 telemetry 預設遮蔽 PII 與憑證。
 
@@ -703,11 +723,13 @@ Webmail 仍須分成兩個問題：
 - 設定 File Browser proxy auth 與 Roundcube Generic OIDC。
 - 建立 auth gateway、origin lockdown 與管理服務 fail-closed policy。
 
-### Phase 4：公開註冊準備
+### Phase 4：公開註冊補課
 
-- Terms/Privacy、Turnstile、abuse controls、帳號刪除。
-- 安全審查、負載測試、備份還原與事故演練。
-- 修正所有 high/critical findings 後才切換 `registration_mode = open`。
+Owner 已於 2026-07-16 決定先行切換 `REGISTRATION_MODE = public`（僅具備 verified-email 強制、per-IP 註冊限流、suspended/deleted 管制與 audit）。原 Phase 4 條件成為開放後必須補齊的欠帳，完整清單見 §9.2：
+
+- Terms/Privacy、Turnstile、abuse controls、新帳號限制狀態。
+- 獨立安全審查、DAST、負載測試、備份還原與事故演練。
+- 所有 high/critical findings 修正後，才可宣稱公開註冊 gate 完成。
 
 ## 21. 建議目錄結構
 

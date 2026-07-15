@@ -7,8 +7,9 @@
 - Issuer 固定為 `https://sso.pg72.tw`。
 - SSO 由 PG72 自行掌控，不使用 Cloudflare Access 作登入或授權層。
 - v1 日常登入方式只有 Google 與 Passkey。
-- v1 不提供密碼、Email OTP、TOTP、GitHub、Discord 或公開註冊。
-- 第一階段邀請制；未來公開註冊必須先通過 `codex.md` 的安全 gate。
+- v1 不提供密碼、Email OTP、TOTP、GitHub 或 Discord 登入。
+- 公開註冊已開放（owner 決策，2026-07-16），邀請功能保留可用。Google 首次登入需 verified email 直接建帳號；Passkey 註冊仍需先有帳號與已登入 session。
+- 公開註冊的完整安全 gate 尚未全部完成；未完成項目如實列於 `codex.md` §9.2（含 Turnstile、Terms/Privacy、獨立安全審查、DAST 等），不得以文件宣稱取代驗證。
 - 必須支援裝置 session、單一/全部撤銷、全域登出、audit 與管理員停權。
 - 不共用 `Domain=.pg72.tw` cookie。所有 app 使用 OIDC redirect 與自己的 host-only session。
 - Email 不是使用者主鍵；所有服務以不可變 OIDC `sub` 識別使用者。
@@ -133,7 +134,7 @@ File Browser/Roundcube production 部署必須從鎖定版本、checksum/image d
 
 ## Security Gate
 
-Production 或公開註冊前至少通過：
+Owner 已於 2026-07-16 在下列 gate 未全部完成前決定開放公開註冊；此為已知偏離，未完成項目列於 `codex.md` §9.2 並必須持續補齊。Production 完整宣告或 gate 完成聲明前至少通過：
 
 - TypeScript typecheck、lint、unit 與 integration tests。
 - `@cloudflare/vitest-pool-workers` workerd tests。

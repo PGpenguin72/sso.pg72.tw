@@ -11,15 +11,10 @@ import {
   normalizeEmail,
   readRuntimeConfig,
 } from "./config";
-
-interface InvitationRow {
-  id: string;
-  role: "admin" | "user";
-}
-
-interface StatusRow {
-  status: "active" | "suspended";
-}
+import {
+  assertSessionUserActive,
+  authorizeRegistration,
+} from "./registration";
 
 type AuthDatabase = NonNullable<Parameters<typeof betterAuth>[0]["database"]>;
 
@@ -155,51 +150,22 @@ export function createAuth(
     databaseHooks: {
       user: {
         create: {
-          before: async (user) => {
-            const email = normalizeEmail(user.email);
-            const isBootstrapAdmin = email === config.bootstrapAdminEmail;
-
-            if (config.registrationMode === "public") {
-              return {
-                data: {
-                  ...user,
-                  role: isBootstrapAdmin ? "admin" : "user",
-                  status: "active",
-                },
-              };
-            }
-
-            const invitation = await env.PG72_ID_DB.prepare(
-              `SELECT id, role
-                 FROM invitation
-                WHERE email_normalized = ?
-                  AND consumed_at IS NULL
-                  AND revoked_at IS NULL
-                  AND expires_at > ?
-                LIMIT 1`,
-            )
-              .bind(email, new Date().toISOString())
-              .first<InvitationRow>();
-
-            if (!invitation && !isBootstrapAdmin) {
-              await recordAudit(
-                env,
-                { eventType: "registration.denied", outcome: "denied" },
-                executionCtx,
-              );
-              throw new APIError("FORBIDDEN", {
-                code: "INVITATION_REQUIRED",
-                message: "This PGID account requires an invitation.",
-              });
-            }
-
-            return {
-              data: {
-                ...user,
-                role: isBootstrapAdmin ? "admin" : (invitation?.role ?? "user"),
-                status: "active",
+          before: async (user, ctx) => {
+            const clientIp =
+              ctx?.request?.headers.get("cf-connecting-ip") ??
+              ctx?.headers?.get("cf-connecting-ip") ??
+              "local";
+            const grant = await authorizeRegistration(
+              env,
+              config,
+              {
+                email: user.email,
+                emailVerified: user.emailVerified === true,
+                clientIp,
               },
-            };
+              executionCtx,
+            );
+            return { data: { ...user, ...grant } };
           },
           after: async (user) => {
             const email = normalizeEmail(user.email);
@@ -227,18 +193,7 @@ export function createAuth(
       session: {
         create: {
           before: async (session) => {
-            const user = await env.PG72_ID_DB.prepare(
-              "SELECT status FROM user WHERE id = ? LIMIT 1",
-            )
-              .bind(session.userId)
-              .first<StatusRow>();
-
-            if (!user || user.status !== "active") {
-              throw new APIError("FORBIDDEN", {
-                code: "ACCOUNT_SUSPENDED",
-                message: "This account is not allowed to create a session.",
-              });
-            }
+            await assertSessionUserActive(env, session.userId);
             return { data: session };
           },
         },

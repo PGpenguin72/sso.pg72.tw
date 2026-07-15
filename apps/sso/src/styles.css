@@ -321,10 +321,99 @@ svg {
   margin-top: 22px;
 }
 
-.client-host {
+.consent-developer {
   margin: 0;
   color: var(--text-muted);
   font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.consent-domain {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 22px 0 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 12px 14px;
+  color: var(--text-subtle);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.consent-domain svg {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.consent-domain strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.scope-offline-flag {
+  color: var(--warning, #b45309);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.trust-links {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 4px;
+}
+
+.trust-link-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.trust-link-row dt {
+  color: var(--text-muted);
+}
+
+.trust-link-row dd {
+  margin: 0;
+}
+
+.trust-link-row a {
+  color: var(--accent);
+}
+
+.trust-missing {
+  color: var(--text-muted);
+}
+
+.client-trust-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 12px;
+}
+
+.client-trust-form label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.client-trust-form input {
+  font-size: 13px;
+}
+
+.client-trust-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .consent-account {

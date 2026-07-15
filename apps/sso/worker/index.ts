@@ -8,6 +8,12 @@ import {
   type SecurityEvent,
 } from "./audit";
 import { createAuth } from "./auth";
+import {
+  developerNameFromMetadata,
+  parseClientMetadataRecord,
+  redirectHostsFromUris,
+  trustUrlOrNull,
+} from "./client-metadata";
 import { normalizeEmail, readRuntimeConfig } from "./config";
 
 type AppEnv = { Bindings: Env };
@@ -42,6 +48,17 @@ interface AuthorizationRow {
 
 interface ConsentClientRow {
   client_id: string;
+}
+
+interface ConsentClientInfoRow {
+  clientId: string;
+  name: string | null;
+  disabled: number | null;
+  redirectUris: string;
+  scopes: string | null;
+  tos: string | null;
+  policy: string | null;
+  metadata: string | null;
 }
 
 interface AuthRedirectPayload {
@@ -535,6 +552,57 @@ app.get("/api/account/audit", async (c) => {
     .all();
 
   return c.json({ events: events.results });
+});
+
+/**
+ * Serves the client identity shown on the consent screen. Every field comes
+ * from the D1 client registration written by an administrator; nothing from
+ * the authorization request query can influence the response, which is what
+ * prevents a client from impersonating another application's name, developer,
+ * or destination hosts.
+ */
+app.get("/api/consent/client", async (c) => {
+  const auth = createAuth(c.env, c.executionCtx);
+  const session = await auth.api.getSession({ headers: c.req.raw.headers });
+  if (!session || session.user.status !== "active") {
+    return c.json({ error: "unauthorized" }, 401);
+  }
+
+  const clientId = c.req.query("client_id") ?? "";
+  if (!clientId || clientId.length > 256) {
+    return c.json({ error: "invalid_client_id" }, 400);
+  }
+
+  const row = await c.env.PG72_ID_DB.prepare(
+    `SELECT clientId, name, disabled, redirectUris, scopes, tos, policy,
+            metadata
+       FROM oauthClient
+      WHERE clientId = ?
+      LIMIT 1`,
+  )
+    .bind(clientId)
+    .first<ConsentClientInfoRow>();
+  if (!row || row.disabled === 1) {
+    return c.json({ error: "client_not_found" }, 404);
+  }
+
+  const metadata = parseClientMetadataRecord(row.metadata);
+  return c.json({
+    client: {
+      clientId: row.clientId,
+      name: row.name ?? row.clientId,
+      developerName: developerNameFromMetadata(metadata),
+      // Trust links are re-validated on read so a row written outside the
+      // admin API can never place a non-HTTPS link on the consent screen.
+      privacyPolicyUrl: trustUrlOrNull(row.policy),
+      termsOfServiceUrl: trustUrlOrNull(row.tos),
+      // Derived from the registered redirect URIs only; the redirect_uri
+      // query parameter of the live request is validated against the same
+      // registration by the OAuth provider before consent is ever shown.
+      redirectHosts: redirectHostsFromUris(parseScopes(row.redirectUris)),
+      scopes: parseScopes(row.scopes ?? "[]"),
+    },
+  });
 });
 
 app.get("/api/account/authorizations", async (c) => {

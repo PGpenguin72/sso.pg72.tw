@@ -24,6 +24,11 @@
 | 2026-07-16 02:52 | agent 回報 | 原專案代碼/webmail.pg72.tw | deploy/pgid/oauth.inc.php, README.md | webmail Roundcube OIDC 串接方案完成(commit 478e7be, branch pgid-oidc-deploy-config);Roundcube 用 client_secret_post 與 PGID 相容;mail backend 待 owner 確認 | 完成 |
 | 2026-07-16 02:56 | agent 回報 | 原專案代碼/file.pg72.tw | deploy/pgid/(docker-compose、oauth2-proxy、nginx、filebrowser 設定) | file.pg72.tw oauth2-proxy gateway 串接方案完成(commit 306169ce, branch master);CVE-2026-54089 補償控制落地;client pg72-file 用 client_secret_post | 完成 |
 | 2026-07-16 02:58 | agent 回報 | 原專案代碼/upload.pg72.tw | utils/oidc_client.py, tests/, docs/pgid-cutover-runbook.md | upload admin OIDC 定案(commit 022ef81, branch windows);改用 client_secret_post;client pg72-upload;13 測試全過 | 完成 |
+| 2026-07-16 03:02 | SSH 唯讀勘查 | (VPS 23.146.248.189) | — | owner 授權勘查 mail backend:Debian12/Postfix3.7.11/Dovecot2.3.19/Roundcube1.6.16;Dovecot 無 XOAUTH2,passwd-file SHA512;IMAP 993/SMTP 25;未做任何變更 | 完成 |
+| 2026-07-16 03:03 | 設計勘查 | ~/ahsnccu-ann | src/*.js | 抽出設計參考色票:深藍黑底+翡翠綠終端色+slate 灰,作 PGID 設計語言基礎 | 完成 |
+| 2026-07-16 03:05 | 更新訊息檔 | sso.pg72.tw | msg.md | 記錄 D1-D4 owner 答覆、D3 mail 勘查結論與套用二選一、自主推進聲明 | 完成 |
+| 2026-07-16 03:06 | agent 回報 | worktree docs | docs/、wiki/、README.md、AGENTS.md | API 手冊/GitBook wiki/介紹/README/AGENTS 完成(4 commit, branch worktree-agent-a99e...);待合併,README 的 Copy/Link 狀態需更正為已上線 | 完成 |
+| 2026-07-16 03:07 | 派工 | 原專案代碼/webmail.pg72.tw | (待產出) | 派出 mail OAuth 解法 agent:Dovecot oauth2 introspection + Postfix SASL + Roundcube XOAUTH2 設定與 apply runbook(僅檔案,不動 VPS) | 進行中 |
 
 ### 本 session 稍早已完成的重大操作(補記)
 

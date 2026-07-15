@@ -55,3 +55,4 @@
 | 2026-07-16 04:53 | SEO 修正 | sso.pg72.tw | apps/sso/index.html, public/(robots/sitemap/llms/favicon), App.tsx | 套用 AI 讀者建議:meta/OG/JSON-LD、robots/sitemap/llms.txt、favicon、修死連結;build 確認資產進 dist(commit 26ce122) | 完成 |
 | 2026-07-16 04:55 | 派工(修正) | worktree | apps/sso | 派出 QA 修正 agent:H1 破版/M1-M4/L1-L8/per-route title/文件矛盾;不做換膚(階段30) | 進行中 |
 | 2026-07-16 05:05 | 合併+驗證 | sso.pg72.tw | apps/sso/(App.tsx,styles.css), CLAUDE.md, codex.md, docs | 合併 QA 修正(10 commit):H1 破版/M1-M4/L1-L8/per-route title/文件矛盾;144 測試過;PGID 功能+QA 完成 | 完成 |
+| 2026-07-16 05:10 | 派工(階段30) | worktree | apps/sso | 派出 PGID 視覺重塑 agent(morden_dark:token/Inter/分層背景/glow/多層陰影/mono/微互動),保留 a11y,不 push | 進行中 |

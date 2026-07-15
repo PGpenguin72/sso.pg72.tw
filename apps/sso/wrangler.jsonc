@@ -61,6 +61,21 @@
     "REGISTRATION_MODE": "invite",
     "ENVIRONMENT": "production"
   },
+  // `secrets.required` is the only key Wrangler recognises here (it drives type
+  // generation and local "missing secret" warnings), so ONLY the core secrets
+  // the Worker cannot start without belong in it.
+  //
+  // Optional social-login secrets are deliberately NOT listed as required: each
+  // provider activates only when its id/secret pair is present (see
+  // worker/auth.ts and worker/telegram.ts), so a missing value never fails
+  // startup or the core Google/Passkey login. They are typed in
+  // worker/social-providers.env.d.ts and documented in .dev.vars.example.
+  // Optional (set later via Wrangler secrets / Secrets Store, never committed):
+  //   DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET,
+  //   GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET,
+  //   FACEBOOK_CLIENT_ID, FACEBOOK_CLIENT_SECRET,
+  //   APPLE_CLIENT_ID, APPLE_CLIENT_SECRET, APPLE_APP_BUNDLE_IDENTIFIER,
+  //   TELEGRAM_BOT_TOKEN
   "secrets": {
     "required": [
       "BETTER_AUTH_SECRET",

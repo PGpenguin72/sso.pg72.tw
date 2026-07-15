@@ -1,9 +1,22 @@
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 
+import {
+  base64ToBytes,
+  bytesToBase64,
+  decodeDataUrl,
+  validateAvatarBytes,
+} from "./avatar";
 import { recordAudit } from "./audit";
 import { createAuth } from "./auth";
 import { readRuntimeConfig } from "./config";
+import {
+  decodeActivityCursor,
+  encodeActivityCursor,
+  providerFromMetadata,
+  summaryForEvent,
+  SELF_ACTIVITY_EVENT_TYPES,
+} from "./security-activity";
 
 type AppEnv = { Bindings: Env };
 
@@ -11,7 +24,10 @@ export const DISPLAY_NAME_MAX_LENGTH = 64;
 const DISPLAY_NAME_MAX_INPUT_LENGTH = 1024;
 /** Versioned so a future avatar style can change URLs without cache poisoning. */
 const GENERATED_AVATAR_PATH_PREFIX = "/api/avatar/v1/";
+/** Path prefix for a user's self-hosted uploaded avatar (`.../<avatarId>`). */
+const UPLOADED_AVATAR_PATH_PREFIX = "/api/account/avatar/";
 const AVATAR_GRID = 5;
+const SECURITY_ACTIVITY_PAGE_SIZE = 25;
 
 /**
  * Control (Cc) and format (Cf) characters are stripped before validation:
@@ -47,7 +63,10 @@ interface LoginMethodCountRow {
   passkeys: number;
 }
 
-export type AvatarSource = "google" | "generated";
+export type AvatarSource = "google" | "generated" | "upload";
+
+/** Request body of `POST /api/account/avatar/mode`. */
+type AvatarMode = "google" | "identicon" | "upload";
 
 /**
  * Providers a signed-in user may explicitly link. Adding a future provider
@@ -85,6 +104,36 @@ export function isGeneratedAvatarUrl(
   } catch {
     return false;
   }
+}
+
+export function uploadedAvatarUrl(authBaseUrl: string, avatarId: string): string {
+  return `${authBaseUrl}${UPLOADED_AVATAR_PATH_PREFIX}${avatarId}`;
+}
+
+export function isUploadedAvatarUrl(
+  value: string | null,
+  authBaseUrl: string,
+): boolean {
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    if (url.origin !== authBaseUrl || !url.pathname.startsWith(UPLOADED_AVATAR_PATH_PREFIX)) {
+      return false;
+    }
+    return isUuid(url.pathname.slice(UPLOADED_AVATAR_PATH_PREFIX.length));
+  } catch {
+    return false;
+  }
+}
+
+/** Three-way avatar source classification for a stored `user.image` URL. */
+export function avatarSourceOf(
+  image: string | null,
+  authBaseUrl: string,
+): AvatarSource {
+  if (isGeneratedAvatarUrl(image, authBaseUrl)) return "generated";
+  if (isUploadedAvatarUrl(image, authBaseUrl)) return "upload";
+  return "google";
 }
 
 /**
@@ -235,6 +284,38 @@ for (const path of PROTECTED_ACCOUNT_PATHS) {
   });
 }
 
+/** Exact first-party Origin guard for avatar mutations (never a public GET). */
+async function requireFirstPartyOrigin(
+  c: Context<AppEnv>,
+  next: () => Promise<void>,
+): Promise<Response | void> {
+  const config = readRuntimeConfig(c.env);
+  if (c.req.header("origin") !== config.authBaseUrl) {
+    return c.json({ error: "invalid_origin" }, 403);
+  }
+  await next();
+}
+
+// The upload endpoint carries an image body, so it gets a dedicated 512KB
+// limit (headroom above MAX_AVATAR_BYTES for multipart/data-URL overhead)
+// rather than the 4KB JSON limit above.
+accountRoutes.use(
+  "/api/account/avatar",
+  bodyLimit({
+    maxSize: 512 * 1024,
+    onError: (c) => c.json({ error: "request_too_large" }, 413),
+  }),
+);
+accountRoutes.use("/api/account/avatar", requireFirstPartyOrigin);
+accountRoutes.use(
+  "/api/account/avatar/mode",
+  bodyLimit({
+    maxSize: 4 * 1024,
+    onError: (c) => c.json({ error: "request_too_large" }, 413),
+  }),
+);
+accountRoutes.use("/api/account/avatar/mode", requireFirstPartyOrigin);
+
 accountRoutes.get("/api/account/profile", async (c) => {
   const gate = await requireActiveUser(c, { rateLimited: false });
   if (!gate.ok) return gate.response;
@@ -249,13 +330,13 @@ accountRoutes.get("/api/account/profile", async (c) => {
     return c.json({ error: "unauthorized" }, 401);
   }
 
-  const usingGenerated = isGeneratedAvatarUrl(row.image, config.authBaseUrl);
+  const source = avatarSourceOf(row.image, config.authBaseUrl);
   return c.json({
     name: row.name,
     image: row.image,
-    avatarSource: (usingGenerated ? "generated" : "google") satisfies AvatarSource,
+    avatarSource: source,
     generatedAvatarUrl: generatedAvatarUrl(config.authBaseUrl, gate.userId),
-    googleAvatarUrl: usingGenerated ? row.googleImage : row.image,
+    googleAvatarUrl: source === "google" ? row.image : row.googleImage,
   });
 });
 
@@ -295,13 +376,16 @@ accountRoutes.post("/api/account/profile", async (c) => {
 
   let image = row.image;
   let googleImage = row.googleImage;
+  const currentSource = avatarSourceOf(row.image, config.authBaseUrl);
   if (input.avatar === "generated") {
-    if (!isGeneratedAvatarUrl(row.image, config.authBaseUrl)) {
+    // Preserve the Google picture only when leaving the Google source; never
+    // overwrite it with a generated or uploaded URL.
+    if (currentSource === "google") {
       googleImage = row.image ?? row.googleImage;
     }
     image = generatedAvatarUrl(config.authBaseUrl, gate.userId);
   } else if (input.avatar === "google") {
-    if (isGeneratedAvatarUrl(row.image, config.authBaseUrl)) {
+    if (currentSource !== "google") {
       image = row.googleImage;
     }
   }
@@ -318,9 +402,7 @@ accountRoutes.post("/api/account/profile", async (c) => {
   return c.json({
     name: name ?? row.name,
     image,
-    avatarSource: (isGeneratedAvatarUrl(image, config.authBaseUrl)
-      ? "generated"
-      : "google") satisfies AvatarSource,
+    avatarSource: avatarSourceOf(image, config.authBaseUrl),
   });
 });
 
@@ -409,5 +491,246 @@ accountRoutes.get("/api/avatar/v1/:file", async (c) => {
     "Content-Type": "image/svg+xml; charset=utf-8",
     // Deterministic output: safe to cache aggressively.
     "Cache-Control": "public, max-age=86400, immutable",
+  });
+});
+
+/** Reads the raw image bytes from a multipart file part or a JSON data URL. */
+async function readAvatarUpload(request: Request): Promise<Uint8Array | null> {
+  const contentType = request.headers.get("content-type")?.toLowerCase() ?? "";
+  if (contentType.startsWith("multipart/form-data")) {
+    const form = await request.formData();
+    const file = form.get("file") ?? form.get("avatar");
+    if (file instanceof File) {
+      return new Uint8Array(await file.arrayBuffer());
+    }
+    return null;
+  }
+  if (contentType.startsWith("application/json")) {
+    const body = (await request.json()) as { dataUrl?: unknown };
+    const decoded = decodeDataUrl(body?.dataUrl);
+    return decoded ? decoded.bytes : null;
+  }
+  return null;
+}
+
+accountRoutes.post("/api/account/avatar", async (c) => {
+  const gate = await requireActiveUser(c, { rateLimited: true });
+  if (!gate.ok) return gate.response;
+
+  let bytes: Uint8Array | null;
+  try {
+    bytes = await readAvatarUpload(c.req.raw);
+  } catch {
+    return c.json({ error: "invalid_request" }, 400);
+  }
+  if (!bytes) {
+    return c.json({ error: "invalid_request" }, 400);
+  }
+
+  // The content type is always re-derived from the signature bytes here; the
+  // client-supplied MIME (multipart or data URL) is never trusted.
+  const validation = validateAvatarBytes(bytes);
+  if (!validation.ok) {
+    return c.json({ error: validation.error }, 400);
+  }
+
+  const config = readRuntimeConfig(c.env);
+  const row = await c.env.PG72_ID_DB.prepare(
+    "SELECT image, googleImage FROM user WHERE id = ? LIMIT 1",
+  )
+    .bind(gate.userId)
+    .first<UserImageRow>();
+  if (!row) {
+    return c.json({ error: "unauthorized" }, 401);
+  }
+
+  const avatarId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const imageUrl = uploadedAvatarUrl(config.authBaseUrl, avatarId);
+  // Preserve the Google picture the first time we leave the Google source.
+  const googleImage =
+    avatarSourceOf(row.image, config.authBaseUrl) === "google"
+      ? (row.image ?? row.googleImage)
+      : row.googleImage;
+
+  // Only the current avatar is retained: drop any previous row, insert the new
+  // bytes, and point user.image (the OIDC `picture` claim) at the fresh id.
+  await c.env.PG72_ID_DB.batch([
+    c.env.PG72_ID_DB.prepare("DELETE FROM user_avatar WHERE user_id = ?").bind(
+      gate.userId,
+    ),
+    c.env.PG72_ID_DB.prepare(
+      `INSERT INTO user_avatar
+        (id, user_id, content_type, data, byte_size, width, height, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      avatarId,
+      gate.userId,
+      validation.contentType,
+      bytesToBase64(bytes),
+      bytes.length,
+      validation.width,
+      validation.height,
+      now,
+    ),
+    c.env.PG72_ID_DB.prepare(
+      "UPDATE user SET image = ?, googleImage = ?, updatedAt = ? WHERE id = ?",
+    ).bind(imageUrl, googleImage, now, gate.userId),
+  ]);
+
+  await auditAccountEvent(c, "user.avatar_updated", "success", gate.userId);
+
+  return c.json({ imageUrl, avatarSource: "upload" satisfies AvatarSource });
+});
+
+accountRoutes.post("/api/account/avatar/mode", async (c) => {
+  const gate = await requireActiveUser(c, { rateLimited: true });
+  if (!gate.ok) return gate.response;
+
+  const input = await readJson<{ mode?: unknown }>(c.req.raw);
+  const mode = input?.mode;
+  if (mode !== "google" && mode !== "identicon" && mode !== "upload") {
+    return c.json({ error: "invalid_mode" }, 400);
+  }
+
+  const config = readRuntimeConfig(c.env);
+  const row = await c.env.PG72_ID_DB.prepare(
+    "SELECT image, googleImage FROM user WHERE id = ? LIMIT 1",
+  )
+    .bind(gate.userId)
+    .first<UserImageRow>();
+  if (!row) {
+    return c.json({ error: "unauthorized" }, 401);
+  }
+
+  const currentSource = avatarSourceOf(row.image, config.authBaseUrl);
+  let googleImage = row.googleImage;
+  if (currentSource === "google" && mode !== "google") {
+    googleImage = row.image ?? row.googleImage;
+  }
+
+  let image: string | null;
+  let source: AvatarSource;
+  if (mode === "identicon") {
+    image = generatedAvatarUrl(config.authBaseUrl, gate.userId);
+    source = "generated";
+  } else if (mode === "upload") {
+    const avatar = await c.env.PG72_ID_DB.prepare(
+      `SELECT id FROM user_avatar
+        WHERE user_id = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1`,
+    )
+      .bind(gate.userId)
+      .first<{ id: string }>();
+    if (!avatar) {
+      return c.json({ error: "no_avatar" }, 409);
+    }
+    image = uploadedAvatarUrl(config.authBaseUrl, avatar.id);
+    source = "upload";
+  } else {
+    image = googleImage;
+    source = "google";
+  }
+
+  const now = new Date().toISOString();
+  await c.env.PG72_ID_DB.prepare(
+    "UPDATE user SET image = ?, googleImage = ?, updatedAt = ? WHERE id = ?",
+  )
+    .bind(image, googleImage, now, gate.userId)
+    .run();
+
+  await auditAccountEvent(c, "user.avatar_updated", "success", gate.userId);
+
+  return c.json({ imageUrl: image, avatarSource: source });
+});
+
+accountRoutes.get("/api/account/avatar/:id", async (c) => {
+  const id = c.req.param("id");
+  if (!isUuid(id)) {
+    return c.json({ error: "not_found" }, 404);
+  }
+
+  const row = await c.env.PG72_ID_DB.prepare(
+    "SELECT content_type, data FROM user_avatar WHERE id = ? LIMIT 1",
+  )
+    .bind(id)
+    .first<{ content_type: string; data: string }>();
+  if (!row) {
+    return c.json({ error: "not_found" }, 404);
+  }
+
+  return new Response(base64ToBytes(row.data), {
+    status: 200,
+    headers: {
+      "Content-Type": row.content_type,
+      // A new upload always mints a new id, so a given id is immutable.
+      "Cache-Control": "public, max-age=86400, immutable",
+    },
+  });
+});
+
+accountRoutes.get("/api/account/security-activity", async (c) => {
+  const gate = await requireActiveUser(c, { rateLimited: false });
+  if (!gate.ok) return gate.response;
+
+  const cursorParam = c.req.query("cursor");
+  let cursor: { occurredAt: string; id: string } | null = null;
+  if (cursorParam !== undefined) {
+    cursor = decodeActivityCursor(cursorParam);
+    if (!cursor) {
+      return c.json({ error: "invalid_cursor" }, 400);
+    }
+  }
+
+  const placeholders = SELF_ACTIVITY_EVENT_TYPES.map(() => "?").join(", ");
+  const bindings: (string | number)[] = [
+    gate.userId,
+    ...SELF_ACTIVITY_EVENT_TYPES,
+  ];
+  let cursorClause = "";
+  if (cursor) {
+    cursorClause =
+      "AND (occurred_at < ? OR (occurred_at = ? AND id < ?))";
+    bindings.push(cursor.occurredAt, cursor.occurredAt, cursor.id);
+  }
+  bindings.push(SECURITY_ACTIVITY_PAGE_SIZE + 1);
+
+  const result = await c.env.PG72_ID_DB.prepare(
+    `SELECT id, event_type, occurred_at, metadata_json
+       FROM audit_event
+      WHERE subject_id = ?
+        AND event_type IN (${placeholders})
+        ${cursorClause}
+      ORDER BY occurred_at DESC, id DESC
+      LIMIT ?`,
+  )
+    .bind(...bindings)
+    .all<{
+      id: string;
+      event_type: string;
+      occurred_at: string;
+      metadata_json: string | null;
+    }>();
+
+  const rows = result.results;
+  const hasMore = rows.length > SECURITY_ACTIVITY_PAGE_SIZE;
+  const page = hasMore ? rows.slice(0, SECURITY_ACTIVITY_PAGE_SIZE) : rows;
+  const last = page.at(-1);
+
+  return c.json({
+    events: page.map((row) => {
+      const provider = providerFromMetadata(row.metadata_json);
+      return {
+        id: row.id,
+        type: row.event_type,
+        at: row.occurred_at,
+        summary: summaryForEvent(row.event_type),
+        ...(provider ? { provider } : {}),
+      };
+    }),
+    ...(hasMore && last
+      ? { nextCursor: encodeActivityCursor(last.occurred_at, last.id) }
+      : {}),
   });
 });

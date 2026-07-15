@@ -3,16 +3,29 @@
 PGID is the custom identity provider for PG72 services. Phase 0 runs on Cloudflare Workers and D1 and provides:
 
 - Google sign-in and Passkey authentication;
-- OAuth 2.1 / OpenID Connect Authorization Code with PKCE S256;
+- OAuth 2.1 / OpenID Connect Authorization Code with PKCE S256, EdDSA ID tokens, and a published JWKS;
+- admin-managed OAuth clients (dynamic registration disabled) with a mandatory consent screen and a namespaced `https://pg72.tw/role` claim;
 - host-only central sessions, device revocation, invitations, account suspension, and audit events;
 - an independent OIDC relying party based on `oauth4webapi`;
 - workerd regression tests for discovery, security headers, registration policy, request aborts, D1 constraints, PKCE transactions, and callback replay.
 
 The canonical architecture and migration decisions are in [`codex.md`](./codex.md). A production canary is deployed at `https://sso.pg72.tw`, but production relying parties must not switch traffic until the production Google login and newly registered `sso.pg72.tw` Passkey gate passes.
 
+## Documentation
+
+| Document | Purpose |
+| --- | --- |
+| [`codex.md`](./codex.md) | Canonical architecture and security baseline (single source of truth). |
+| [`handoff.md`](./handoff.md) | Current operational state, runbooks, and rollback. |
+| [`SECURITY.md`](./SECURITY.md) | Release gate and the accepted Phase 0 finding. |
+| [`docs/about-PGID.md`](./docs/about-PGID.md) | Product introduction; what PGID is and why. Also used by the frontend `/about` page. |
+| [`docs/api/PGID-integration.md`](./docs/api/PGID-integration.md) | Concise integration reference: endpoints, scopes, claims, token lifetimes, client auth, and copyable `oauth4webapi`/generic examples. |
+| [`wiki/`](./wiki/SUMMARY.md) | GitBook-compatible tutorial site (content source for `wiki.sso.pg72.tw`): user guides and developer walkthroughs. |
+| [`docs/integration-plans/`](./docs/integration-plans/) | Per-service integration plans (File Browser, Roundcube). |
+
 ## Registration Policy
 
-Registration is public (owner decision, 2026-07-16): `REGISTRATION_MODE` in `apps/sso/wrangler.jsonc` is `"public"`, and it takes effect when the owner deploys. Invitations remain fully functional; a pending invitation still assigns its role (for example `admin`) and is consumed on first sign-in. The `invite` mode code path is retained and tested.
+The deployed `REGISTRATION_MODE` in `apps/sso/wrangler.jsonc` is currently `"invite"`. The owner recorded a decision (2026-07-16, `codex.md` §9) to move to `"public"` with invitations retained; the code supports and tests both modes, and the switch takes effect only when the owner deploys the `"public"` value. Invitations stay fully functional in either mode; a pending invitation still assigns its role (for example `admin`) and is consumed on first sign-in.
 
 Current safeguards in public mode:
 
@@ -32,6 +45,20 @@ apps/test-rp   Independent OIDC protocol relying party
 ```
 
 The service sources under `原專案代碼/` are migration inputs. They are not modified or built by this workspace.
+
+## Relying Parties
+
+PG72 services integrate as standard OIDC relying parties. Integration status (see `codex.md` §18 and `handoff.md` for detail):
+
+| Service | Integration | Status |
+| --- | --- | --- |
+| Copy (`copy.pg72.tw`) | Native OIDC confidential client + PKCE, guest-code path kept separate | Code integrated and Preview-validated; production cutover pending (no production OAuth client yet). |
+| Link (`link.pg72.tw`) | `oauth4webapi` BFF, stable `sub` session | Local integration complete; isolated Preview and central `sid`/back-channel logout pending. |
+| Status (`status.pg72.tw`) | OIDC BFF + D1 opaque session | Local integration complete; Preview and back-channel logout pending. |
+| Upload admin (`upload.pg72.tw/admin`) | Authlib OIDC + SQLite session | Local integration complete; VPS Preview pending. |
+| File Browser / Roundcube | Gateway proxy auth / native Generic OIDC | Upstream reference; package from pinned stable release. |
+
+No relying party has switched production traffic to PGID yet; the central identity database currently has zero production OAuth clients. Do not describe any RP as production-live until its cutover in `handoff.md` passes.
 
 ## Requirements
 

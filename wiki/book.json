@@ -1,0 +1,9 @@
+{
+  "title": "PGID Wiki",
+  "description": "PGID 使用者與開發者教學站，wiki.sso.pg72.tw 的內容源。",
+  "language": "zh-tw",
+  "structure": {
+    "readme": "README.md",
+    "summary": "SUMMARY.md"
+  }
+}

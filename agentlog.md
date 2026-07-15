@@ -50,3 +50,4 @@
 | 2026-07-16 04:08 | 派工(審查) | worktree | (唯讀) | 派出 bug-hunt/資安審查 agent 對合併後 SSO 新面(avatar/report/activity/telegram/social/前端)做對抗性檢查,回報後統一修 | 進行中 |
 | 2026-07-16 04:20 | bug 修復 | sso.pg72.tw | apps/sso/(index.ts CSP, App.tsx, telegram.ts, social-config, tests) | 依 bug-hunt 修 M1(Telegram CSP)/M2(檢舉理由)/L1(社群 gating)/L4(Telegram write)/L5(頭貼上限);審查無 Critical/High;144 測試過(commit ce72bd1) | 完成 |
 | 2026-07-16 04:40 | persona 回報 | worktree | (唯讀) | 美術設計師審查 PGID:現況 light 中性系統 vs morden_dark 深色,階段30 屬重塑;優先序=主題token/載Inter/背景系統/按鈕glow/多層陰影;最該救登入頁/consent/workspace 外殼 | 收到 |
+| 2026-07-16 04:44 | persona 回報 | worktree | (唯讀) | AI 讀者審查 PGID:SPA 對非JS爬蟲隱形;缺 robots/sitemap/llms.txt、index.html 缺 meta/OG/JSON-LD/per-route title;死連結 wiki/oauth;文件矛盾(社群登入 vs v1邊界);docs/wiki 強項免改 | 收到 |

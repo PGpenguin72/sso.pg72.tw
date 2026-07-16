@@ -77,6 +77,8 @@ Google 社群登入的 callback（`https://sso.pg72.tw/callback/google`）是 **
 | `email` | `email`、`email_verified`。 |
 | `offline_access` | 核准後才會發 refresh token。未帶此 scope 不發 refresh token。 |
 
+所有 user ID token 都必須帶 nonempty central `sid`；這項 claim 不受 client 的 `enableEndSession` 設定影響。RP 驗章與標準 claims 後仍須顯式檢查 `sid`，缺少時不可建立本機 session。
+
 自訂 claim（一律有 namespace）：
 
 | Claim | 說明 | 出現位置 |
@@ -134,7 +136,7 @@ Client 建立時的實際契約（對照 `apps/sso/worker/admin-clients.ts`）�
 | `grantTypes` | 預設 `["authorization_code"]`；必含 `authorization_code`。含 `refresh_token` 時 scopes 必含 `offline_access`（否則 `refresh_token_requires_offline_access`）。 |
 | `public` | `true` = public client（無 secret，`token_endpoint_auth_method: none`）；`false` = confidential（發一次性 secret）。 |
 | `tokenEndpointAuthMethod` | 由 `public` 推導：public → `none`；confidential → `client_secret_post`。 |
-| `enableEndSession` | 是否啟用 `end_session_endpoint`。 |
+| `enableEndSession` | 是否允許此 client 呼叫 `end_session_endpoint`；不影響 ID token 是否帶 `sid`。 |
 | `tos` / `policy` | consent 畫面顯示的服務條款 / 隱私權連結。 |
 | `developerName` | consent 畫面顯示的開發者身分。 |
 
@@ -332,7 +334,7 @@ grant_type=refresh_token
 &client_secret=pg72_cs_XXXXXXXX
 ```
 
-Refresh token 會 rotation：每次換發可能回傳新的 refresh token，RP 必須改存新值並丟棄舊值；偵測到舊 token 重用應視為異常。
+Refresh token 會 rotation：每次換發可能回傳新的 refresh token，RP 必須改存新值並丟棄舊值；偵測到舊 token 重用應視為異常。PGID 只會在 refresh token 仍綁定同一位 user 的 live central session 時換發；session 缺失、已過期、被刪除或綁到其他 user 時固定以 `invalid_grant` fail closed，且不建立部分 token rows。
 
 ---
 
@@ -424,6 +426,9 @@ await oauth.validateApplicationLevelSignature(as, tokenResponse); // 驗 ID toke
 
 const claims = oauth.getValidatedIdTokenClaims(tokens);
 if (!claims) throw new Error("missing id token claims");
+if (typeof claims.sid !== "string" || claims.sid.length === 0) {
+  throw new Error("missing central session id");
+}
 // claims.sub, claims.sid, claims["https://pg72.tw/role"] 可用
 
 const userInfo = await oauth.processUserInfoResponse(
@@ -439,7 +444,7 @@ if (userInfo.email && userInfo.email_verified !== true) {
 // 以 sub 對應本機帳號，建立自己的 server-side session（存 sid + sub）
 await createLocalSession({
   subject: claims.sub,
-  sid: typeof claims.sid === "string" ? claims.sid : null,
+  sid: claims.sid,
   email: typeof userInfo.email === "string" ? userInfo.email : null,
 });
 ```
@@ -458,15 +463,16 @@ await createLocalSession({
 4. **導向 authorization endpoint**：帶第 6 節的所有參數（含 `code_challenge_method=S256`）。
 5. **接收 callback**：驗 `state` 與 `iss`；用一次性交易紀錄防重放。
 6. **換 token**：`POST /oauth2/token`，`grant_type=authorization_code` + `code` + `redirect_uri` + `code_verifier`，confidential 以 form body 帶 `client_id` / `client_secret`。
-7. **驗 ID token**：用 `jwks_uri` 的 EdDSA 公鑰驗章，並檢查 `iss = https://sso.pg72.tw`、`aud = client_id`、`exp` 未過、`nonce` 相符。
+7. **驗 ID token**：用 `jwks_uri` 的 EdDSA 公鑰驗章，並檢查 `iss = https://sso.pg72.tw`、`aud = client_id`、`exp` 未過、`nonce` 相符，以及 `sid` 是 nonempty string；缺少 `sid` 必須中止 callback。
 8. **取 UserInfo**：`GET /oauth2/userinfo`，`Authorization: Bearer <access_token>`。檢查 `email_verified`。
-9. **建立本機 session**：以 `sub` 對應帳號，保存 `sid` + `sub`；token 存 server 端，不進 `localStorage` 或可被 JS 讀取的 cookie。
-10. **登出**：本機登出清自己 session；若要跨服務登出，日後接中央 `sid` 與 back-channel logout（見 `codex.md` §11）。啟用 `enableEndSession` 的 client 可用 `end_session_endpoint` 做 RP-initiated logout。
+9. **建立本機 session**：以 `sub` 對應帳號，保存 nonempty `sid` + `sub`；token 存 server 端，不進 `localStorage` 或可被 JS 讀取的 cookie。
+10. **登出**：本機登出清自己 session；ID token 已提供中央 `sid`，但跨服務 delivery 仍要等 visited-client ledger 與 back-channel logout（見 `codex.md` §11）。啟用 `enableEndSession` 的 client 可用 `end_session_endpoint` 做 RP-initiated logout；未啟用的 client 仍會收到 `sid`，但不能呼叫該端點。
 
 ### Introspection / Revocation（選用）
 
 - Introspection：`POST /oauth2/introspect`，`application/x-www-form-urlencoded` body 帶 `client_id`、`client_secret` 與 `token`（`client_secret_post`）；body 上限 4 KiB，不接受 Basic 或 GET。`client_id`、`client_secret`、`token`、`token_type_hint` 這四個單值欄位各自出現超過一次時會拒絕；不要把此規則解讀成所有擴充欄位都禁止重複。`token_type_hint` 只是查詢順序提示，猜錯時仍會查另一種 token。
 - 已成功認證的 caller 查詢無效、過期、撤銷或無權查看的 token 時，回 HTTP `200` 與精確的 `{"active":false}`，不洩漏原因。錯誤 client credential 回 `401 invalid_client`；協議錯誤回 `400`/`405`/`413`/`415`；限流與 limiter failure 分別回 `429`/`503`。
+- Refresh token 只有在其 central session 仍存在、未過期且屬於同一位 user 時才是 active；detached 或 user-mismatched row 一律回 `{"active":false}`。
 - Mail Path A 還要求 access token 有 live central session、`email` scope，且目前 user 存在、為 `active`、`emailVerified=true`。成功回應只保留 `active`、`client_id`、`scope`、`iss`、`exp`、`iat`、`email`、`email_verified`，刻意不回 `sub` 或 `sid`。Email 只用於 Dovecot 既有 mailbox username 映射，不成為 PGID 或其他 RP 的身分主鍵。
 - Revocation：`POST /oauth2/revoke`，帶 token 與 client 認證。撤銷後該 token 不可再用。
 
@@ -478,10 +484,10 @@ await createLocalSession({
 - [ ] 授權請求帶 `code_challenge_method=S256`、`state`、`nonce`。
 - [ ] Callback 驗 `state`、`iss`，交易一次性防重放。
 - [ ] Token 交換在後端進行；confidential 用 `client_secret_post`（**不用 Basic**）。
-- [ ] ID token 驗 `iss` / `aud` / `exp` / `nonce` 與 EdDSA 簽章。
+- [ ] ID token 驗 `iss` / `aud` / `exp` / `nonce`、nonempty `sid` 與 EdDSA 簽章。
 - [ ] UserInfo 檢查 `email_verified`；以 `sub`（非 email）識別使用者。
 - [ ] 不送 `resource` 參數。
-- [ ] Server-side session 保存 `sid` + `sub`；token 不進 `localStorage`。
+- [ ] Server-side session 保存 nonempty `sid` + `sub`；缺少 `sid` 時 callback fail closed；token 不進 `localStorage`。
 - [ ] 錯誤訊息不洩漏帳號存在與否；log 遮蔽 token / code / 完整 email / IP。
 - [ ] 規劃冪等 back-channel logout endpoint（Phase 2 契約，見 `codex.md` §11.2）。
 

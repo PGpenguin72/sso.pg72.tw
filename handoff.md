@@ -24,8 +24,9 @@
 | Platform roles | `bootadmin`, `admin`, `developer`, `user` |
 | Production RPs | Deployment records show Copy and Link live on PGID; Copy's six-digit guest code remains a separate identity path |
 | Mail Path A | Owner selected Dovecot introspection + XOAUTH2. Its PGID prerequisite is integrated locally at `9efdece`, but that code is not deployed, `pgid-mail-introspect` is not provisioned, and no VPS/Roundcube cutover has occurred |
-| Approval status | Deployed invite beta, not full Production GO; central `sid`, back-channel logout, recovery/rotation drills, DLQ operations, and independent security gates remain incomplete |
-| Verification record | The Passkey candidate passed 183 SSO workerd tests, the Telegram/provider-identity candidate passed 170, both passed typecheck/build and the 4-test RP suite, and isolated D1 runs covered their respective migrations. The combined branch still requires a fresh full gate before handoff; no production smoke or migration was performed |
+| ID-token session contract | Local source emits a nonempty central `sid` for every user ID token, binds authorization-code/refresh issuance to the same live user session, and makes the test RP fail closed on a missing `sid`. No remote deployment or RP migration was performed |
+| Approval status | Deployed invite beta, not full Production GO; visited-client ledger, back-channel logout, recovery/rotation drills, DLQ operations, and independent security gates remain incomplete |
+| Verification record | Passkey passed 183 SSO tests, Telegram/provider identity passed 170, and central `sid` passed 177 SSO plus 11 RP tests; each candidate passed typecheck/build and its isolated migration gate. The combined branch still requires a fresh full gate before handoff; no production smoke or migration was performed |
 
 The last recorded SSO Worker version is
 `4d0c701a-c805-4254-ae2b-7c0df856b3c0`. Confidential first-party RPs currently

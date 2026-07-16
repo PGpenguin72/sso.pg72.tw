@@ -5,6 +5,7 @@ PGID is the custom identity provider for PG72 services. Phase 0 runs on Cloudfla
 - Google sign-in and Passkey authentication;
 - optional Discord, GitHub, Facebook, Apple, and Telegram sign-in that remains hidden unless its credentials are configured;
 - OAuth 2.1 / OpenID Connect Authorization Code with PKCE S256, EdDSA ID tokens, and a published JWKS;
+- nonempty central `sid` claims on every user ID token, with refresh issuance bound to the same live user session;
 - admin/developer-managed OAuth clients (dynamic registration disabled), mandatory consent, and the `bootadmin`/`admin`/`developer`/`user` platform role model;
 - host-only central sessions, device revocation, invitations, account suspension, and audit events;
 - versioned D1 migrations through local source `0015`: `0013` normalizes confidential client authentication, `0014` adds Passkey step-up state, and `0015` enforces global provider-identity ownership; the latest production record remains applied through `0012` until the owner verifies and applies the pending migrations in order;
@@ -13,7 +14,7 @@ PGID is the custom identity provider for PG72 services. Phase 0 runs on Cloudfla
 - an independent OIDC relying party based on `oauth4webapi`;
 - workerd regression tests for discovery, security headers, registration policy, request aborts, D1 constraints, PKCE transactions, and callback replay.
 
-The canonical architecture and migration decisions are in [`codex.md`](./codex.md). PGID is deployed at `https://sso.pg72.tw` as an invite-only beta, and deployment records show Copy and Link using it in production. This is not full Production GO: public registration, central `sid`/back-channel logout, recovery drills, and other security gates remain incomplete.
+The canonical architecture and migration decisions are in [`codex.md`](./codex.md). PGID is deployed at `https://sso.pg72.tw` as an invite-only beta, and deployment records show Copy and Link using it in production. This is not full Production GO: public registration, the visited-client ledger and back-channel logout rollout, recovery drills, and other security gates remain incomplete.
 
 ## Documentation
 
@@ -125,6 +126,8 @@ The audit currently reports the accepted Moderate `GHSA-p2fr-6hmx-4528`. Its con
 
 The recorded full gate for the mail-introspection implementation at `9efdece` is 166 passing SSO tests and 4 passing RP protocol tests. That is a local-source verification record, not evidence of a production deployment or smoke test.
 
+The central-`sid` contract gate passes 177 SSO tests across 14 workerd files and 11 Test RP checks, plus SSO typecheck/build and a clean frozen offline install. This is also local-source evidence only: no deploy, remote D1 change, visited-client ledger, or back-channel logout delivery occurred.
+
 ## Cloudflare Provisioning
 
 ### Preview
@@ -152,7 +155,7 @@ Full Production GO checklist:
 3. Do not run the local test client seed against production. The remote test client and its grants were removed.
 4. Create production OAuth clients through an authenticated admin operation with exact HTTPS redirect URIs.
 5. Configure Google callback `https://sso.pg72.tw/callback/google`.
-6. Re-run real Google and production Passkey flows, verify Copy/Link sign-out, and complete central `sid`/back-channel logout, recovery, rotation, restore, DLQ, and independent-review gates before changing the beta status.
+6. Re-run real Google and production Passkey flows, verify Copy/Link sign-out, and complete the visited-client ledger/back-channel logout rollout, recovery, rotation, restore, DLQ, and independent-review gates before changing the beta status.
 
 Mail Path A remains a separate owner-run rollout:
 

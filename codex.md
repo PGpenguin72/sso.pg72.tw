@@ -7,13 +7,13 @@
 
 ## 0. Phase 0 實作狀態
 
-截至 2026-07-16，repository 的本地 source 已包含可部署的 SSO Worker、React 帳號中心、D1 migrations `0001`–`0015`、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理、Mail Path A introspection prerequisite、真正的 Passkey client-mutation step-up、Telegram verified-email enrollment boundary、全域 provider-identity 唯一 ownership，以及使用 `oauth4webapi` 的獨立 test RP。各功能分支的本地 typecheck、workerd suite、production build 與 test RP protocol gate 均已通過；整合後仍須重跑完整 gate。這次驗證沒有執行 deploy、remote D1、system-client provisioning 或其他 production 操作；程式合併與本地測試不得寫成遠端已上線。
+截至 2026-07-16，repository 的本地 source 已包含可部署的 SSO Worker、React 帳號中心、D1 migrations `0001`–`0015`、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理、ID-token central `sid` contract、Mail Path A introspection prerequisite、真正的 Passkey client-mutation step-up、Telegram verified-email enrollment boundary、全域 provider-identity 唯一 ownership，以及使用 `oauth4webapi` 的獨立 test RP。各功能分支的本地 typecheck、workerd suite、production build 與 test RP protocol gate 均已通過；整合後仍須重跑完整 gate。這次驗證沒有執行 deploy、remote D1、system-client provisioning 或其他 production 操作；程式合併與本地測試不得寫成遠端已上線。
 
 `0013_confidential_client_secret_post.sql` 將既有 confidential client metadata 正規化為 `client_secret_post`；它不旋轉 secret、不改 grant/token。`0014_passkey_step_up.sql` 新增 session step-up timestamp 與短效 challenge table。兩者都不代表 production 已套用；現有 deployment record 仍只確認 production D1 至 `0012`，必須由 owner 在維護窗口依序確認與執行。
 
 `0015_account_provider_identity_unique.sql` 以 `(providerId, accountId)` 全域唯一索引保證每個外部 provider identity 只有一個 PGID owner。套用前 owner 必須依 `handoff.md` 執行唯讀 duplicate preflight；若有任何結果就停止，不得由 migration 自動挑選或刪除 owner。依賴此 invariant 的 Worker 不得早於 `0015` 部署。
 
-既有部署紀錄顯示 `pg72-id` 已部署至 `https://sso.pg72.tw`，目前記錄的 Worker 版本是 `4d0c701a-c805-4254-ae2b-7c0df856b3c0`，production D1 已套用至 `0012`；Copy 與 Link 也已切換 production traffic 至 PGID。這些紀錄建立了「已部署 invite beta」現況，但仍不是完整 Production GO：中央 `sid`、back-channel logout、DLQ 告警、完整復原演練與其他 §9.2 gate 尚未完成。本次文件校準未執行 remote/production 查詢，實際遠端版本仍應由 owner 在維護窗口依 `handoff.md` 驗證。
+既有部署紀錄顯示 `pg72-id` 已部署至 `https://sso.pg72.tw`，目前記錄的 Worker 版本是 `4d0c701a-c805-4254-ae2b-7c0df856b3c0`，production D1 已套用至 `0012`；Copy 與 Link 也已切換 production traffic 至 PGID。這些紀錄建立了「已部署 invite beta」現況，但仍不是完整 Production GO：visited-client ledger、back-channel logout、DLQ 告警、完整復原演練與其他 §9.2 gate 尚未完成。本次文件校準未執行 remote/production 查詢，實際遠端版本仍應由 owner 在維護窗口依 `handoff.md` 驗證。
 
 遠端 test RP、已停用的 Arcant authentication Worker/D1，以及 Copy Preview 資源均在完整 SQL export 後退役，帳號 D1 數量由 11 降至 8。Cloud Clipboard 自動 Preview deployment 已關閉，Preview D1 binding 與 Preview-only OAuth client 已移除。Link 與 Status 的 Preview D1 尚未建立；後續 Preview 將使用獨立 Cloudflare account，不得以 production D1 代替 Preview。
 
@@ -425,6 +425,11 @@ SSO 無法只靠刪除自己的 cookie 清除所有 RP cookie。因此所有第�
 
 ### 11.2 RP Session Contract
 
+現行 local source 已完成第一步：所有 user ID token 都帶 nonempty central
+`sid`，refresh grant 只接受屬於同一 user 的 live session，test RP 也會拒絕
+缺少或為空的 `sid`。`(sid, client_id)` visit ledger、logout-token delivery 與
+各 production RP receiver 仍是 Phase 2 工作，不能因此宣稱全域登出完成。
+
 - ID token 包含 `sid`。
 - RP 建立本機 session 時保存 `sid` 與 `sub`。
 - SSO 在授權完成時記錄 `(sid, client_id)`，用來識別該 session 存取過的服務。
@@ -782,7 +787,7 @@ Webmail 仍須分成兩個問題：
 
 - Copy 與 Link 已切換 production traffic 至 PGID；Copy 六位數訪客碼保持獨立。
 - Email 只用於一次性 legacy binding，日常 authentication 已改用 SSO `sub`。
-- 這是已部署的 invite beta，不是完整 Production GO；仍待完成 `sid`、back-channel logout、rollback drill 及單一/全域登出驗收。
+- 這是已部署的 invite beta，不是完整 Production GO；ID-token `sid` 已在 local source 完成，仍待 visited-client ledger、back-channel logout、rollback drill 及單一/全域登出驗收。
 
 ### Phase 3：Legacy 與管理服務
 

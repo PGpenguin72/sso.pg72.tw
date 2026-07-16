@@ -24,6 +24,7 @@
 | `offline_access` | 長期存取 | refresh token（核准後才發） |
 
 只請求你真正需要的 scope。要 refresh token 才加 `offline_access`。
+每個 user ID token 都會帶 nonempty central `sid`；`enableEndSession` 只控制 client 是否能呼叫 RP-initiated logout endpoint，不會移除 `sid`。
 
 ## 你會拿到的 Claims
 

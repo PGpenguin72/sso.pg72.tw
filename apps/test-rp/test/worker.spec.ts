@@ -1,6 +1,8 @@
 import { env, exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { requireCentralSessionId } from "../worker/oidc-claims";
+
 const discovery = {
   issuer: "http://localhost:5173",
   authorization_endpoint: "http://localhost:5173/oauth2/authorize",
@@ -20,11 +22,66 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
+async function sessionTokenHash(token: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(token),
+  );
+  return btoa(String.fromCharCode(...new Uint8Array(digest)))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
 describe("OIDC test relying party", () => {
+  it.each([undefined, null, "", 0, false])(
+    "rejects a validated ID token without a nonempty sid (%s)",
+    (sid) => {
+      expect(() => requireCentralSessionId({ sid })).toThrow(
+        "Validated ID token did not contain a central session ID",
+      );
+    },
+  );
+
+  it("preserves a validated central sid exactly", () => {
+    const sid = "central-session-id";
+    expect(requireCentralSessionId({ sid })).toBe(sid);
+  });
+
+  it("does not resume a legacy RP session whose central sid is null", async () => {
+    const token = "legacy-null-sid-session-token";
+    const now = new Date();
+    await env.TEST_RP_DB.prepare(
+      `INSERT INTO rp_session
+        (id, token_hash, subject, central_session_id, display_name, email,
+         expires_at, created_at, last_seen_at)
+       VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?, ?)`,
+    )
+      .bind(
+        crypto.randomUUID(),
+        await sessionTokenHash(token),
+        crypto.randomUUID(),
+        new Date(now.getTime() + 60_000).toISOString(),
+        now.toISOString(),
+        now.toISOString(),
+      )
+      .run();
+
+    const response = await exports.default.fetch(
+      new Request("http://localhost:5174/", {
+        headers: { Cookie: `pg72_test_session=${token}` },
+      }),
+    );
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(body).toContain("PGID protocol check");
+    expect(body).not.toContain("OIDC session established");
+  });
+
   it("serves a hardened unauthenticated harness", async () => {
     const response = await exports.default.fetch("http://localhost:5174/");
 

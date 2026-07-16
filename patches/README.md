@@ -3,7 +3,22 @@
 ## `@better-auth/oauth-provider@1.6.23`
 
 `@better-auth__oauth-provider@1.6.23.patch` is an exact-version workaround for
-PGID token introspection. It makes five deliberately narrow changes:
+PGID's central-session and token-introspection contracts. The central-session
+portion:
+
+- emits a nonempty central `sid` in every user ID token, independently of
+  whether the client may call `/oauth2/end-session`;
+- fails before any token write if an ID token cannot be bound to a session;
+- requires authorization-code and refresh grants to retain a live central
+  session belonging to the same user; and
+- reports refresh tokens with a missing, expired, or user-mismatched session as
+  inactive.
+
+No schema migration is required. The existing nullable session foreign key and
+`ON DELETE SET NULL` behavior remain intact; the runtime treats a detached row
+as invalid rather than minting a token without `sid`.
+
+The introspection portion retains these deliberately narrow changes:
 
 - an opt-in hook for authorizing cross-client introspection of opaque access
   tokens; the default remains same-client only;
@@ -32,6 +47,11 @@ as a general form parser or authorization bypass.
 Remove this exact-version patch only after a pinned stable provider release
 supplies all of the following behavior without local modification:
 
+- every user ID token has a nonempty central `sid`, while
+  `enableEndSession` controls only access to the end-session endpoint;
+- authorization-code and refresh grants bind the user to a live central
+  session before writing tokens, and detached, expired, or user-mismatched
+  refresh tokens are both unusable and inactive;
 - cross-client opaque access-token introspection is opt-in and receives the
   token-owning client, granted scopes, resolved user, and validated live
   central session ID;

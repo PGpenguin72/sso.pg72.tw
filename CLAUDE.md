@@ -40,7 +40,7 @@
 
 目前 `@better-auth/oauth-provider@1.6.23` 有 Moderate `GHSA-p2fr-6hmx-4528`，stable `1.6.x` 尚無修補版。依 [`SECURITY.md`](./SECURITY.md) 保持單一 audience 並在 Worker 拒絕所有 RFC 8707 `resource` 參數；不得移除補償控制，直到已修正的 stable 版本完成 migration 與 protocol regression。
 
-同版本另有 tracked exact package patch `patches/@better-auth__oauth-provider@1.6.23.patch`，只為 `pgid-mail-introspect` → `pg72-webmail` opaque access-token introspection 提供 opt-in 例外，並固定 RFC 7662 inactive、`token_type_hint` fallback 與 JOSE/kid error classification。升級時不得機械搬移或用 `allowUnusedPatches` 隱藏 mismatch；只有 stable provider 具等價行為、移除 patch 後 clean frozen install 與完整 protocol suite 都通過，才可移除。
+同版本另有 tracked exact package patch `patches/@better-auth__oauth-provider@1.6.23.patch`：它讓所有 user ID token 無條件帶 nonempty central `sid`，要求 authorization-code / refresh token 綁定同一個 live user session，並為 `pgid-mail-introspect` → `pg72-webmail` opaque access-token introspection 提供 opt-in 例外、固定 RFC 7662 inactive、`token_type_hint` fallback 與 JOSE/kid error classification。升級時不得機械搬移或用 `allowUnusedPatches` 隱藏 mismatch；只有 stable provider 具全部等價行為、移除 patch 後 clean frozen install 與完整 protocol suite 都通過，才可移除。
 
 ## Better Auth GO/NO-GO
 

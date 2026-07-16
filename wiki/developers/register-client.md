@@ -13,7 +13,7 @@ PGID **不開放動態自助註冊**。每個 client 由 PGID 管理員或具 `d
 | Scopes | 預設 `openid profile email`；要 refresh token 就加 `offline_access`。必含 `openid`。 |
 | Grant types | 預設 `authorization_code`；要長期登入就加 `refresh_token`（此時 scopes 必含 `offline_access`）。 |
 | 服務條款 / 隱私權連結 | 顯示在 consent 畫面。 |
-| 是否啟用 end-session | 若你要用 RP-initiated logout 端點。 |
+| 是否啟用 end-session | 若你要用 RP-initiated logout 端點。所有 user ID token 都會帶 central `sid`；此設定只控制端點權限。 |
 
 ## 建立後你會拿到
 

@@ -3,6 +3,8 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { html } from "hono/html";
 import * as oauth from "oauth4webapi";
 
+import { requireCentralSessionId } from "./oidc-claims";
+
 type AppEnv = { Bindings: Env };
 
 interface RuntimeConfig {
@@ -26,7 +28,7 @@ interface OAuthTransaction {
 interface RelyingPartySession {
   id: string;
   subject: string;
-  central_session_id: string | null;
+  central_session_id: string;
   display_name: string | null;
   email: string | null;
   expires_at: string;
@@ -180,7 +182,7 @@ function page(
                   <h2>Validated identity</h2>
                   <dl>
                     <div><dt>Subject</dt><dd>${session.subject}</dd></div>
-                    <div><dt>SID</dt><dd>${session.central_session_id ?? "not returned"}</dd></div>
+                    <div><dt>SID</dt><dd>${session.central_session_id}</dd></div>
                     <div><dt>Name</dt><dd>${session.display_name ?? "not returned"}</dd></div>
                     <div><dt>Email</dt><dd>${session.email ?? "not returned"}</dd></div>
                     <div><dt>Expires</dt><dd>${session.expires_at}</dd></div>
@@ -225,7 +227,7 @@ app.get("/", async (c) => {
     session = await c.env.TEST_RP_DB.prepare(
       `SELECT id, subject, central_session_id, display_name, email, expires_at
          FROM rp_session
-        WHERE token_hash = ? AND expires_at > ?
+        WHERE token_hash = ? AND central_session_id IS NOT NULL AND expires_at > ?
         LIMIT 1`,
     )
       .bind(hash, new Date().toISOString())
@@ -360,6 +362,7 @@ app.get("/callback", async (c) => {
     );
     const claims = oauth.getValidatedIdTokenClaims(tokens);
     if (!claims) throw new Error("Validated ID token claims were not returned");
+    const centralSessionId = requireCentralSessionId(claims);
 
     const userInfoResponse = await oauth.userInfoRequest(
       as,
@@ -381,9 +384,6 @@ app.get("/callback", async (c) => {
     const expiresAt = new Date(createdAt.getTime() + 12 * 60 * 60 * 1000);
     const name = typeof userInfo.name === "string" ? userInfo.name : null;
     const email = typeof userInfo.email === "string" ? userInfo.email : null;
-    const centralSessionId =
-      typeof claims.sid === "string" ? claims.sid : null;
-
     await c.env.TEST_RP_DB.prepare(
       `INSERT INTO rp_session
         (id, token_hash, subject, central_session_id, display_name, email,

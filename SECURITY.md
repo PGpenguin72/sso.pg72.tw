@@ -2,7 +2,7 @@
 
 PGID currently runs as a deployed, invite-only production beta. Existing deployment records show Copy and Link using PGID for production sign-in. Public registration remains disabled.
 
-This deployed state is not the same as full Production GO or general-public approval. Central `sid` propagation, back-channel logout, recovery/rotation drills, independent review, and other gates below are still incomplete; no document may treat production traffic alone as proof that those controls passed.
+This deployed state is not the same as full Production GO or general-public approval. Local source now emits and validates the central ID-token `sid`, but the visited-client ledger, replay-safe back-channel logout, recovery/rotation drills, independent review, and other gates below are still incomplete; no document may treat production traffic alone as proof that those controls passed.
 
 The repository's local source now includes the narrowly scoped Mail Path A introspection prerequisite and Passkey step-up for every OAuth client mutation, and has passed its full local typecheck, workerd, production-build, and test-RP protocol gate. Production has neither migration `0013`/`0014` nor this Worker version; `pgid-mail-introspect` has not been provisioned, no remote D1 operation was performed, and the mail VPS has not been cut over. These local results must not be represented as production behavior.
 
@@ -35,7 +35,7 @@ Before enabling `REGISTRATION_MODE=public` or declaring full Production GO, comp
 - independent security review and OIDC conformance/security testing;
 - DAST across auth, OIDC, admin, gateway, and logout endpoints;
 - automated SAST, dependency, secret, and IaC/config scanning;
-- central `sid`, replay-safe back-channel logout, retry/DLQ alerting, and RP logout verification;
+- a central visited-client ledger, replay-safe back-channel logout, retry/DLQ alerting, and RP logout verification;
 - recovery-code/break-glass, signing-key rotation, D1 restore, and Queue retry/DLQ drills;
 - Turnstile or equivalent bot controls, abuse response, and versioned Terms/Privacy consent;
 - deploy and independently review the locally implemented Passkey step-up for high-risk system-client provisioning and secret rotation; production must apply migration `0014`, and the session-age freshness check remains an additional condition rather than a substitute;

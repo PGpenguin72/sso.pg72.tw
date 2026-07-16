@@ -8,6 +8,7 @@ export default defineConfig({
       wrangler: { configPath: "./wrangler.jsonc" },
       miniflare: {
         bindings: {
+          ENVIRONMENT: "development",
           TEST_MIGRATIONS: await readD1Migrations(
             fileURLToPath(new URL("./migrations", import.meta.url)),
           ),

@@ -61,7 +61,7 @@ PGID 目前是部署於 `https://sso.pg72.tw` 的 invite-only beta；既有部�
 - v1 日常登入主力是 Google 與 Passkey；另提供 Discord、GitHub、Facebook、Apple、Telegram 社群登入作為額外選項，各 provider 未設定 secret 時會自動隱藏。Telegram 不提供 verified email，只能登入已從 authenticated PGID session 明確連結的既有帳號，不能直接建立 PGID 帳號。不提供密碼、Email OTP 或 TOTP 登入。
 - 服務的 OIDC client 由管理員 / developer 明確建立，不開放動態自助註冊。
 - Production `REGISTRATION_MODE` 仍是 `invite`；公開註冊程式路徑已備妥，但安全 gate 與 owner 核准尚未完成。
-- 中央 `sid`、back-channel logout（跨服務即時登出）、復原演練與完整 Production GO gate 仍在進行中，完整清單見 [`codex.md`](../codex.md) §9.2。
+- ID token 的中央 `sid` 已在 local source 實作；visited-client ledger、back-channel logout（跨服務即時登出）、復原演練與完整 Production GO gate 仍在進行中，完整清單見 [`codex.md`](../codex.md) §9.2。
 
 任何安全宣稱都以可驗證的自動化 gate 與獨立審查為準，不用文件聲明取代驗證。
 

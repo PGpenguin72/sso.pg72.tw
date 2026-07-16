@@ -95,15 +95,19 @@ if (userInfo.email && userInfo.email_verified !== true) {
 ## 步驟 5：以 sub 建立本機 session
 
 ```ts
+if (typeof claims.sid !== "string" || claims.sid.length === 0) {
+  throw new Error("missing central session id");
+}
+
 await createLocalSession({
   subject: claims.sub,                                   // 主鍵：不可變
-  sid: typeof claims.sid === "string" ? claims.sid : null,
+  sid: claims.sid,
   email: typeof userInfo.email === "string" ? userInfo.email : null,
 });
 ```
 
 * 用 `sub` 對應你服務裡的帳號，不要用 email。
-* 建立你服務自己的 server-side session（host-only、`Secure`、`HttpOnly` cookie），保存 `sid` + `sub`。
+* 建立你服務自己的 server-side session（host-only、`Secure`、`HttpOnly` cookie），保存 nonempty `sid` + `sub`；ID token 缺少 `sid` 時中止 callback，不建立本機 session。
 * token 存後端，不進 `localStorage`。
 
 ## 錯誤處理
@@ -115,8 +119,8 @@ await createLocalSession({
 
 ## Refresh 與登出
 
-* 有 `offline_access` 時會拿到 refresh token（30 天、rotation）。每次 refresh 後改存新的 refresh token 並丟棄舊的。
-* 登出：先清你服務自己的 session。跨服務即時登出（back-channel logout）仍在逐步上線；啟用 end-session 的 client 可用 `end_session_endpoint`。
+* 有 `offline_access` 時會拿到 refresh token（30 天、rotation）。每次 refresh 後改存新的 refresh token 並丟棄舊的。原 central session 不存在、過期或不再屬於同一 user 時，PGID 以 `invalid_grant` fail closed。
+* 登出：先清你服務自己的 session。每個 user ID token 都帶 central `sid`；跨服務即時登出的 visited-client ledger 與 back-channel delivery 仍在逐步上線。`enableEndSession` 只控制 client 能否呼叫 `end_session_endpoint`，不控制 `sid` claim。
 
 ## 下一步
 

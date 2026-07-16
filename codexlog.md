@@ -154,3 +154,21 @@
   The generated file remains ignored.
 - After regeneration, test-RP typecheck and Wrangler dry-run build passed. The
   required test-RP protocol suite had already passed 4/4.
+
+## 2026-07-16 17:34 CST - Canonical and operator documentation synchronized
+
+- Updated `CLAUDE.md`, `codex.md`, `SECURITY.md`, `README.md`, and the current
+  header/runbook in `handoff.md` to distinguish completed local implementation
+  from production, which remains at migration `0012` and lacks this Worker,
+  independent review, and ceremony smoke testing.
+- Documented challenge/verify requests, exact Origin/RP ID, required UV,
+  session/user binding, two-minute one-time challenges, the bounded 60-600
+  second step-up window, counter/audit/timestamp ordering, generic failures,
+  and the no-bootadmin-bypass policy in the API reference and wiki.
+- Corrected recovery wording: the runtime has no bypass, but it also has no
+  self-service recovery/break-glass flow when Google and every Passkey are
+  lost. That design, review, and drill remain a full Production GO gate.
+- Updated Mail Path A and Roundcube operator material for ordered `0013` then
+  `0014` rollout, deployment/review gates, provisioning, and rollback.
+- `git diff --check`, changed-document relative-link validation, wiki SUMMARY
+  target validation, heading review, and stale-current-language searches pass.

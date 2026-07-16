@@ -2,7 +2,7 @@
 
 這一頁給維護 PG72 Webmail / Dovecot 的 operator 與串接者。它描述固定的 Mail Path A trust relationship，不是一般 OAuth client 可申請的功能。精確 wire contract 與完整狀態表見 [PGID 串接 API 手冊 §5.4](../../docs/api/PGID-integration.md#54-mail-introspection-system-client)。
 
-> 狀態：repository 的 local source 已實作並通過本地完整 regression gate；production 尚未部署，也尚未 provision `pgid-mail-introspect`。Passkey step-up 仍是 production cutover 前的安全欠項。
+> 狀態：repository 的 local source 已實作 introspection 與真正的 Passkey step-up，並通過本地 regression gate；production 尚未套用 `0013`/`0014`、部署、完成獨立 review，或 provision `pgid-mail-introspect`。
 
 ## 固定的 trust boundary
 
@@ -24,13 +24,14 @@ Active 還要求 access token 未過期 / 未撤銷、webmail client enabled、c
 
 * 有效的 PGID session cookie；
 * `Origin` 精確等於 PGID `AUTH_BASE_URL`；
-* session `createdAt` 在過去 10 分鐘內，不能是 stale 或 future-dated。
+* session `createdAt` 在過去 10 分鐘內，不能是 stale 或 future-dated；
+* 該 exact D1 session 最近完成 Passkey step-up，且 timestamp 仍在設定窗口內。
 
 Endpoint 沒有 request 欄位，建議送空 body；在 4 KiB admin body 上限內，即使送了 body 也會被忽略，不會用來設定 client。成功回 `201`，其中 `clientSecret` 只出現一次；立即存入指定的 secret store。Repository、D1、log、issue 與聊天都不得保存明文。D1 只存 secret suffix hash。重複 provisioning 回 `409 client_exists`。
 
-建立出的 client 是 unowned、hash-only、introspection-only 的 system service client，沒有 redirect URI、scope 或 token-issuing grant。Secret rotation、停用與刪除同樣只允許 `clients.manage_all` actor，並要求 same-origin cookie 與 fresh session。
+建立出的 client 是 unowned、hash-only、introspection-only 的 system service client，沒有 redirect URI、scope 或 token-issuing grant。Secret rotation、停用與刪除同樣只允許 `clients.manage_all` actor，並要求 same-origin cookie、fresh session 與 recent Passkey step-up。
 
-10 分鐘 session age 只是 freshness gate，不代表重新驗證使用者，也不是 Passkey step-up。在 step-up 完成前，不得把這項 local 實作宣稱為 production-ready。
+10 分鐘 session age 只是 freshness gate，不能替代 Passkey assertion。沒有 Passkey 時沒有 `bootadmin` bypass；先以既有 Google fresh session 註冊 Passkey，再完成 step-up。若 Google 與所有 Passkey 都遺失，目前沒有可用的自助 recovery/break-glass flow。Production 套用 `0014`、部署、獨立 review 與實機 smoke 前，不得把此 local contract 宣稱為已上線。
 
 ## Runtime request
 

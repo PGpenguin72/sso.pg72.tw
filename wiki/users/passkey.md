@@ -31,6 +31,12 @@ Passkey 是一種無密碼登入方式，用你裝置上的指紋、臉部辨識
 * **重新命名**（名稱上限 64 個字元）。
 * **刪除**不再使用的 Passkey。
 
+## 敏感的 client 管理操作
+
+具有 client 管理權限的使用者在建立、修改、輪替 secret、停用或刪除 OAuth client 前，PGID 會要求再完成一次 Passkey 驗證。取消或驗證失敗時，原本的操作不會送出；成功結果只在目前這個登入 session 的短時間窗口內有效。
+
+這項 step-up 與「session 剛建立」是兩個獨立條件。沒有 Passkey 的帳號不能略過，包含 `bootadmin`；請先透過既有 Google 登入建立 fresh session 並註冊 Passkey。若 Google 與所有 Passkey 都遺失，目前沒有可用的自助 recovery/break-glass flow；相關設計與演練尚未完成，不能用 client 管理 API 繞過。
+
 ### 重要保護
 
 * **不能刪到一個登入方式都不剩**：系統會確保你至少保留一種可登入的方式。

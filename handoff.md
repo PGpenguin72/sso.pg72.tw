@@ -16,16 +16,16 @@
 
 | Item | Reconciled state |
 | --- | --- |
-| Source baseline | Local `main` contains mail-introspection implementation commit `9efdece` plus the docs reconciliation cherry-picked as `8caf27e`; neither changes runtime behavior. No Git remote is configured, so nothing in this repo has ever been pushed |
+| Source baseline | The local delivery branch adds Passkey step-up to the integrated mail-introspection baseline. It has not been merged to `main`, pushed, or deployed; owner review and cherry-pick are still required. No Git remote is configured |
 | Registration | `apps/sso/wrangler.jsonc` sets production `REGISTRATION_MODE` to `invite`; the `public` path and regression tests exist but [`codex.md`](./codex.md) §9.2 and owner approval are still required |
-| SSO migrations | Integrated local source is versioned through `0013_confidential_client_secret_post.sql`, which normalizes existing confidential clients to `client_secret_post`. The latest deployment record says production D1 was applied only through `0012`; this reconciliation did not query or migrate remote D1 |
+| SSO migrations | Local source is versioned through `0014_passkey_step_up.sql`; `0013` normalizes confidential clients to `client_secret_post`, and `0014` adds the session timestamp and short-lived challenge table. The latest deployment record says production D1 was applied only through `0012`; this work did not query or migrate remote D1 |
 | Login methods | Google and Passkey are the core methods; Discord, GitHub, Facebook, Apple, and Telegram are optional and remain hidden unless their credentials are configured |
+| Passkey step-up | Local source implements a required-UV, exact-origin/RP-ID assertion ceremony with one-time session/user-bound D1 challenges and a configurable 1-10 minute session timestamp. There is no bootadmin bypass. Production has neither `0014` nor this Worker version |
 | Platform roles | `bootadmin`, `admin`, `developer`, `user` |
 | Production RPs | Deployment records show Copy and Link live on PGID; Copy's six-digit guest code remains a separate identity path |
 | Mail Path A | Owner selected Dovecot introspection + XOAUTH2. Its PGID prerequisite is integrated locally at `9efdece`, but that code is not deployed, `pgid-mail-introspect` is not provisioned, and no VPS/Roundcube cutover has occurred |
 | Approval status | Deployed invite beta, not full Production GO; central `sid`, back-channel logout, recovery/rotation drills, DLQ operations, and independent security gates remain incomplete |
-| Verification record | Re-run on `main` after the docs cherry-pick: frozen offline install (`pnpm install --offline --frozen-lockfile`), `pnpm --filter @pg72/id check` = typecheck + 166/166 tests (13 files) + production build, `pnpm --filter @pg72/test-rp test` = 4/4, and `apps/sso/dist` contains no `.dev.vars*`. These results verify local source only; there is no production mail smoke record |
-| Worktrees | Only the main checkout remains. The `codex/mail-introspection-docs` worktree at `/private/tmp/pgid-mail-docs` was retired after its commit `456b027` landed on `main` as `8caf27e`; branch deleted and pruned |
+| Verification record | The Passkey delivery candidate passed 183 SSO workerd tests and 4 RP protocol tests, and a fresh isolated local D1 accepted migrations `0001` through `0014`. These results verify local source only; there is no production Passkey or mail smoke record |
 
 The last recorded SSO Worker version is
 `4d0c701a-c805-4254-ae2b-7c0df856b3c0`. Confidential first-party RPs currently
@@ -169,18 +169,20 @@ This is an ordered production plan for the owner, not a record of completed
 work. This reconciliation ran no remote command and made no Cloudflare, D1,
 secret-store, Roundcube, Dovecot, or VPS change.
 
-1. Close the Passkey step-up blocker for system-client provisioning and secret
-   rotation. The current less-than-10-minute session-age gate is not a real
-   reauthentication ceremony and is insufficient for this production change.
+1. Independently review the local Passkey step-up implementation and its
+   challenge/session binding, required UV, exact origin/RP ID, replay, expiry,
+   credential isolation, counter, and missing-Passkey behavior. Session age
+   remains an additional condition and cannot substitute for this ceremony.
 2. Confirm the production OIDC client `pg72-webmail` exists with the intended
    exact HTTPS redirect URI, `email` scope, grants, and metadata. Do not infer
    production state from local fixtures.
 3. Create a private production D1 export and record the current Time Travel
    point before changing client metadata.
-4. Owner verifies and applies `0013_confidential_client_secret_post.sql` to the
-   production identity D1. The latest existing deployment record is only
-   through `0012`.
-5. Deploy the verified Worker source with both configured Rate Limiting
+4. Owner verifies and applies `0013_confidential_client_secret_post.sql`, then
+   `0014_passkey_step_up.sql`, to production identity D1. The latest existing
+   deployment record is only through `0012`.
+5. Deploy the verified Worker source with
+   `PASSKEY_STEP_UP_MAX_AGE_SECONDS=600` and both configured Rate Limiting
    bindings: `INTROSPECTION_IP_RATE_LIMITER` namespace `1004` and
    `INTROSPECTION_CLIENT_RATE_LIMITER` namespace `1005`.
 6. Complete the new Passkey step-up at PGID, then from that same origin and an
@@ -212,10 +214,10 @@ secret-store, Roundcube, Dovecot, or VPS change.
 2. Roll the Worker back to the recorded known-good version and repeat health,
    discovery, JWKS, session, Copy, and Link checks. A Worker rollback does not
    undo D1 or VPS changes.
-3. Do not normally reverse `0013`: it is a client-metadata normalization rather
-   than a destructive schema change, and older code already accepts
-   `client_secret_post`. Reverse it only through a separately reviewed recovery
-   plan based on the private backup; never delete the migration record by hand.
+3. Do not normally reverse `0013` or additive `0014`: older code accepts
+   `client_secret_post` and ignores the extra step-up schema. Reverse either
+   only through a separately reviewed recovery plan based on the private
+   backup; never delete migration records by hand.
 4. Keep `pgid-mail-introspect` disabled while diagnosing. If its one-time secret
    may have escaped, rotate it before any retry. Preserve audit evidence without
    recording the credential or inspected tokens.

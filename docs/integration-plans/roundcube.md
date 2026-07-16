@@ -224,11 +224,12 @@ Current target 是第一列的 Dovecot Path A。其餘列只保留為 rollback �
 
 ## 8. 部署驗收清單
 
-- [x] PGID local source `9efdece` 已完成 scoped mail introspection，完整 local gate 為 166 SSO + 4 RP tests。
-- [ ] **先關閉 production blocker**：system-client provision/rotation 已要求真正的 Passkey step-up；現行 `<10m` session-age freshness 不能代替 step-up。
+- [x] PGID local source 已完成 scoped mail introspection。
+- [x] Local source 已實作真正的 Passkey step-up，涵蓋 required UV、exact origin/RP ID、session/user-bound one-time challenge、replay/expiry/credential isolation 與六條 client mutation gate。
+- [ ] Owner 安排獨立安全 review，並在 production 套用 migration / deploy 後完成實機 ceremony smoke；`<10m` session-age freshness 仍不能代替 step-up。
 - [ ] Owner 已重新確認 production `pg72-webmail` exact metadata，並建立 private D1 backup / Time Travel 記錄。
-- [ ] Owner 已套用 local migration `0013`（最新既有 production record 只有 `0012`）。
-- [ ] PGID Worker 已部署，`INTROSPECTION_IP_RATE_LIMITER` namespace `1004` 與 `INTROSPECTION_CLIENT_RATE_LIMITER` namespace `1005` bindings 均存在。
+- [ ] Owner 已依序套用 local migrations `0013`、`0014`（最新既有 production record 只有 `0012`）。
+- [ ] PGID Worker 已部署，`PASSKEY_STEP_UP_MAX_AGE_SECONDS=600`，且 `INTROSPECTION_IP_RATE_LIMITER` namespace `1004` 與 `INTROSPECTION_CLIENT_RATE_LIMITER` namespace `1005` bindings 均存在。
 - [ ] 完成 Passkey step-up 後，以 same-origin fresh admin session provision `pgid-mail-introspect`，並立即將一次性 secret 放入 approved secret store/VPS secret config。
 - [ ] Production active/inactive/401 normal-flow smoke 通過；429/503 僅在 isolated Preview/controlled local test 驗證，沒有對 production flood/failure injection。
 - [ ] 從 `1.7.2` release（checksum/digest 鎖定）打包，**不使用 `1.8-git` 快照**，未改 auth core。
@@ -253,8 +254,8 @@ Current target 是第一列的 Dovecot Path A。其餘列只保留為 rollback �
 | 風險 | 嚴重度 | 說明 | 緩解 |
 |---|---|---|---|
 | production Dovecot 狀態未重新查證 | 高 | Owner 已選 Path A，但本輪沒有確認實際版本、SASL capability、introspection/SMTP path 或 rollback | 維護窗口前由 owner 唯讀查證；未確認前不 cut over |
-| 缺少真正 Passkey step-up | 高 | Current admin gate 只看 session age，不能證明剛完成強認證 | 先實作、測試並獨立審查 step-up，再 provision/rotate system client |
-| PGID prerequisite 尚未部署 | 高 | Local tests 通過不代表 production 已有 0013、rate bindings 或 service client | 依 handoff owner runbook 逐步 deploy/provision/smoke，保留 rollback |
+| Passkey step-up 尚未部署 / 獨立審查 | 高 | Local implementation 與 regression 不代表 production ceremony 已可用 | 先套 `0014`、部署、獨立審查並 smoke，再 provision/rotate system client |
+| PGID prerequisite 尚未部署 | 高 | Local tests 通過不代表 production 已有 0013/0014、rate bindings 或 service client | 依 handoff owner runbook 逐步 deploy/provision/smoke，保留 rollback |
 | Web UI OIDC 假象 | 高 | Web 登入成功不代表 IMAP/SMTP 已通過認證 | 明確分開 §3 兩層，各自驗收 |
 | app password 與撤銷脫鉤 | 高 | 最後手段下，PGID 撤銷無法讓 mail 憑證失效 | 僅作最後手段；獨立生命週期管理 + audit；優先推 backend 支援 OAuth |
 | 單一 audience 與 mail token 衝突 | 中-高 | SECURITY.md 拒 RFC 8707 `resource`；mail backend 若要專屬 audience 會衝突 | 以同 audience + JWKS 本地驗；owner + PGID core 決策 |
@@ -270,7 +271,7 @@ Current target 是第一列的 Dovecot Path A。其餘列只保留為 rollback �
 
 Path A 已選，不再把 A/B 選型列為開放問題。進 production 前仍需 owner 關閉：
 
-1. Passkey step-up 的 endpoint、challenge/session binding、有效窗口與 regression tests 如何落地，並由誰獨立審查？
+1. 誰負責 Passkey step-up 的獨立 review、production `0014` / Worker rollout 與 ceremony smoke，並記錄 GO/NO-GO？
 2. Production Dovecot/Postfix 實際版本與設定是否支援預定 XOAUTH2 + introspection 路徑？SMTP submission 是否確實經 Dovecot SASL？
 3. Roundcube 使用者主鍵與 PGID `sub` 的對應如何維持穩定；verified email 作 mailbox username mapping 時，變更與衝突如何處理？
 4. 單一 audience 策略下（SECURITY.md 拒 RFC 8707 `resource`），Dovecot 是否能直接使用 current opaque-token introspection contract？

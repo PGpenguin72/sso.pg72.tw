@@ -24,7 +24,7 @@ PGID **不開放動態自助註冊**。每個 client 由 PGID 管理員或具 `d
 
 建立、更新、輪替 secret、停用 / 啟用或刪除 client 都是同源 admin mutation：請求必須帶有效的 PGID session cookie，且 `Origin` 必須精確等於 PGID 的 `AUTH_BASE_URL`。這些操作只接受 `createdAt` 距目前時間小於 10 分鐘的 session；不符合時固定回 `403` 與 `{"code":"SESSION_NOT_FRESH","error":"fresh_session_required"}`。
 
-這個 10 分鐘判斷只是 session age gate，不代表使用者最近重新登入，也不代表完成 Passkey 驗證。高風險 client 操作的 Passkey step-up 仍是 production cutover 前的安全欠項。
+Local source 還要求同一個 D1 session 最近完成 Passkey step-up。帳號中心會在 mutation 前啟動原生 Passkey 驗證；取消或驗證失敗時不會送出原操作。10 分鐘 session age 只是額外 gate，不能替代 step-up。沒有 Passkey 時不提供 bypass，包含 `bootadmin`；先用既有 Google fresh session 註冊 Passkey，再操作 client。若 Google 與所有 Passkey 都遺失，目前沒有可用的自助 recovery/break-glass flow。Endpoint、有效窗口與錯誤契約見 [PGID 串接 API 手冊 §5.1.1](../../docs/api/PGID-integration.md#511-passkey-step-up)。Production 尚未套用 `0014` 或部署此行為。
 
 ## 本機開發
 

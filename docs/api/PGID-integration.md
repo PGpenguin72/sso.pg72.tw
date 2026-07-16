@@ -4,7 +4,7 @@
 > 對象：要把服務接上 PGID 的第一方 / 受管開發者
 > Issuer：`https://sso.pg72.tw`
 > 協議：OAuth 2.1 / OpenID Connect，Authorization Code + PKCE S256
-> 最後對照程式碼：`apps/sso/worker/auth.ts`、`apps/sso/worker/index.ts`、`apps/sso/worker/admin-clients.ts`、`apps/test-rp/worker/index.ts`
+> 最後對照程式碼：`apps/sso/worker/auth.ts`、`apps/sso/worker/index.ts`、`apps/sso/worker/admin-clients.ts`、`apps/sso/worker/passkey-step-up.ts`、`apps/test-rp/worker/index.ts`
 
 本手冊是**精簡技術參考**：端點、scopes、claims、token 壽命、client 認證方式與可複製的串接範例。教學導向、逐步導覽與一般使用者說明在 [`wiki/`](../../wiki/SUMMARY.md)；完整架構規格與安全設計以 [`codex.md`](../../codex.md) 為準。若本文件與 `codex.md` 衝突，以 `codex.md` 為準並在同一變更修正本文件。
 
@@ -142,7 +142,22 @@ Client secret 為 `pg72_cs_<suffix>` 格式，**只在建立時回傳一次**，
 
 所有 client mutation（建立、trust metadata 更新、secret rotation、停用 / 啟用、刪除與 system-client provisioning）都必須使用有效的登入 session cookie，且請求的 `Origin` 必須精確等於 PGID 的 `AUTH_BASE_URL`；mutation 缺少 `Origin` 或來源不符時回 `403 {"error":"invalid_origin"}`。這些操作也要求 session 的 `createdAt` 距目前時間小於 10 分鐘；過期或未來時間都回精確的 `403 {"code":"SESSION_NOT_FRESH","error":"fresh_session_required"}`。
 
-此處的 fresh 只代表 session age gate，**不等於**使用者剛重新登入或完成 Passkey 驗證。高風險 client 操作的 Passkey step-up 尚未實作，仍是 production cutover 前必須關閉的安全欠項。
+此處的 fresh 只代表 session age gate，**不等於**使用者剛完成 Passkey 驗證。Local source 的所有 client mutation 還要求同一 D1 session 有未過期的 Passkey step-up timestamp；production 尚未套用 `0014`、部署或完成獨立 review，因此遠端 rollout blocker 仍未關閉。
+
+#### 5.1.1 Passkey step-up
+
+Account center 在送出 client mutation 前使用以下同源端點；兩者都要求有效且 active 的 PGID session、`Origin` 精確等於 `AUTH_BASE_URL`，完整 request body 上限 16 KiB：
+
+| Endpoint | Request | 成功結果 |
+| --- | --- | --- |
+| `POST /api/account/passkey-step-up/challenge` | 無 request 欄位；session 必須是過去 10 分鐘內建立 | 若既有 step-up 仍有效，回 `verified: true`；否則回 `challengeId` 與 SimpleWebAuthn authentication `options` |
+| `POST /api/account/passkey-step-up/verify` | JSON `{ "challengeId": "UUID", "response": <AuthenticationResponseJSON> }` | 驗證 assertion 後回 `verified: true`、`verifiedAt` 與 `expiresAt` |
+
+Challenge 由 Web Crypto / SimpleWebAuthn 產生，兩分鐘內有效，在 D1 一次性消耗，並同時綁定目前的 user 與 session。Authentication options 只列出目前 user 擁有的 credential，且 `userVerification` 固定為 `required`。Verifier 使用設定中的 exact `PASSKEY_ORIGIN` 與 `PASSKEY_RP_ID`；production 只能是 `https://sso.pg72.tw` 與 `sso.pg72.tw`。Assertion 成功後先 guarded-CAS credential counter，再以 D1 batch 寫 success audit，最後才寫依賴該 exact audit event 的 session timestamp。
+
+`PASSKEY_STEP_UP_MAX_AGE_SECONDS` 只能設為 60-600 秒，現行值為 600。無 Passkey 時回 `403 {"code":"PASSKEY_ENROLLMENT_REQUIRED","error":"passkey_enrollment_required"}`；未完成或已過期時 client mutation 回 `403 {"code":"PASSKEY_STEP_UP_REQUIRED","error":"passkey_step_up_required"}`。無效、過期或已使用的 challenge 回 generic `passkey_step_up_challenge_invalid`；credential 不存在、屬於其他 user、origin/RP ID/UV/簽章錯誤都只回 generic `passkey_step_up_failed`，不透露 credential ownership。
+
+`bootadmin` 沒有 bypass。首次 bootstrap 使用既有 Google fresh session，在帳號中心註冊 Passkey，再完成 step-up。若 Google 與所有 Passkey 都遺失，目前沒有可用的自助 recovery/break-glass flow；其設計、審核與演練仍是 full Production GO gate，不能繞過此 API gate。以上是 local source contract；production 尚未套 `0014`、部署或完成實機 smoke。
 
 ### 5.2 Client 類型
 
@@ -189,11 +204,11 @@ token kind: opaque access token (pg72_at_...)
 
 #### 5.4.1 Provisioning 與 secret
 
-此 service client 不能走一般 client 建立流程。具 `clients.manage_all` 權限的管理員使用 `POST /api/admin/clients/provision-mail-introspector` 建立它；請求還必須帶有效的 PGID session cookie、精確等於 `AUTH_BASE_URL` 的 `Origin`，而且 session 的 `createdAt` 必須是過去 10 分鐘內。端點沒有 request 欄位，應送空 body；在 4 KiB admin body 上限內，即使送了 body 也不會拿來設定 client。
+此 service client 不能走一般 client 建立流程。具 `clients.manage_all` 權限的管理員使用 `POST /api/admin/clients/provision-mail-introspector` 建立它；請求還必須帶有效的 PGID session cookie、精確等於 `AUTH_BASE_URL` 的 `Origin`、過去 10 分鐘內建立的 session，以及該 exact session 最近完成的 Passkey step-up。端點沒有 request 欄位，應送空 body；在 4 KiB admin body 上限內，即使送了 body 也不會拿來設定 client。
 
 成功回 `201` 與只顯示一次的 `clientSecret`；已存在時回 `409 {"error":"client_exists"}`。明文 secret 不寫入資料庫，資料庫只存 suffix 的 hash。Client 為 unowned system service client，沒有 redirect URI、scope 或可簽發 token 的 OAuth grant；內部 `urn:pg72:grant-type:introspection-only` sentinel 只用來防止 provider 套用預設 grant，不能拿來換 token 或走 authorize。
 
-`pgid-mail-introspect` 與 `pg72-webmail` 都是 system-reserved client ID，developer 不能 claim。Provision、secret rotation、停用與刪除都要求 `clients.manage_all` 與上述 cookie / Origin / fresh-session gate。10 分鐘 session age gate **不等於**重新認證；高風險操作的 Passkey step-up 尚未實作，是 production cutover 前必須關閉的安全欠項。
+`pgid-mail-introspect` 與 `pg72-webmail` 都是 system-reserved client ID，developer 不能 claim。Provision、secret rotation、停用與刪除都要求 `clients.manage_all` 與上述 cookie / Origin / fresh-session / Passkey step-up gate。Local source 已實作，但 production 仍待 `0013`、`0014`、Worker deployment、獨立 review 與 smoke，不能把 session age 單獨視為重新認證。
 
 目前 repository 的 local source 已實作此行為並通過本地完整 regression gate；production 尚未部署它，也尚未 provision `pgid-mail-introspect`。不要把下列 local contract 解讀成已上線狀態。
 

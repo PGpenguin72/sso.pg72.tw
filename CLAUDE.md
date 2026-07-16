@@ -17,7 +17,7 @@
 - 唯一例外是 Mail Path A 的 Dovecot legacy mailbox lookup：固定 introspection pair 可取 verified email 對應既有 mailbox，但不得用它合併 PGID/RP 身分或擴張到其他 client。
 - Dynamic client registration 關閉。Client、redirect URI 與 scopes 由管理員明確建立。
 
-截至 2026-07-16，本地 root `main` 已包含 Mail Path A introspection prerequisite，完整 typecheck、workerd suite、production build 與 test RP protocol gate 已通過。這些是 local-source 結果：沒有 deploy、remote D1 操作、`pgid-mail-introspect` provisioning 或 mail VPS cutover，不得寫成 production 已上線。
+截至 2026-07-16，repository local source 已包含 Mail Path A introspection prerequisite 與真正的 Passkey client-mutation step-up，完整 typecheck、workerd suite、production build 與 test RP protocol gate 已通過。這些是 local-source 結果：沒有 deploy、remote D1 操作、`0013`/`0014` production migration、`pgid-mail-introspect` provisioning 或 mail VPS cutover，不得寫成 production 已上線。
 
 ## Canonical 技術方向
 
@@ -87,11 +87,11 @@
 - RP session 保存中央 `sid` 與 `sub`。
 - 每個第一方 RP 實作冪等 back-channel logout endpoint，以 `jti` 去重。
 - 管理服務即時檢查中央撤銷狀態且 fail closed；公開服務撤銷 cache 上限 30 秒。
-- Recovery codes 只作一次性復原，不是日常登入方式。
+- Recovery codes 尚未實作；未來只作一次性復原，不是日常登入方式。現行 runtime 沒有自助 recovery 或 break-glass bypass。
 - Mail introspection 唯一 delegated pair 是 `pgid-mail-introspect` → `pg72-webmail` opaque access token；必須同時有 live central session、`email` scope、active user 與 verified email。JWT、refresh token、其他 pair 或缺任一條件都回 RFC 7662 inactive。
 - Mail response 只提供 Dovecot lookup 所需欄位，不回 `sub`/`sid`。`token_type_hint` 只是 hint；token-controlled JOSE 或缺 `kid` 回 inactive，JWKS/infrastructure fault 仍回 server error。
 - Introspection 使用兩個獨立 binding：namespace `1004` 的 IP 1200/60 與 namespace `1005` 的 client-class/IP 600/60。Cloudflare limiter 是 per-location、permissive／eventually consistent，只是 abuse control，不能取代認證、撤銷或全域精確計數。
-- System-client provision/rotate/disable/delete 要 `clients.manage_all` 與 10 分鐘 session-age gate；fresh session 不等於 Passkey step-up。Passkey step-up 尚未實作，是 production blocker。
+- System-client provision/rotate/disable/delete 要 `clients.manage_all`、10 分鐘 session-age gate，以及同一 D1 session 最近完成的 Passkey step-up。Local source 已實作 session/user-bound 一次性 challenge、required UV 與可設定的 1-10 分鐘窗口；production 尚未套用 `0014` 或部署，獨立 review 與實機驗證仍是 rollout gate。
 - `pgid-mail-introspect` secret 疑似外洩時先 disable，再 rotate、更新受管 secret 與 Dovecot 設定；停用中的 client 無法通過真正的 introspection smoke，須在維護窗口 re-enable 後立即 smoke，失敗即 re-disable/rollback。secret 不進 source、D1 明文、log 或文件。
 
 ## 專案 Ownership
@@ -157,7 +157,7 @@ File Browser/Roundcube production 部署必須從鎖定版本、checksum/image d
 - DAST 覆蓋 auth、OIDC、admin、gateway 與 logout endpoints。
 - Request-abort/isolate regression、併發與 rate-limit tests。
 - Backup restore、key rotation、session revoke、Queue retry/DLQ 演練。
-- 高風險 system-client provisioning/secret rotation 的 Passkey step-up；現行 fresh session age gate 不能替代這項驗證。
+- 高風險 system-client provisioning/secret rotation 的 Passkey step-up 已在 local source 實作；production 必須套用 `0014`、部署、完成獨立 review 與實機 smoke，且 fresh session age gate 仍不能替代 step-up。
 - 無未處理的 Critical/High finding；Medium 必須有 owner、期限與補救措施。
 
 任何人都不能保證系統必然「通過所有漏洞測試」。本專案的要求是把可測試的安全條件寫成自動化 gate，並在公開前安排獨立 review，而不是用文件聲明取代驗證。

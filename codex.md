@@ -7,9 +7,9 @@
 
 ## 0. Phase 0 實作狀態
 
-截至 2026-07-16，root `main` 的本地 source 已包含可部署的 SSO Worker、React 帳號中心、D1 migrations `0001`–`0013`、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理、Mail Path A introspection prerequisite，以及使用 `oauth4webapi` 的獨立 test RP。最新本地完整 typecheck、workerd suite、production build 與 test RP protocol gate 全數通過。這次驗證沒有執行 deploy、remote D1、system-client provisioning 或其他 production 操作；程式合併與本地測試不得寫成遠端已上線。
+截至 2026-07-16，repository 的本地 source 已包含可部署的 SSO Worker、React 帳號中心、D1 migrations `0001`–`0014`、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理、Mail Path A introspection prerequisite、真正的 Passkey client-mutation step-up，以及使用 `oauth4webapi` 的獨立 test RP。最新本地完整 typecheck、workerd suite、production build 與 test RP protocol gate 全數通過。這次驗證沒有執行 deploy、remote D1、system-client provisioning 或其他 production 操作；程式合併與本地測試不得寫成遠端已上線。
 
-`0013_confidential_client_secret_post.sql` 將既有 confidential client metadata 正規化為 `client_secret_post`；它不旋轉 secret、不改 grant/token，也不代表 production 已套用。現有 deployment record 仍只確認 production D1 套用至 `0012`，`0013` 必須由 owner 在維護窗口另行確認與執行。
+`0013_confidential_client_secret_post.sql` 將既有 confidential client metadata 正規化為 `client_secret_post`；它不旋轉 secret、不改 grant/token。`0014_passkey_step_up.sql` 新增 session step-up timestamp 與短效 challenge table。兩者都不代表 production 已套用；現有 deployment record 仍只確認 production D1 至 `0012`，必須由 owner 在維護窗口依序確認與執行。
 
 既有部署紀錄顯示 `pg72-id` 已部署至 `https://sso.pg72.tw`，目前記錄的 Worker 版本是 `4d0c701a-c805-4254-ae2b-7c0df856b3c0`，production D1 已套用至 `0012`；Copy 與 Link 也已切換 production traffic 至 PGID。這些紀錄建立了「已部署 invite beta」現況，但仍不是完整 Production GO：中央 `sid`、back-channel logout、DLQ 告警、完整復原演練與其他 §9.2 gate 尚未完成。本次文件校準未執行 remote/production 查詢，實際遠端版本仍應由 owner 在維護窗口依 `handoff.md` 驗證。
 
@@ -304,7 +304,7 @@ invited -> active -> suspended -> deleted
 - [ ] 負載測試、備份還原演練、key rotation 與 Queue retry/DLQ 演練。
 - [ ] 新帳號限制狀態（限縮敏感功能）機制。
 - [ ] Back-channel logout 全面上線與 DLQ 告警。
-- [ ] Provision/rotate system client 等高風險操作的 Passkey step-up；目前 10 分鐘 session-age freshness 只是一道補償控制，不是重新驗證。
+- [ ] 將 local source 已實作的 Passkey step-up 與 migration `0014` 部署至 production，完成獨立 review 與實機 smoke；10 分鐘 session-age freshness 仍是額外條件，不能替代重新驗證。
 
 ### 9.3 Google
 
@@ -322,9 +322,12 @@ invited -> active -> suspended -> deleted
 - 支援同步 Passkey、平台驗證器與硬體安全金鑰。
 - 使用者可查看、命名與移除每一組 Passkey。
 - 管理員至少登錄兩組不同復原路徑的 Passkey。
-- 移除最後一組 Passkey、變更 Email、管理 client 或建立 recovery codes 必須 fresh authentication。
-- 現行 client mutation 的 fresh gate 只檢查 session 建立時間在 10 分鐘內；它不證明剛完成 Passkey 驗證。System-client provisioning、secret rotation 等高風險操作在 production 啟用前仍須加入 Passkey step-up，不能以 session age 宣稱已滿足。
-- Recovery code 僅供一次性帳號復原，不作為日常登入方式。
+- 移除最後一組 Passkey、變更 Email 與管理 client 必須 fresh authentication；未來建立 recovery codes 時也必須套用同一要求。
+- 所有 client mutation 同時要求 session 建立時間在 10 分鐘內，並要求該 D1 session 的 Passkey step-up 時戳仍在 `PASSKEY_STEP_UP_MAX_AGE_SECONDS`（60-600 秒，現行 600）內；兩者缺一不可。
+- Step-up 使用 `POST /api/account/passkey-step-up/challenge` 與 `/verify`。Challenge 由 Web Crypto/SimpleWebAuthn 產生、兩分鐘內有效、一次性且綁定 user + session；assertion 強制 exact origin、RP ID、credential ownership 與 user verification。成功後先以 guarded CAS 更新 credential counter，再以 D1 batch 先寫 success audit、最後寫入依賴該 exact audit event 的 session timestamp；任何 guard 失敗都不會產生有效 step-up。
+- 沒有 Passkey 的帳號一律回 `PASSKEY_ENROLLMENT_REQUIRED`，包含 `bootadmin`，沒有 runtime bypass。首次 bootstrap 以既有 Google fresh session 註冊 Passkey 後再 step-up。若 Google 與所有 Passkey 都遺失，目前沒有可用的自助 recovery/break-glass flow；其設計、審核與演練仍是 full Production GO gate，不能以 client API bypass 代替。
+- 以上行為已在 local source 以真實 P-256 assertion、replay、cross-session、expiry、missing-Passkey 與 UV regression 驗證；production 尚未套用 `0014` 或部署，不能宣稱遠端 blocker 已關閉。
+- Recovery code 尚未實作；未來只能供一次性帳號復原，不作為日常登入方式。
 
 ## 10. OIDC Client Contract
 
@@ -390,7 +393,7 @@ required state:       live central session + email scope + active user + verifie
 - 未知、過期、撤銷、停用 target client、JWT 無 `kid` 或 token-controlled JOSE 驗證失敗都回 HTTP 200 `{"active":false}`。`token_type_hint` 只是優先查詢提示，hint miss 必須再查另一種 token type。JWKS corruption、重複 matching `kid`、fetch timeout 等 server/infrastructure fault 仍是 internal error，不得偽裝成一般 inactive token。
 - 成功的 mail response 只允許 `active`、`client_id`、`scope`、`iss`、`exp`、`iat`、`email`、`email_verified`；不得回 `sub`、`sid` 或其他不必要 claim。Email 只供 Dovecot legacy mailbox lookup，不成為 PGID 或 Roundcube 的主鍵。
 - Introspection client 使用 `client_secret_post`；Worker preflight 拒絕 Authorization header、重複 single-value credentials/token 欄位、錯誤 media type、非 POST 與超過 4 KiB 的 body。Client authentication 失敗回 HTTP 401；token 狀態不得藉由 error response 洩漏。
-- `POST /api/admin/clients/provision-mail-introspector` 只允許 `clients.manage_all` actor，建立無 owner、無 redirect URI/scope，且只有 introspection-only sentinel grant（不能簽發 token）的 confidential service client；secret 只顯示一次，D1 只存 hash。Provision、rotate、disable/delete 都要求 10 分鐘內建立的 fresh session，但此 age gate 不是 Passkey step-up，後者仍是 production blocker。
+- `POST /api/admin/clients/provision-mail-introspector` 只允許 `clients.manage_all` actor，建立無 owner、無 redirect URI/scope，且只有 introspection-only sentinel grant（不能簽發 token）的 confidential service client；secret 只顯示一次，D1 只存 hash。Provision、rotate、disable/delete 同時要求 10 分鐘內建立的 fresh session 與該 session 最近完成的 Passkey step-up；local source 已實作，production 仍待 `0014`、部署、獨立 review 與 smoke。
 - 若 service secret 疑似外洩，先停用 `pgid-mail-introspect` 使 introspection fail closed，再 rotate secret、更新受管 secret store／Dovecot 設定；停用中的 client 無法通過真正的 introspection smoke，須在維護窗口重新啟用後立即 smoke，失敗即 re-disable/rollback。不得在事故處理中把 secret 寫入 D1 明文、log、文件或聊天。
 
 Introspection 不共用一般 auth 端點的 30/min limiter。`INTROSPECTION_IP_RATE_LIMITER` 使用 namespace `1004`、每 60 秒 1200 次的 IP bucket；`INTROSPECTION_CLIENT_RATE_LIMITER` 使用 namespace `1005`、每 60 秒 600 次的 client-class/IP bucket（`mail` 與 `other` 分開）。Binding failure 回 503、拒絕回 429。Cloudflare Workers Rate Limiting binding 的判斷是 per-location 且 permissive／eventually consistent，這些數字是濫用緩解而不是精確全域上限；不能用它取代 client authentication、token validation、D1 revocation source of truth 或上游邊界防護。
@@ -461,7 +464,7 @@ D1 marks central session inactive
 - 撤銷單一裝置、其他裝置或所有裝置。
 - 已授權應用程式、scopes 與撤銷 consent。
 - 個人登入、安全與帳號變更紀錄。
-- Recovery codes 產生與重新產生。
+- Recovery codes 產生與重新產生（planned，尚未實作）。
 - 帳號刪除申請。
 
 ### 12.2 管理後台
@@ -518,7 +521,7 @@ D1 marks central session inactive
 - `client_roles`
 - `user_client_roles`
 - `rp_session_visits`
-- `recovery_codes`
+- `recovery_codes`（planned，尚未實作）
 - `audit_events`
 - `security_events`
 - `event_deliveries`
@@ -572,9 +575,9 @@ Audit metadata 不得包含 access token、refresh token、session token、autho
 - ID/access token 使用非對稱簽章並發布 JWKS。
 - 支援 signing key overlap rotation，舊 key 在既有短效 token 到期後才移除。
 - 所有 secret 經 Wrangler secrets/Secrets Store 管理，不寫入 repo、log 或 D1 明文。
-- Recovery code、refresh token、client secret 與 invitation token 只保存不可逆 hash，除非協議明確要求可還原資料。
-- 管理員操作要求 fresh authentication；高風險操作要求 Passkey step-up。目前 client mutation 的 session-age gate 已實作，Passkey step-up 尚未實作，屬 production blocker。
-- 管理員至少具有兩種獨立復原方式，並保留受控 break-glass 程序。
+- Recovery code（未來實作時）、refresh token、client secret 與 invitation token 只保存不可逆 hash，除非協議明確要求可還原資料。
+- 管理員操作要求 fresh authentication；高風險 client mutation 另要求同一 D1 session 的 Passkey step-up。Local source 已實作 required UV、exact origin/RP ID、一次性 session/user-bound challenge、counter guard 與 timestamp/audit 寫入；production 尚未套用 `0014` 或部署，仍須獨立 review 與實機驗證。
+- 管理員至少具有兩種獨立復原方式；受控 recovery/break-glass flow 尚未實作或演練，仍是 full Production GO gate。
 - CORS 採 allowlist，不對 credentialed endpoints 使用 `*`。
 - 所有 state-changing endpoints 使用 CSRF 保護或不依賴 cookie 的等效防護。
 - 登入、callback、token、Passkey、邀請與管理 endpoints 具獨立 rate limits；新帳號建立另有更嚴的 per-IP `REGISTRATION_RATE_LIMITER`。

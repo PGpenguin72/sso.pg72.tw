@@ -23,6 +23,8 @@ interface PublicViews {
 
 let publicViews: PublicViews;
 
+// Parallel workerd transforms can push this full-App import past Vitest's
+// default hook timeout.
 beforeAll(async () => {
   vi.stubGlobal("window", {
     localStorage: {
@@ -42,7 +44,7 @@ beforeAll(async () => {
   });
   const appModule = "../src/" + "App.tsx";
   publicViews = (await import(/* @vite-ignore */ appModule)) as PublicViews;
-});
+}, 30_000);
 
 afterAll(() => {
   vi.unstubAllGlobals();

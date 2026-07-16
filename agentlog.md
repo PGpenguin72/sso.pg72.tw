@@ -100,3 +100,45 @@
 - 驗證:tsc、eslint --max-warnings 0、next build、next-on-pages pages:build 全過;舊色 grep 零殘留。
 - 邊界:auth/OIDC/token vault/六位數訪客碼/API 零觸碰。
 - 待 owner:push 前本機 pnpm dev 實看;push 會觸發 Pages 部署,時機由 owner 決定。
+
+## 2026-07-16 下午 — temp 清理 agent 回報(/private/tmp + git worktrees)
+
+### 已刪除
+- /private/tmp pg72-* QA 殘留檔(7/15):全部 .png/.jpg/.html/.headers/.cookies/.json/.js/.body/.cpuprofile + pg72-generated-env.d.ts。
+- /private/tmp 目錄:pg72-chrome-{8800,broken-final,dark,debug,forced-light,light,links-index,links-rails}、pg72-dd-ios、pg72-dd-macos、pg72-device、pg72-emoji-dd-{ios,macos}、pg72-upload-venv、pg72-id-dry-run、pg72-id-prod-dry、pg72-id-production-dry-run、pg72-id-secrets-dry-run、upload-pg72-readme-venv、upload-pg72-smoke、pgid-full。
+- /private/tmp pgid 雜項:pgid-dev.log、pgid-introspection-{check,review,test-rp,typegen,wrangler}.log、pgid-docs-files.txt、pgid-workers-best-practices.html、pgid-oauth-provider-1.6.23(空目錄)、pgid-oauth-provider-edit-final{,2,3,4,5}(patch 已 tracked 進 repo,解壓副本不再需要)、pgid-workers-types-latest。
+- 第一階段釋放空間:du 事前統計約 **1.8 GB**。
+- Codex worktrees(依 to_claude.md,成果已進 main 或報廢):
+  - /private/tmp/pgid-client-secret-post + branch codex/client-secret-post(已以 4a44b43 進 main)
+  - /private/tmp/pgid-introspection-mail-v2 + branch codex/introspection-mail-v2(已以 9efdece 進 main)
+  - /private/tmp/pgid-docs-truth + branch codex/docs-truth-reconcile(已以 69118ad 進 main)
+  - /private/tmp/pgid-introspection-email + branch codex/introspection-email(有缺陷禁止合併)
+- .claude/worktrees agent worktrees ×10(實際存在 10 個,非 11):全部經 `git rev-list --count main..<branch>` = 0 且 `status --porcelain` 乾淨後才刪(其中 3 個僅有指向主 checkout 原專案代碼 的 untracked symlink,先刪 symlink 再驗證乾淨):
+  - agent-a14eb7fc5280e547d [fix/reinvite-after-account-deletion]
+  - agent-a17c580d445699a34、agent-a9117a4cb1e548eee、agent-a99ea5f1503827b40、agent-ab718304acd05f18c、agent-ab8846910f398187e、agent-ae6dc56a2fa785158、agent-af6e9ec9b21a8d0a0 [各自 worktree-agent-* branch]
+  - agent-a377fa08455ac60cb [feat/oauth-consent-screen]、agent-ae3394ace1dd50f15 [feat/account-profile-and-login-methods]
+  - 另刪 3 個殘留的 worktree-agent-{a14eb7fc…,a377fa08…,ae3394ac…} branch(tip 74d70d0,main..branch = 0)。
+- 已跑 `git worktree prune`。
+
+### 保留(原因)
+- /private/tmp/pgid-mail-docs [codex/mail-introspection-docs]:另一 agent 使用中(keep-list)。
+- /private/tmp/pg72-id-preview-before-copy-refresh-20260715.sql:D1 備份(keep-list)。
+- /private/tmp/claude-501/、claude-ccr-direct.log:活動中 Claude session(keep-list)。
+- /private/tmp/pgid-docs-diff.txt:不在授權刪除清單內,不確定是否仍被 docs 交接 agent 引用,保留待確認。
+- /private/tmp/account-review-workers-types:不在清單內,保留。
+- 主 repo .claude/(settings.local.json 完好)、morden_dark.txt、所有 tracked 檔案:未動。
+
+### 收尾狀態
+- `git worktree list` 只剩主 checkout(main)與 /private/tmp/pgid-mail-docs。
+- `git branch` 只剩 main 與 codex/mail-introspection-docs。
+- 主 checkout `status --short` 僅剩 owner 的 untracked morden_dark.txt(.claude/ 內容仍在,僅因空的 worktrees 目錄不再顯示)。
+- 清理期間另一 agent 對 main cherry-pick 持續進行(main 74126a2 → 8caf27e),未遇 lock 衝突。
+
+## 2026-07-16 — diary.pg72.tw reskin 完成(4/4 reskin 全數完成)
+
+- reskin agent 回報:**diary.pg72.tw 完成**。接手點 = Step 4 ambient background 完成但未 commit 的 191+/66- 半成品,檢視可用後驗證並 commit 保存。
+- 本次 Step 5:清掃 9 處殘留舊藍灰色票(heatmap/prose/媒體井/lightbox/import 進度條),import step 啟用態改白字,theme-color 改 #050506。
+- Commits:1c6fe6a / b10037c(本地,未 push、未部署)。
+- 驗證:pnpm check(types+tsc+eslint)、build、39/39 unit tests 全過;零 .tsx/邏輯變更。
+- 刻意保留:serif 長文字體、per-entry 色帶、coral/sky/gold 語意色(記於 DESIGN-LOG)。
+- **至此 5 個 reskin 目標(upload/ahsnccu-ann/link/copy/diary)全部完成**,皆本地 commit、未 push,待 owner 實機確認後決定部署。

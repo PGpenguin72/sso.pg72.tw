@@ -12,6 +12,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { scanBufferForSecrets } from "./secret-family.mjs";
+
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const policy = JSON.parse(
   readFileSync(new URL("../../security/release-policy.json", import.meta.url), "utf8"),
@@ -20,14 +22,6 @@ const policy = JSON.parse(
 const forbiddenContent = [
   { name: "private machine path", pattern: /(?:\/Users\/|\/private\/(?:tmp|var)\/|\/home\/(?:runner|[^/\s]+)\/|[A-Za-z]:\\Users\\)/ },
   { name: "source map reference", pattern: /(?:sourceMappingURL|"sourcesContent"\s*:)/ },
-  { name: "private key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
-  { name: "GitHub token", pattern: /(?:ghp_|github_pat_)[A-Za-z0-9_]{20,}/ },
-  { name: "Google API key", pattern: /AIza[0-9A-Za-z_-]{30,}/ },
-  {
-    name: "assigned secret value",
-    pattern:
-      /(?:BETTER_AUTH_SECRET|GOOGLE_CLIENT_SECRET|CLOUDFLARE_API_TOKEN)\s*[:=]\s*["'][^"']{8,}["']/,
-  },
 ];
 
 function scrubbedEnvironment() {
@@ -73,12 +67,12 @@ export function validateArtifactFiles(directory, filePolicy) {
     assert.ok(!/(?:^|\/)(?:\.dev\.vars(?:\..*)?|\.env(?:\..*)?|[^/]+\.(?:map|pem|key|p8))$/.test(file.relative));
     totalBytes += file.size;
     const bytes = readFileSync(file.absolute);
-    if (!file.relative.endsWith(".woff2")) {
-      assert.ok(!bytes.includes(0), `unexpected binary content: ${file.relative}`);
-      const text = bytes.toString("utf8");
-      for (const forbidden of forbiddenContent) {
-        assert.ok(!forbidden.pattern.test(text), `${file.relative} contains ${forbidden.name}`);
-      }
+    const text = bytes.toString("utf8");
+    for (const forbidden of forbiddenContent) {
+      assert.ok(!forbidden.pattern.test(text), `${file.relative} contains ${forbidden.name}`);
+    }
+    for (const rule of scanBufferForSecrets(bytes)) {
+      assert.fail(`${file.relative} contains redacted secret family [${rule}]`);
     }
     inventory.push({
       path: file.relative,

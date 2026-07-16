@@ -42,6 +42,32 @@ test("rejects private machine paths and embedded secrets", (context) => {
   writeFileSync(path.join(directory, "index.js"), 'const path = "/Users/operator/private";');
   assert.throws(() => validateArtifactFiles(directory, basePolicy), /private machine path/);
 
-  writeFileSync(path.join(directory, "index.js"), 'const BETTER_AUTH_SECRET = "not-a-placeholder-value";');
-  assert.throws(() => validateArtifactFiles(directory, basePolicy), /assigned secret value/);
+  const secret = "F".repeat(40);
+  writeFileSync(path.join(directory, "index.js"), `BETTER_AUTH_SECRET=${secret}`);
+  assert.throws(
+    () => validateArtifactFiles(directory, basePolicy),
+    (error) => {
+      assert.match(error.message, /redacted secret family \[assigned-secret\]/);
+      assert.ok(!error.message.includes(secret));
+      return true;
+    },
+  );
+});
+
+test("uses the shared redacted family engine for binary artifact content", (context) => {
+  const directory = fixture();
+  context.after(() => rmSync(directory, { force: true, recursive: true }));
+  const token = ["xoxb", "987654321098765432109876"].join("-");
+  writeFileSync(
+    path.join(directory, "index.js"),
+    Buffer.concat([Buffer.from("binary\0"), Buffer.from(token), Buffer.from("\0tail")]),
+  );
+  assert.throws(
+    () => validateArtifactFiles(directory, basePolicy),
+    (error) => {
+      assert.match(error.message, /index\.js contains redacted secret family \[slack-token\]/);
+      assert.ok(!error.message.includes(token));
+      return true;
+    },
+  );
 });

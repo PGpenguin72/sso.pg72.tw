@@ -1,7 +1,10 @@
+import assert from "node:assert/strict";
 import { accessSync, constants, readFileSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+
+import { redactedFindings, scanWorkingTree } from "./secret-family.mjs";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const tools = JSON.parse(
@@ -27,6 +30,20 @@ function run(command, args) {
   if (result.status !== 0) throw new Error(`${path.basename(command)} exited ${result.status}`);
 }
 
+function runSecretlint() {
+  const result = spawnSync(
+    "pnpm",
+    ["exec", "secretlint", "--secretlintrc", ".secretlintrc.json", "**/*"],
+    { cwd: repoRoot, encoding: "utf8", maxBuffer: 20 * 1024 * 1024 },
+  );
+  if (result.error) throw result.error;
+  assert.equal(
+    result.status,
+    0,
+    "Secretlint reported working-tree findings; details are redacted by the release gate",
+  );
+}
+
 function hasExpectedVersion(candidate) {
   const result = spawnSync(candidate, ["version"], { cwd: repoRoot, encoding: "utf8" });
   return result.status === 0 && result.stdout.trim() === tools.tools.gitleaks.version;
@@ -48,17 +65,20 @@ function main() {
     const system = spawnSync("gitleaks", ["version"], { cwd: repoRoot, encoding: "utf8" });
     if (system.status === 0 && system.stdout.trim() === tools.tools.gitleaks.version) binary = "gitleaks";
   }
-  if (binary) {
-    run(binary, ["git", "--redact", "--no-banner", "--verbose", "--log-opts=--all", "."]);
-    console.log("Gitleaks history scan passed; checking the current working tree with Secretlint.");
-  } else {
-    console.log("Gitleaks is unavailable; using the pinned Secretlint working-tree fallback.");
-  }
-  run("pnpm", ["exec", "secretlint", "--secretlintrc", ".secretlintrc.json", "**/*"]);
+  assert.ok(
+    binary,
+    `pinned Gitleaks ${tools.tools.gitleaks.version} is required; run pnpm security:tools:install`,
+  );
+  run(binary, ["git", "--redact", "--no-banner", "--verbose", "--log-opts=--all", "."]);
+  const findings = scanWorkingTree(repoRoot);
+  assert.deepEqual(
+    findings,
+    [],
+    `redacted working-tree findings:\n${redactedFindings(findings)}`,
+  );
+  runSecretlint();
   console.log(
-    binary
-      ? "Secret gate passed with Gitleaks history + Secretlint working-tree scans."
-      : "Secret gate passed with Secretlint fallback.",
+    "Secret gate passed with Gitleaks full-history + redacted explicit/Secretlint working-tree scans.",
   );
 }
 

@@ -1,6 +1,7 @@
 packages:
   - "apps/sso"
   - "apps/test-rp"
+  - "wiki"
 
 allowBuilds:
   esbuild: true
@@ -9,6 +10,9 @@ allowBuilds:
 
 minimumReleaseAgeExclude:
   - '@cloudflare/workers-types@5.20260714.1'
+
+overrides:
+  'vitepress@1.6.4>vite': 6.4.3
 
 patchedDependencies:
   '@better-auth/oauth-provider@1.6.23': patches/@better-auth__oauth-provider@1.6.23.patch

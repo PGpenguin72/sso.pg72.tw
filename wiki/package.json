@@ -1,0 +1,17 @@
+{
+  "name": "@pg72/wiki",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vitepress dev .",
+    "build": "vitepress build .",
+    "preview": "vitepress preview .",
+    "test": "node --test scripts/summary.test.mjs",
+    "check": "pnpm run test && pnpm run build && node scripts/validate-build.mjs"
+  },
+  "devDependencies": {
+    "vitepress": "1.6.4"
+  }
+}

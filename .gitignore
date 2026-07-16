@@ -1,6 +1,7 @@
 node_modules/
 .DS_Store
 dist/
+wiki/.vitepress/cache/
 .wrangler/
 .dev.vars*
 !**/.dev.vars.example

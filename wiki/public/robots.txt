@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://wiki.sso.pg72.tw/sitemap.xml

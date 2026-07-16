@@ -60,6 +60,28 @@ The only delegated introspection relationship is the fixed confidential client `
 
 This behavior is pinned by the exact-version patch `patches/@better-auth__oauth-provider@1.6.23.patch`. It keeps same-client introspection as the default and adds only an opt-in opaque-access-token authorization hook, RFC 7662 inactive handling, hint fallback, and JOSE/`kid` classification. Do not carry the patch mechanically to another provider version or use `allowUnusedPatches` to hide a mismatch. Remove it only after an audited pinned stable provider supplies equivalent behavior, a clean frozen install succeeds without the patch, and the full introspection/protocol regression suite passes.
 
+## Wiki Build-Tool Compatibility Exception
+
+The Wiki exact-pins `vitepress@1.6.4`. That release declares
+`vite@^5.4.14`, whose entire allowed range is affected by High
+`GHSA-fx2h-pf6j-xcff` / `CVE-2026-53571`. The workspace therefore applies the
+single dependency-scoped override `vitepress@1.6.4>vite=6.4.3`, the first
+patched Vite 6 release. This does not override the SSO application's exact
+Vite 8 dependency and does not add Vite as a direct Wiki dependency.
+
+- Exposure: the advisory requires a network-exposed Vite development server
+  and Windows/NTFS path behavior. Production deploys only validated static
+  VitePress output; the build validator rejects Pages Functions, `_worker.js`,
+  `_routes.json`, and source maps. Local `pnpm dev:wiki` remains loopback-only
+  unless an operator explicitly changes the host.
+- Compatibility control: Vite 6.4.3 is outside VitePress 1.6.4's declared
+  range. Every lockfile change must run a frozen install, the complete Wiki
+  parser/build/link/asset/header gate, the Chrome desktop/mobile dark/light
+  crawl, and `pnpm audit --audit-level high`. An audit ignore is not allowed.
+- Exit condition: remove this override when an audited stable VitePress release
+  used by PGID officially supports a Vite version patched for this advisory;
+  exact-pin that release and rerun the same compatibility and browser gates.
+
 ## Accepted Phase 0 Finding
 
 `GHSA-p2fr-6hmx-4528` affects `@better-auth/oauth-provider@1.6.23`. The stable `1.6.x` line has no patched release; the current fix is pre-release only.

@@ -321,17 +321,65 @@ describe("telegram login endpoint", () => {
 });
 
 describe("telegram linking", () => {
+  it("atomically permits only one owner under concurrent links", async () => {
+    const telegramId = randomTelegramId();
+    const first = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+    );
+    const second = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+    );
+    const payload = await telegramPayload({ id: telegramId });
+
+    const responses: Response[] = await Promise.all(
+      [first, second].map((user) =>
+        exports.default.fetch(
+          new Request(`${BASE_URL}/api/auth/telegram/link`, {
+            method: "POST",
+            headers: user.headers,
+            body: JSON.stringify(payload),
+          }),
+        ),
+      ),
+    );
+    const results = await Promise.all(
+      responses.map(async (response) => ({
+        body: (await response.json()) as Record<string, unknown>,
+        status: response.status,
+      })),
+    );
+
+    expect(results.map(({ status }) => status).sort()).toEqual([200, 409]);
+    expect(results.find(({ status }) => status === 200)?.body).toEqual({
+      linked: true,
+      provider: "telegram",
+    });
+    expect(results.find(({ status }) => status === 409)?.body).toEqual({
+      error: "telegram_already_linked",
+    });
+
+    const accounts = await env.PG72_ID_DB.prepare(
+      `SELECT userId FROM account
+        WHERE providerId = 'telegram' AND accountId = ?`,
+    )
+      .bind(telegramId)
+      .all<{ userId: string }>();
+    expect(accounts.results).toHaveLength(1);
+    expect([first.userId, second.userId]).toContain(accounts.results[0]?.userId);
+  });
+
   it("links Telegram to the signed-in account and blocks a second owner", async () => {
     const telegramId = randomTelegramId();
     const first = await createAuthenticatedUser(
       `${crypto.randomUUID()}@example.com`,
     );
+    const payload = await telegramPayload({ id: telegramId });
 
     const linked = await exports.default.fetch(
       new Request(`${BASE_URL}/api/auth/telegram/link`, {
         method: "POST",
         headers: first.headers,
-        body: JSON.stringify(await telegramPayload({ id: telegramId })),
+        body: JSON.stringify(payload),
       }),
     );
     expect(linked.status).toBe(200);
@@ -344,6 +392,16 @@ describe("telegram linking", () => {
       .first<{ userId: string }>();
     expect(row?.userId).toBe(first.userId);
 
+    const alreadyLinked = await exports.default.fetch(
+      new Request(`${BASE_URL}/api/auth/telegram/link`, {
+        method: "POST",
+        headers: first.headers,
+        body: JSON.stringify(payload),
+      }),
+    );
+    expect(alreadyLinked.status).toBe(409);
+    expect(await alreadyLinked.json()).toEqual({ error: "already_linked" });
+
     // A different user cannot claim the same immutable Telegram identity.
     const second = await createAuthenticatedUser(
       `${crypto.randomUUID()}@example.com`,
@@ -352,7 +410,7 @@ describe("telegram linking", () => {
       new Request(`${BASE_URL}/api/auth/telegram/link`, {
         method: "POST",
         headers: second.headers,
-        body: JSON.stringify(await telegramPayload({ id: telegramId })),
+        body: JSON.stringify(payload),
       }),
     );
     expect(conflict.status).toBe(409);

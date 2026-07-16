@@ -18,14 +18,14 @@
 | --- | --- |
 | Source baseline | The local delivery branch adds Passkey step-up to the integrated mail-introspection baseline. It has not been merged to `main`, pushed, or deployed; owner review and cherry-pick are still required. No Git remote is configured |
 | Registration | `apps/sso/wrangler.jsonc` sets production `REGISTRATION_MODE` to `invite`; the `public` path and regression tests exist but [`codex.md`](./codex.md) §9.2 and owner approval are still required |
-| SSO migrations | Local source is versioned through `0014_passkey_step_up.sql`; `0013` normalizes confidential clients to `client_secret_post`, and `0014` adds the session timestamp and short-lived challenge table. The latest deployment record says production D1 was applied only through `0012`; this work did not query or migrate remote D1 |
+| SSO migrations | Local source is versioned through `0015_account_provider_identity_unique.sql`; `0013` normalizes confidential clients, `0014` adds Passkey step-up state, and `0015` enforces one owner per provider identity. The latest deployment record says production D1 was applied only through `0012`; this work did not query or migrate remote D1 |
 | Login methods | Google and Passkey are the core methods; Discord, GitHub, Facebook, Apple, and Telegram are optional and remain hidden unless their credentials are configured |
 | Passkey step-up | Local source implements a required-UV, exact-origin/RP-ID assertion ceremony with one-time session/user-bound D1 challenges and a configurable 1-10 minute session timestamp. There is no bootadmin bypass. Production has neither `0014` nor this Worker version |
 | Platform roles | `bootadmin`, `admin`, `developer`, `user` |
 | Production RPs | Deployment records show Copy and Link live on PGID; Copy's six-digit guest code remains a separate identity path |
 | Mail Path A | Owner selected Dovecot introspection + XOAUTH2. Its PGID prerequisite is integrated locally at `9efdece`, but that code is not deployed, `pgid-mail-introspect` is not provisioned, and no VPS/Roundcube cutover has occurred |
 | Approval status | Deployed invite beta, not full Production GO; central `sid`, back-channel logout, recovery/rotation drills, DLQ operations, and independent security gates remain incomplete |
-| Verification record | The Passkey delivery candidate passed 183 SSO workerd tests and 4 RP protocol tests, and a fresh isolated local D1 accepted migrations `0001` through `0014`. These results verify local source only; there is no production Passkey or mail smoke record |
+| Verification record | The Passkey candidate passed 183 SSO workerd tests, the Telegram/provider-identity candidate passed 170, both passed typecheck/build and the 4-test RP suite, and isolated D1 runs covered their respective migrations. The combined branch still requires a fresh full gate before handoff; no production smoke or migration was performed |
 
 The last recorded SSO Worker version is
 `4d0c701a-c805-4254-ae2b-7c0df856b3c0`. Confidential first-party RPs currently
@@ -39,6 +39,44 @@ linked Telegram identities can still sign in and authenticated users can still
 link one explicitly. This local correction has not been deployed; current
 production remains invite-only, where unmatched Telegram identities were already
 rejected.
+
+Telegram linking now relies on a global D1 unique index over
+`account(providerId, accountId)` and an atomic `INSERT OR IGNORE` decision. Two
+users racing to link the same provider identity cannot both become owners; the
+loser re-reads the winning owner and receives a controlled conflict. This source
+and migration are local only.
+
+## Provider Identity Migration Runbook (Not Executed)
+
+`0015_account_provider_identity_unique.sql` intentionally fails instead of
+choosing an owner if production already contains duplicate provider identities.
+The owner must perform these steps before deploying Worker source that relies on
+the index:
+
+1. Integrate and review the reserved `0014` Passkey migration first. The final
+   release branch must contain a deliberate, numeric migration sequence; do not
+   deploy this isolated `0015` branch around the concurrent change.
+2. Run this read-only query against production D1 in the owner-controlled
+   maintenance workflow:
+
+   ```sql
+   SELECT providerId, accountId, COUNT(*) AS copies
+   FROM account
+   GROUP BY providerId, accountId
+   HAVING COUNT(*) > 1;
+   ```
+
+3. Require zero rows. If any row appears, stop the rollout and separately review
+   the affected users and audit evidence. Do not delete, reassign, or merge an
+   owner automatically, and do not apply `0015` until the conflict has an
+   independently reviewed resolution.
+4. Take the private production backup / Time Travel checkpoint, validate the
+   ordered migrations in isolated Preview, then have the owner apply `0013`, the
+   integrated `0014`, and `0015` in numeric order during the maintenance window.
+   `0015` must succeed before deploying the Telegram link implementation that
+   depends on it.
+5. Normally keep the unique index during Worker rollback. Dropping it would
+   reopen the double-owner race and requires a separate reviewed recovery plan.
 
 ## Codex Docs Handoff — Closed
 
@@ -152,7 +190,9 @@ Everything below is **not done**. Do not restate any of it as shipped:
 - No `git push` (no remote is configured), no `wrangler deploy`, no remote D1
   command, no Cloudflare/VPS/secret-store mutation.
 - Migration `0013_confidential_client_secret_post.sql` is **not applied**;
-  production D1's latest record is only through `0012`.
+  concurrent `0014` is not integrated/deployed, and local
+  `0015_account_provider_identity_unique.sql` is not applied. Production D1's
+  latest record is only through `0012`.
 - `pgid-mail-introspect` is **not provisioned**.
 - Passkey step-up is **not implemented** (production blocker, assigned to Codex).
 - Mail VPS / Roundcube / Dovecot cutover has **not** happened.
@@ -186,9 +226,9 @@ secret-store, Roundcube, Dovecot, or VPS change.
    production state from local fixtures.
 3. Create a private production D1 export and record the current Time Travel
    point before changing client metadata.
-4. Owner verifies and applies `0013_confidential_client_secret_post.sql`, then
-   `0014_passkey_step_up.sql`, to production identity D1. The latest existing
-   deployment record is only through `0012`.
+4. Owner follows the Provider Identity Migration Runbook above, verifies the
+   ordered pending set, and applies `0013`, `0014`, then `0015` to the production
+   identity D1. The latest existing deployment record is only through `0012`.
 5. Deploy the verified Worker source with
    `PASSKEY_STEP_UP_MAX_AGE_SECONDS=600` and both configured Rate Limiting
    bindings: `INTROSPECTION_IP_RATE_LIMITER` namespace `1004` and

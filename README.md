@@ -7,7 +7,7 @@ PGID is the custom identity provider for PG72 services. Phase 0 runs on Cloudfla
 - OAuth 2.1 / OpenID Connect Authorization Code with PKCE S256, EdDSA ID tokens, and a published JWKS;
 - admin/developer-managed OAuth clients (dynamic registration disabled), mandatory consent, and the `bootadmin`/`admin`/`developer`/`user` platform role model;
 - host-only central sessions, device revocation, invitations, account suspension, and audit events;
-- versioned D1 migrations through local source `0014`; the latest production record remains applied through `0012` until the owner verifies/applies `0013` and `0014` remotely;
+- versioned D1 migrations through local source `0015`: `0013` normalizes confidential client authentication, `0014` adds Passkey step-up state, and `0015` enforces global provider-identity ownership; the latest production record remains applied through `0012` until the owner verifies and applies the pending migrations in order;
 - a tightly scoped mail introspection path for Dovecot: local source authorizes only `pgid-mail-introspect` to inspect eligible `pg72-webmail` access tokens and disclose verified email; this path is not deployed or provisioned in production;
 - Passkey step-up before every OAuth client mutation, using a one-time session/user-bound challenge, required user verification, and a D1 session timestamp; this path is implemented and tested locally but not migrated, deployed, independently reviewed, or smoke-tested in production;
 - an independent OIDC relying party based on `oauth4webapi`;
@@ -158,7 +158,7 @@ Mail Path A remains a separate owner-run rollout:
 
 1. Review the locally implemented Passkey step-up and verify its session/challenge binding, UV, replay, expiry, and missing-Passkey behavior independently; production still lacks migration `0014` and this Worker version.
 2. Verify the exact production `pg72-webmail` client metadata and take a private production D1 backup.
-3. Owner applies migrations `0013` and `0014` in order, then deploys the verified Worker source with Rate Limiting namespaces `1004` and `1005` bound as configured.
+3. Owner runs the provider-identity duplicate preflight in [`handoff.md`](./handoff.md), applies the reviewed pending migrations in numeric order (`0013`, `0014`, then `0015`), and deploys the verified Worker source with `PASSKEY_STEP_UP_MAX_AGE_SECONDS=600` plus Rate Limiting namespaces `1004` and `1005` bound as configured.
 4. After Passkey step-up, use a same-origin PGID admin session less than 10 minutes old to provision `pgid-mail-introspect`; immediately store its one-time secret in the approved secret store, never source, logs, issues, or chat.
 5. Verify eligible active, ineligible inactive, and bad-credential `401` production behavior. Verify rate-limit `429` and limiter-failure `503` only in isolated Preview or a controlled local test, never by flooding or breaking production.
 6. Cut over Dovecot/Roundcube only in that owner-controlled window with the rollback in [`handoff.md`](./handoff.md) ready. This documentation reconciliation ran no remote command and changed no production or VPS state.

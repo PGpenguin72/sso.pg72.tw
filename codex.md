@@ -7,9 +7,11 @@
 
 ## 0. Phase 0 實作狀態
 
-截至 2026-07-16，repository 的本地 source 已包含可部署的 SSO Worker、React 帳號中心、D1 migrations `0001`–`0014`、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理、Mail Path A introspection prerequisite、真正的 Passkey client-mutation step-up，以及使用 `oauth4webapi` 的獨立 test RP。最新本地完整 typecheck、workerd suite、production build 與 test RP protocol gate 全數通過。這次驗證沒有執行 deploy、remote D1、system-client provisioning 或其他 production 操作；程式合併與本地測試不得寫成遠端已上線。
+截至 2026-07-16，repository 的本地 source 已包含可部署的 SSO Worker、React 帳號中心、D1 migrations `0001`–`0015`、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理、Mail Path A introspection prerequisite、真正的 Passkey client-mutation step-up、Telegram verified-email enrollment boundary、全域 provider-identity 唯一 ownership，以及使用 `oauth4webapi` 的獨立 test RP。各功能分支的本地 typecheck、workerd suite、production build 與 test RP protocol gate 均已通過；整合後仍須重跑完整 gate。這次驗證沒有執行 deploy、remote D1、system-client provisioning 或其他 production 操作；程式合併與本地測試不得寫成遠端已上線。
 
 `0013_confidential_client_secret_post.sql` 將既有 confidential client metadata 正規化為 `client_secret_post`；它不旋轉 secret、不改 grant/token。`0014_passkey_step_up.sql` 新增 session step-up timestamp 與短效 challenge table。兩者都不代表 production 已套用；現有 deployment record 仍只確認 production D1 至 `0012`，必須由 owner 在維護窗口依序確認與執行。
+
+`0015_account_provider_identity_unique.sql` 以 `(providerId, accountId)` 全域唯一索引保證每個外部 provider identity 只有一個 PGID owner。套用前 owner 必須依 `handoff.md` 執行唯讀 duplicate preflight；若有任何結果就停止，不得由 migration 自動挑選或刪除 owner。依賴此 invariant 的 Worker 不得早於 `0015` 部署。
 
 既有部署紀錄顯示 `pg72-id` 已部署至 `https://sso.pg72.tw`，目前記錄的 Worker 版本是 `4d0c701a-c805-4254-ae2b-7c0df856b3c0`，production D1 已套用至 `0012`；Copy 與 Link 也已切換 production traffic 至 PGID。這些紀錄建立了「已部署 invite beta」現況，但仍不是完整 Production GO：中央 `sid`、back-channel logout、DLQ 告警、完整復原演練與其他 §9.2 gate 尚未完成。本次文件校準未執行 remote/production 查詢，實際遠端版本仍應由 owner 在維護窗口依 `handoff.md` 驗證。
 
@@ -245,6 +247,7 @@ Auth Gateway 僅用於無法原生支援 OIDC 的 HTTP 應用程式。
 - `user.id` 使用不可變 UUID，作為第一方服務共同的 OIDC `sub`。
 - Email 可修改，不作 foreign key 或檔案目錄唯一識別。
 - Google provider account 以 Google subject ID 綁定，不只比對 Email。
+- `account(providerId, accountId)` 在 D1 全域唯一；任何 provider identity 只能連結一個 `user.id`。併發連結必須以資料庫 constraint 決定 winner，再重讀既有 owner 回應 conflict，不得使用 `SELECT` 後 `INSERT` 的競態流程或解析 constraint error 字串。
 - 同 Email 帳號不得靜默合併；必須由已登入使用者明確連結。
 - File Browser 等需要 username 的服務使用從 `sub` 派生的穩定別名，不直接使用可修改 Email。
 - 唯一的日常 Email identity 例外是 §10.5 的 Dovecot legacy mailbox lookup：固定 mail introspector 可從符合窄條件的 `pg72-webmail` access token 取得 verified email，以對應既有 mailbox。這不改變 PGID/RP 的 `sub` 主鍵規則，不可擴張成帳號合併、一般服務授權或其他 client 的 identity binding。
@@ -336,6 +339,7 @@ invited -> active -> suspended -> deleted
 - Telegram numeric user ID 只作 provider account identifier，不作 email、OIDC `sub` 或一般服務主鍵。
 - Telegram 不提供 verified email，因此不論 `REGISTRATION_MODE` 是 `invite` 或 `public`，未綁定 identity 都不能建立 PGID user、account 或 session。
 - Telegram 只能在 active authenticated PGID session 中明確連結；已連結且 user 仍為 active 時才可用 Telegram 登入。不得以 placeholder email、implicit linking 或 public mode 繞過 verified-email enrollment gate。
+- Telegram link 使用 `INSERT OR IGNORE` 與 `(providerId, accountId)` 唯一索引原子決定 owner；insert 未改變資料時必須重讀 owner，對同一 user 回 `already_linked`，對其他 user 回 `telegram_already_linked`，且只有成功 insert 才寫入 `account.linked` success audit。
 
 ## 10. OIDC Client Contract
 

@@ -367,22 +367,9 @@ telegramRoutes.post("/api/auth/telegram/link", async (c) => {
   const verified = await verifiedTelegramUser(c);
   if (verified instanceof Response) return verified;
 
-  const existing = await c.env.PG72_ID_DB.prepare(
-    `SELECT userId FROM account WHERE providerId = ? AND accountId = ? LIMIT 1`,
-  )
-    .bind(TELEGRAM_PROVIDER_ID, verified.id)
-    .first<{ userId: string }>();
-  if (existing) {
-    if (existing.userId === session.user.id) {
-      return c.json({ error: "already_linked" }, 409);
-    }
-    // The Telegram identity is immutable and single-owner.
-    return c.json({ error: "telegram_already_linked" }, 409);
-  }
-
   const now = new Date().toISOString();
-  await c.env.PG72_ID_DB.prepare(
-    `INSERT INTO account
+  const inserted = await c.env.PG72_ID_DB.prepare(
+    `INSERT OR IGNORE INTO account
       (id, accountId, providerId, userId, createdAt, updatedAt)
      VALUES (?, ?, ?, ?, ?, ?)`,
   )
@@ -395,6 +382,20 @@ telegramRoutes.post("/api/auth/telegram/link", async (c) => {
       now,
     )
     .run();
+
+  if (inserted.meta.changes !== 1) {
+    const owner = await c.env.PG72_ID_DB.prepare(
+      `SELECT userId FROM account WHERE providerId = ? AND accountId = ? LIMIT 1`,
+    )
+      .bind(TELEGRAM_PROVIDER_ID, verified.id)
+      .first<{ userId: string }>();
+    if (owner?.userId === session.user.id) {
+      return c.json({ error: "already_linked" }, 409);
+    }
+    // Fail closed if another owner won the insert, or if an unexpected ignored
+    // constraint leaves no visible owner. Do not infer conflicts from error text.
+    return c.json({ error: "telegram_already_linked" }, 409);
+  }
 
   await recordAudit(
     c.env,

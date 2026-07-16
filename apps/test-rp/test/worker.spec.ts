@@ -355,6 +355,7 @@ describe("OIDC test relying party", () => {
       centralSessionId: crypto.randomUUID(),
       subject,
     });
+    const sessionCountBefore = await rpSessionCount();
     const login = await beginOidcLogin();
     server.setExpectedNonce(login.nonce);
 
@@ -371,8 +372,12 @@ describe("OIDC test relying party", () => {
 
     expect(response.status).toBe(400);
     expect(await response.text()).toContain("OIDC response validation failed");
-    expect(server.requests).toEqual({ jwks: 0, token: 1, userInfo: 0 });
-    expect(await rpSessionCount(subject)).toBe(0);
+    expect(response.headers.get("set-cookie") ?? "").not.toContain(
+      "pg72_test_session=",
+    );
+    expect(server.requests.token).toBe(1);
+    expect(server.requests.userInfo).toBe(0);
+    expect(await rpSessionCount()).toBe(sessionCountBefore);
     const transaction = await env.TEST_RP_DB.prepare(
       "SELECT consumed_at FROM oauth_transaction WHERE id = ?",
     )
@@ -381,7 +386,7 @@ describe("OIDC test relying party", () => {
     expect(transaction?.consumed_at).not.toBeNull();
   });
 
-  it("fails closed when the authorization server rejects a resource target", async () => {
+  it("fails closed on a standard authorization error before token exchange", async () => {
     let tokenRequests = 0;
     const outbound = vi.fn(async (input: RequestInfo | URL) => {
       const request = input instanceof Request ? input : new Request(input);
@@ -397,6 +402,8 @@ describe("OIDC test relying party", () => {
     const login = await beginOidcLogin();
     const rejectedResource = "https://another-resource.example/api";
 
+    // Simulate the authorization error callback independently of the provider;
+    // provider-side resource rejection is covered by the SSO Worker suite.
     const response = await exports.default.fetch(
       new Request(
         callbackUrl({

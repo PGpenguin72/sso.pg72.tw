@@ -1460,22 +1460,36 @@ describe("PGID Worker", () => {
     expect(user.role).toBe("admin");
   });
 
-  it("blocks resource indicators while the stable provider lacks grant binding", async () => {
-    const response = await exports.default.fetch(
-      new Request("http://localhost:5173/oauth2/token", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          grant_type: "authorization_code",
-          code: "not-a-real-code",
-          resource: "https://another-resource.example",
+  it.each([
+    [
+      "authorization endpoint",
+      () =>
+        new Request(
+          "http://localhost:5173/oauth2/authorize?resource=https%3A%2F%2Fanother-resource.example",
+        ),
+    ],
+    [
+      "token endpoint",
+      () =>
+        new Request("http://localhost:5173/oauth2/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            grant_type: "authorization_code",
+            code: "not-a-real-code",
+            resource: "https://another-resource.example",
+          }),
         }),
-      }),
-    );
+    ],
+  ])(
+    "blocks resource indicators at the %s while the stable provider lacks grant binding",
+    async (_endpoint, createRequest) => {
+      const response = await exports.default.fetch(createRequest());
 
-    expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({ error: "invalid_target" });
-  });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: "invalid_target" });
+    },
+  );
 
   it("requires a session for account audit", async () => {
     const response = await exports.default.fetch(

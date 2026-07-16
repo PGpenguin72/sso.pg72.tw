@@ -142,3 +142,19 @@
 - 驗證:pnpm check(types+tsc+eslint)、build、39/39 unit tests 全過;零 .tsx/邏輯變更。
 - 刻意保留:serif 長文字體、per-entry 色帶、coral/sky/gold 語意色(記於 DESIGN-LOG)。
 - **至此 5 個 reskin 目標(upload/ahsnccu-ann/link/copy/diary)全部完成**,皆本地 commit、未 push,待 owner 實機確認後決定部署。
+
+## 2026-07-16 15:54 — Mail introspection docs-only commit 完成並整合回 main(to_claude.md §8 A+B)
+
+- 執行者:Claude(Codex→Claude 交接任務);工作目錄:/private/tmp/pgid-mail-docs(branch codex/mail-introspection-docs,base 7c0255a)與主 checkout /Users/pgpenguin72/sso.pg72.tw。
+- 讀完整 pending diff(12 個 tracked 修改 + 新 untracked wiki/developers/mail-introspection.md,共 13 檔),逐項核對 to_claude.md §7 十項。
+- §7 實際修正 3 類、7 處:
+  - Queue 語意(§7.1):codex.md §7.3「可記錄並由告警/補送處理」改為明確「尚無 durable outbox/replayer 或告警補送,屬 full Production GO 前債務」;CLAUDE.md Workers 規則同步改「目前只有 redacted log,durable outbox/補送與告警尚未實作」;SECURITY.md boundary bullet 補「no durable outbox or replayer yet…stays on the Production GO gate」。
+  - Secret incident 順序(§7.2):CLAUDE.md、codex.md §10.5、SECURITY.md 三處把「rotate→update→驗證→re-enable」改為「disable→rotate→更新 secret store/Dovecot→維護窗口 re-enable→立即 smoke,失敗 re-disable/rollback」(停用中 client 無法通過真正 introspection smoke)。
+  - Provision body(§7.6):wiki/developers/mail-introspection.md 把「空 request body」從硬性要求清單移出,改為「沒有 request 欄位、建議空 body、4 KiB 內 body 會被忽略」。
+- §7 其餘 7 項確認原稿已正確:JWT/refresh inactive 措辭均已限定 mail delegated caller(§7.3);wiki 新頁 links/SUMMARY/API anchor 全部有效(§7.4,自動化 link+anchor 檢查 13 檔 ALL OK);examples 只有 placeholder、allowlist 無 token_type/sub/sid(§7.5);Passkey step-up 均寫明 fresh session ≠ reauth 且 runbook 把 step-up 排在 deploy/provision 前(§7.7);production truth 一致停在 0012/未 deploy/未 provision/未 cutover(§7.8);handoff.md 歷史段落保留原文且都有 superseded banner(§7.9);canonical 三檔無短期 hash/test count(§7.10,rg 驗證)。
+- 驗證:§7 rg 搜尋一(df8c5d0|149 SSO|149 tests|checked-out file is ignored|INTROSPECTION_RATE_LIMITER)無命中;搜尋二(尚未實作/驗證|client_secret_basic|Not Yet Done)僅命中 handoff.md 有 banner 的歷史段落;git diff --check 通過;secret-pattern 掃描僅命中 .dev.vars 檔名引用與 pg72_cs_XXXXXXXX placeholder,無真值。
+- Worktree commit:456b027「Document scoped mail introspection rollout」+ Co-Authored-By footer,僅含 §6 的 13 個 docs 檔。
+- Cherry-pick 到本地 main:8caf27e(cherry-pick 時 main 已由平行 agent 前進至 a1797da,無衝突)。
+- Main 驗證:pnpm install --offline --frozen-lockfile 通過;首次 pnpm --filter @pg72/id check 因主 checkout 的 ignored worker-configuration.d.ts 過舊(缺 INTROSPECTION_*_RATE_LIMITER)typecheck 失敗,以 pnpm --filter @pg72/id cf-typegen 本地重產(純本地 wrangler types,無 remote)後重跑:SSO 13 files/166 tests 通過 + typecheck + production build;@pg72/test-rp 1 file/4 tests 通過;find apps/sso/dist 無 .dev.vars*;git status 僅剩 morden_dark.txt(.claude/ 仍在磁碟,settings.local.json 被 ~/.config/git/ignore 全域忽略、worktrees 已清空故不再顯示)。
+- 未執行:git push、wrangler deploy、remote D1、任何 production/Cloudflare/VPS/secret-store mutation。Production 側(deploy、migration 0013、provision pgid-mail-introspect、Passkey step-up、VPS cutover)全部未做。
+- /private/tmp/pgid-mail-docs worktree 任務已完成,可由 owner/清理 agent 刪除(本 agent 依指示不刪)。

@@ -42,5 +42,5 @@ jobs:
       - name: Run repository gate
         run: pnpm check
 
-      - name: Audit production dependencies
-        run: pnpm audit --prod --audit-level high
+      - name: Audit runtime, build, and development dependencies
+        run: pnpm audit --audit-level high

@@ -9,8 +9,10 @@ canonical repository gate before opening a pull request:
 
 ```bash
 pnpm check
-pnpm audit --prod --audit-level high
+pnpm audit --audit-level high
 ```
+
+The audit includes runtime, build, and development dependencies.
 
 If a change affects protocol behavior, endpoints, claims, or parameters, update
 [`docs/api/PGID-integration.md`](./docs/api/PGID-integration.md) and the relevant

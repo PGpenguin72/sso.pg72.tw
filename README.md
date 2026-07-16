@@ -132,13 +132,16 @@ The local test RP is a public client. It has no client secret; its transaction s
 
 ```bash
 pnpm check
-pnpm audit --prod --audit-level high
+pnpm audit --audit-level high
 ```
 
 `pnpm check` is the canonical repository gate. It runs the clean-build-output
 regression and workspace package checks, covering type checks, workerd and
 relying-party protocol tests, Wiki route/link/header validation, and production
 and static builds.
+
+The audit covers runtime, build, and development dependencies so tooling
+advisories cannot bypass the High or Critical release gate.
 
 The audit currently reports the accepted Moderate `GHSA-p2fr-6hmx-4528`. Its constrained exposure and temporary controls are documented in [`SECURITY.md`](./SECURITY.md). A High or Critical advisory fails the release gate.
 

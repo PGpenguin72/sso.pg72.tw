@@ -1,21 +1,23 @@
 # PGID SSO 架構規格
 
-> 狀態：Canonical Architecture Baseline  
-> 最後更新：2026-07-16  
-> 預定服務名稱：PGID  
-> 預定 Issuer：`https://sso.pg72.tw`
+> 狀態：Canonical Architecture Baseline
+> 最後更新：2026-07-16
+> 服務名稱：PGID
+> Issuer：`https://sso.pg72.tw`
 
 ## 0. Phase 0 實作狀態
 
-截至 2026-07-15，repository 已包含可部署的 SSO Worker、React 帳號中心、D1 migrations、Google/Passkey、OAuth 2.1 Provider、邀請/停權/audit API，以及使用 `oauth4webapi` 的獨立 test RP。Workerd regression suite 覆蓋 discovery、dynamic registration 關閉、D1 約束、request abort、PKCE transaction 與 callback replay。
+截至 2026-07-16，本輪整合以本地 source baseline `1459229`（root `main`，無 remote）起始；整合後包含可部署的 SSO Worker、React 帳號中心、D1 migrations `0001`–`0013`、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理，以及使用 `oauth4webapi` 的獨立 test RP。`0013_confidential_client_secret_post.sql` 將既有 confidential client metadata 正規化為 `client_secret_post`；它不旋轉 secret、不改 grant/token，也不代表 production 已套用。整合前的 operational log 記錄過一次 144-test 完整 SSO 驗證；後續 introspection branch `df8c5d0` 回報 149 SSO tests 通過，兩條程式變更合併後仍須重跑完整 gate。
 
-`pg72-id` production canary 已於 2026-07-15 部署至 `https://sso.pg72.tw`，health、D1 readiness、discovery、JWKS、安全 headers 與 Google authorization redirect smoke tests 通過。登入故障確認為 Preview 與 production secret 不一致，使舊 JWKS 私鑰無法解密，而非 D1 容量不足；舊 JWKS 與 sessions 已輪替，production session API 驗證通過。使用者需重新登入並建立 `sso.pg72.tw` Passkey。這仍不是完整 Production GO：production RP 尚未切流量，且 back-channel logout、DLQ 告警與完整復原演練仍未完成。
+既有部署紀錄顯示 `pg72-id` 已部署至 `https://sso.pg72.tw`，目前記錄的 Worker 版本是 `4d0c701a-c805-4254-ae2b-7c0df856b3c0`，production D1 已套用至 `0012`；Copy 與 Link 也已切換 production traffic 至 PGID。這些紀錄建立了「已部署 invite beta」現況，但仍不是完整 Production GO：中央 `sid`、back-channel logout、DLQ 告警、完整復原演練與其他 §9.2 gate 尚未完成。本次文件校準未執行 remote/production 查詢，實際遠端版本仍應由 owner 在維護窗口依 `handoff.md` 驗證。
 
 遠端 test RP、已停用的 Arcant authentication Worker/D1，以及 Copy Preview 資源均在完整 SQL export 後退役，帳號 D1 數量由 11 降至 8。Cloud Clipboard 自動 Preview deployment 已關閉，Preview D1 binding 與 Preview-only OAuth client 已移除。Link 與 Status 的 Preview D1 尚未建立；後續 Preview 將使用獨立 Cloudflare account，不得以 production D1 代替 Preview。
 
-Status 原始碼曾包含硬編碼 Telegram bot credential；目前兩個 seed path 都已改為 disabled empty configuration，source secret scan 不再命中。該 credential 必須視為已外洩：若 Telegram 端仍有效，production owner 需旋轉/revoke，不能只依賴 Git 中刪除字串。SSO 的 Cloudflare Vite build 也已加入 post-build cleanup，production/preview artifact 不再保留 plugin 為 `vite preview` 複製的 `.dev.vars*`。
+Status 上游原始碼曾包含硬編碼 Telegram bot credential；目前兩個 seed path 都已改為 disabled empty configuration，source secret scan 不再命中。既有調查指出該 credential 屬上游作者而非 PG72 owner；PG72 不使用它，也不宣稱能代替上游旋轉。SSO 的 Cloudflare Vite build 已加入 post-build cleanup，production/preview artifact 不再保留 plugin 為 `vite preview` 複製的 `.dev.vars*`。
 
-2026-07-16 起 `REGISTRATION_MODE` 切換為 `public`（owner 決策）：Google 首次登入以 verified email 直接建帳號，邀請功能保留，新帳號建立加上獨立 per-IP `REGISTRATION_RATE_LIMITER`，suspended/deleted 使用者仍被 session 建立檢查擋下。公開註冊的完整安全 gate 尚未完成，未完成項目列於 §9.2，不得因文件更新而視為已完成。
+Production `REGISTRATION_MODE` 目前仍是 `invite`。`public` 程式路徑與 workerd regression tests 已備妥：Google 首次登入要求 verified email、邀請功能保留、新帳號建立使用獨立 per-IP `REGISTRATION_RATE_LIMITER`，suspended/deleted 使用者仍由 session 建立檢查擋下。完整安全 gate 尚未完成，未完成項目列於 §9.2；只有 owner 明確核准並部署設定變更後才算開啟公開註冊。
+
+Mail Path A 所需的 PGID introspection email claim 已在本地 commit `df8c5d0` 實作並通過 149 SSO tests：只有 active access token 才可取得供 mail binding 使用的 email claim。這項結果尚未部署或經 production 驗證；Dovecot/Postfix/Roundcube 的 VPS cutover 仍須 owner 在場的維護窗口，不得因本地測試通過而直接套用。
 
 2026-07 的 dependency audit 另發現 `GHSA-p2fr-6hmx-4528`：Better Auth stable `1.6.x` 未綁定 RFC 8707 resource indicator 與原 authorization grant。Phase 0 保持單一 `validAudiences`，並在 Worker 邊界拒絕 authorize/token 的所有 `resource` 參數；v1 不以 resource indicator 作授權邊界。詳細 owner、補償控制與 exit condition 見 [`SECURITY.md`](./SECURITY.md)。第一個包含修正的 stable release 發布後，必須讓 core/plugins 一起升級、重產 migration 並重跑完整 protocol suite。
 
@@ -34,7 +36,7 @@ PG72 目前有多個需要登入的網站，每個服務各自使用 Google OAut
 
 ## 2. 已確認需求
 
-- 第一階段原採邀請制；owner 已於 2026-07-16 決定切換為公開註冊（邀請功能保留，見 §9）。
+- 現行 production 採邀請制；公開註冊程式路徑保留，只有 §9.2 gate 通過且 owner 明確核准部署後才切換。
 - 公開註冊的完整安全 gate 尚未全部完成，未完成項目必須持續列於 §9.2 並如實維護。
 - 第一階段登入方式為 Google 與 Passkey。
 - 優先部署於 Cloudflare Workers 與 D1。
@@ -71,8 +73,8 @@ PG72 目前有多個需要登入的網站，每個服務各自使用 Google OAut
 
 | 服務 | Ownership | 現有狀況 | 預定整合方式 | 狀態 |
 | --- | --- | --- | --- | --- |
-| `copy.pg72.tw` | 第一方 | Next.js / NextAuth、Google、6 位數登入碼、D1 | 原生 OIDC client；訪客碼保持獨立 | Preview 已實機驗證 |
-| `link.pg72.tw` | 第一方 | Cloudflare Pages / D1，具有 user/admin | BFF OIDC client，保留應用內角色 | 本機整合與 10 tests 完成；待 Preview D1 |
+| `copy.pg72.tw` | 第一方 | Next.js / NextAuth、6 位數訪客碼、D1 | PGID OIDC client；訪客碼保持獨立 | Production live；登出實機確認、中央 `sid`/back-channel logout 待完成 |
+| `link.pg72.tw` | 第一方 | Cloudflare Pages / D1，具有 user/admin | BFF OIDC client，保留應用內角色 | Production live；中央 `sid`/back-channel logout 待完成 |
 | `status.pg72.tw` | 維護中的 XUGOU fork | Workers / D1 / agent push | OIDC BFF + server-side session；agent auth 分離 | 本機整合與 10 tests 完成；待 Preview D1 |
 | `upload.pg72.tw/admin` | 第一方 | FastAPI / SQLite / streaming upload | Admin 原生 OIDC；upload capability 分離 | 本機整合與 11 tests 完成；待 VPS Preview |
 | `webmail.pg72.tw` | 上游 Roundcube | Cloudflare Access + Webmail/IMAP login | 打包上游 stable release，設定原生 Generic OIDC | 上游 1.8-git 原始碼已檢視 |
@@ -91,7 +93,7 @@ File Browser 與 Roundcube 的目錄是整合研究用上游原始碼，不視�
 | Frontend | React，與 Worker 靜態資產整合 |
 | Auth engine | Better Auth；目前評估版本 `1.6.23`，core 與所有 plugin exact pin 且版本一致 |
 | Identity protocols | OAuth 2.1、OpenID Connect、WebAuthn |
-| Social login | Google |
+| Social login | Google 為主力；Discord、GitHub、Facebook、Apple、Telegram 為設定後才啟用的可選 provider |
 | Database | Cloudflare D1 |
 | Schema/migrations | Better Auth CLI 產生基礎 SQL + PG72 版本化 custom migrations |
 | Async delivery | Cloudflare Queues + Dead Letter Queue |
@@ -256,30 +258,26 @@ invited -> active -> suspended -> deleted
 
 ### 8.3 角色與權限
 
-平台角色：
-
-- `owner`：系統最高權限與 break-glass 管理。
-- `admin`：使用者、邀請、client 與 audit 管理。
-- `member`：一般使用者。
+平台角色固定為 `bootadmin`、`admin`、`developer`、`user` 四級；完整權限與保護規則以 §12.3 及 `apps/sso/worker/roles.ts` 為準。`bootadmin` 由 `BOOTSTRAP_ADMIN_EMAIL` 推導，不能由一般角色指派。
 
 應用程式角色另存為 client-specific grants，例如 `link:admin`、`status:operator`。平台角色不能自動等同所有服務的 admin，避免單一 claim 過度授權。
 
 ## 9. 註冊與登入政策
 
-> Owner 決策（2026-07-16）：`REGISTRATION_MODE` 由 `invite` 切換為 `public`，開放所有人註冊。
-> Owner 已知悉本規格原要求「公開註冊前先通過完整安全 gate」，並在 gate 未全部完成的情況下決定開放。
-> 本節如實記錄現行行為與尚未完成的 gate 項目；任何人不得以本節文字宣稱 gate 已完成。
+> 現行 production 設定：`REGISTRATION_MODE=invite`。
+> `public` 程式路徑與測試已備妥，但下列 gate 尚未完成；只有 owner 明確核准並部署設定變更後才算開放。
+> 本節分開記錄「目前已部署行為」與「尚未啟用的 public path」，不得把可用程式碼寫成遠端現況。
 
-### 9.1 邀請功能（保留）
+### 9.1 邀請註冊（現行）
 
-- 邀請功能在公開註冊模式下保留且可用，與公開註冊不衝突。
+- 未受邀 Email 拒絕建立帳號，回傳 `INVITATION_REQUIRED`，並寫入 `registration.denied` audit；bootstrap administrator 依既定保護規則例外處理。
 - 管理員以 Email 建立有時效且單次使用的邀請。
 - 有未消耗邀請的 Email 完成首次登入時，帳號取得邀請指定的角色（例如 `admin`），邀請立即標記為已消耗。
-- `REGISTRATION_MODE=invite` 程式路徑保留：未受邀 Email 拒絕建立帳號，回傳 `INVITATION_REQUIRED`，並寫入 `registration.denied` audit。
+- 邀請功能在未來 public 模式仍保留，與公開註冊不衝突。
 
-### 9.2 公開註冊（現行）
+### 9.2 公開註冊路徑與啟用 gate（未部署）
 
-現行行為（`REGISTRATION_MODE=public`）：
+已實作且有 regression coverage 的 `REGISTRATION_MODE=public` 行為：
 
 - 第一次 Google 登入直接建立帳號；Google 必須回傳已驗證 Email（`email_verified`），否則拒絕（`EMAIL_NOT_VERIFIED`），兩種模式皆強制。
 - Passkey 註冊仍需先有帳號與已登入 session；公開註冊不開放無帳號的 Passkey 註冊。
@@ -288,7 +286,7 @@ invited -> active -> suspended -> deleted
 - `suspended` 使用者不因公開模式繞過管制：session 建立前一律檢查中央 `user.status`，非 `active`（含已刪除、user row 不存在）一律拒絕。
 - 已刪除帳號重新註冊會取得全新的 `sub`；RP 視其為新使用者，不會繼承舊資料。
 
-尚未完成的公開註冊安全 gate（owner 已知情，開放時未完成）：
+切換 production 至 public 前尚未完成的安全 gate：
 
 - [ ] Turnstile（或等效 bot challenge）於註冊/登入 flow。
 - [ ] Terms 與 Privacy Policy 同意、版本與時間記錄。
@@ -328,6 +326,8 @@ invited -> active -> suspended -> deleted
 - Machine-to-machine：獨立 client credentials，與人類使用者 session 分離。
 
 第一階段所有 clients 由管理員手動建立，dynamic client registration 關閉。
+
+現行第一方 confidential RP 在 token endpoint 使用 `client_secret_post`。Better Auth `1.6.23` 對 HTTP Basic credentials 的解析與 `oauth4webapi` RFC 6749 percent-encoding 不互通；在 provider 有可追蹤 patch、protocol regression test 且 RP 完成 migration 前，不把 `client_secret_basic` 寫成現行 contract。
 
 ### 10.2 Redirect URI
 
@@ -546,7 +546,7 @@ Audit metadata 不得包含 access token、refresh token、session token、autho
 - CORS 採 allowlist，不對 credentialed endpoints 使用 `*`。
 - 所有 state-changing endpoints 使用 CSRF 保護或不依賴 cookie 的等效防護。
 - 登入、callback、token、Passkey、邀請與管理 endpoints 具獨立 rate limits；新帳號建立另有更嚴的 per-IP `REGISTRATION_RATE_LIMITER`。
-- Turnstile、濫用偵測與封鎖流程尚未完成，屬 §9.2 的未完成 gate 項目（owner 已知情先行開放公開註冊）。
+- Turnstile、濫用偵測與封鎖流程尚未完成，屬 §9.2 的 public 啟用 gate 項目。
 - Error response 不洩漏帳號是否存在、token 狀態、secret 或內部 exception。
 - 日誌與 telemetry 預設遮蔽 PII 與憑證。
 
@@ -612,20 +612,21 @@ Better Auth 曾出現 OAuth/OIDC 與 account linking 相關安全公告。因此
 
 #### Copy
 
-- 已完成 Preview：NextAuth 改為 PGID OIDC confidential client + PKCE + consent，Copy 不再直接使用 Google client secret。
+- Production 已切換：NextAuth 改為 PGID OIDC confidential client + PKCE + consent，Copy 不再直接使用 Google client secret；目前 client auth 為 `client_secret_post`。
 - 六位數 code 依需求保留為獨立訪客帳號，不與 PGID 用戶、Email 或 `sub` 合併；代碼使用 Web Crypto 產生並有 D1 rate limit 與 `auth_version` session 失效機制。
 - `users.id` 已成為內部 ownership key，SSO 帳號以 issuer `sub` 綁定，Email 不參與授權。
 - Auth.js JWT 只保存 opaque vault session ID；access/refresh token 以獨立 key 做 AES-GCM 加密後存 D1。
 - Refresh 使用 `active -> refreshing -> active` 與 lease/generation CAS；timeout、5xx、write-back unknown 或 abandoned refresh 不重用舊 token，只允許 terminal reauthentication。
 - 主動登出先撤銷 server-side vault row，成功後才清瀏覽器 cookie。
+- 既有部署紀錄顯示登出修復已上線，仍待 owner 實機確認；中央 `sid` 與 back-channel logout 尚未完成，因此不代表完整 Production GO。
 
 #### Link
 
-- 已移除 Worker 內手寫 Google OAuth，改用 `oauth4webapi` confidential client、Authorization Code、PKCE S256、state、nonce、ID token 與 UserInfo 驗證。
+- Production 已切換至 PGID；已移除 Worker 內手寫 Google OAuth，改用 `oauth4webapi` confidential client、`client_secret_post`、Authorization Code、PKCE S256、state、nonce、ID token 與 UserInfo 驗證。
 - D1 session 以穩定 `sso_subject` 解析使用者；verified email 只供既有 local user 一次性綁定。舊 `owner_email` 暫保留為綁定後不再隨 UserInfo 改變的 local ownership key。
 - Admin bootstrap 以 singleton D1 record 關閉 email bootstrap，production error 不回傳原始 exception。
 - 所有 cookie-authenticated mutation 強制 exact Origin，短網址 target 僅接受 HTTP(S)。
-- Callback：`/api/auth/callback`；migration：`migration-003-pg72-oidc.sql`。尚待獨立 Preview D1、中央 `sid` 與 back-channel logout。
+- Callback：`/api/auth/callback`；migration：`migration-003-pg72-oidc.sql`。中央 `sid` 與 back-channel logout 尚未完成，因此不代表完整 Production GO。
 
 #### Status / XUGOU
 
@@ -666,6 +667,8 @@ Webmail 仍須分成兩個問題：
 - IMAP/SMTP server 是否支援 OAuth2/OIDC，或仍需 app password。
 
 在取得實際 IMAP/SMTP server 類型與設定前，不承諾瀏覽器 SSO 能完全取代郵件帳密。若 mail backend 不支援 `XOAUTH2`/`OAUTHBEARER`，需明確設計短效 mail credential bridge 或保留獨立 app password，不能把 SSO access token 當一般密碼轉送。
+
+目前選定的 Mail Path A 使用 Dovecot introspection + XOAUTH2。PGID 回傳 active access token email claim 的 prerequisite 已本地實作及測試，但尚未部署或 production 驗證；mail VPS 設定仍待 owner 維護窗口與完整 rollback/驗收。
 
 ## 19. 測試與驗收
 
@@ -723,16 +726,15 @@ Webmail 仍須分成兩個問題：
 
 ### Phase 1：Friends Beta SSO Core
 
-- Google、Passkey、邀請制。
-- OIDC Provider、JWKS、client 管理。
-- 帳號中心、sessions、recovery codes、基礎 audit。
-- 僅註冊測試 client，不接 production apps。
+- Google、Passkey、邀請制 SSO core 已部署；可選社群 providers 未設定時保持關閉。
+- OIDC Provider、JWKS、client 管理、帳號中心、sessions 與基礎 audit 已部署。
+- Recovery codes、完整 audit、key rotation/restore drill 仍未完成。
 
 ### Phase 2：第一方應用整合
 
-- Copy Preview 已完成實機驗證並退役；Link 本機整合完成，待獨立 Cloudflare account 的 Preview 實機 flow。
+- Copy 與 Link 已切換 production traffic 至 PGID；Copy 六位數訪客碼保持獨立。
 - Email 只用於一次性 legacy binding，日常 authentication 已改用 SSO `sub`。
-- 待完成 `sid`、back-channel logout、rollback drill 及單一/全域登出驗收。
+- 這是已部署的 invite beta，不是完整 Production GO；仍待完成 `sid`、back-channel logout、rollback drill 及單一/全域登出驗收。
 
 ### Phase 3：Legacy 與管理服務
 
@@ -741,13 +743,13 @@ Webmail 仍須分成兩個問題：
 - 設定 File Browser proxy auth 與 Roundcube Generic OIDC。
 - 建立 auth gateway、origin lockdown 與管理服務 fail-closed policy。
 
-### Phase 4：公開註冊補課
+### Phase 4：公開註冊 gate
 
-Owner 已於 2026-07-16 決定先行切換 `REGISTRATION_MODE = public`（僅具備 verified-email 強制、per-IP 註冊限流、suspended/deleted 管制與 audit）。原 Phase 4 條件成為開放後必須補齊的欠帳，完整清單見 §9.2：
+`REGISTRATION_MODE = public` 的程式路徑已具備 verified-email 強制、per-IP 註冊限流、suspended/deleted 管制與 audit，但 production 仍維持 `invite`。切換前必須完成 §9.2 gate：
 
 - Terms/Privacy、Turnstile、abuse controls、新帳號限制狀態。
 - 獨立安全審查、DAST、負載測試、備份還原與事故演練。
-- 所有 high/critical findings 修正後，才可宣稱公開註冊 gate 完成。
+- 所有 high/critical findings 修正後，經 owner 明確核准與部署，才可宣稱公開註冊已啟用。
 
 ## 21. 建議目錄結構
 
@@ -775,13 +777,13 @@ Owner 已於 2026-07-16 決定先行切換 `REGISTRATION_MODE = public`（僅具
 
 | 項目 | 建議預設 | 狀態 |
 | --- | --- | --- |
-| 產品顯示名稱 | PGID | 待確認 |
+| 產品顯示名稱 | PGID | 已確認 |
 | 公開服務撤銷 SLA | 30 秒內 | 待確認 |
 | 管理服務撤銷 SLA | 立即，fail closed | 待確認 |
 | Audit retention | 365 天 | 待確認 |
 | 管理員復原 | 兩組 Passkey + recovery codes | 待確認 |
 | Dynamic client registration | 關閉 | 建議固定 |
-| Public registration | Phase 4 後才開啟 | 建議固定 |
+| Public registration | 現行 `invite`；§9.2 gate 通過並經 owner 核准部署後才開啟 | 已確認 |
 | Better Auth runtime | 目前 `1.6.23` exact pin；安裝前重新查 stable/advisories，不使用 beta/RC | 建議固定 |
 | Passkey RP ID | `sso.pg72.tw` | 建議固定 |
 | Cloudflare Access | 不使用 | 已確認 |

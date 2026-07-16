@@ -1,11 +1,38 @@
 # PGID Engineering Handoff
 
+> Current-source reconciliation: 2026-07-16 (Asia/Taipei).
+> This header records local repository truth and the latest committed operational
+> records. No remote/production command was run during this reconciliation, so
+> version IDs and remote migration state below remain deployment records for the
+> owner to verify, not a fresh observation.
+
+## Current Local Source State
+
+| Item | Reconciled state |
+| --- | --- |
+| Source baseline | Root Git repository at `1459229` (`main`) before this documentation commit; no Git remote configured; worktree was clean at reconciliation start |
+| Registration | `apps/sso/wrangler.jsonc` sets production `REGISTRATION_MODE` to `invite`; the `public` path and regression tests exist but [`codex.md`](./codex.md) §9.2 and owner approval are still required |
+| SSO migrations | Integrated local source is versioned through `0013_confidential_client_secret_post.sql`; it normalizes client metadata only. The latest deployment record says production D1 was applied only through `0012`, and this reconciliation did not apply `0013` remotely |
+| Login methods | Google and Passkey are the core methods; Discord, GitHub, Facebook, Apple, and Telegram are optional and remain hidden unless their credentials are configured |
+| Platform roles | `bootadmin`, `admin`, `developer`, `user` |
+| Production RPs | Deployment records show Copy and Link live on PGID; Copy's six-digit guest code remains a separate identity path |
+| Mail Path A | PGID introspection email claim is implemented in local commit `df8c5d0` and its branch passed 149 SSO tests; at reconciliation time it was not merged/deployed/production-verified, and VPS/mail cutover still requires an owner maintenance window |
+| Approval status | Deployed invite beta, not full Production GO; central `sid`, back-channel logout, recovery/rotation drills, DLQ operations, and independent security gates remain incomplete |
+| Verification record | The pre-reconciliation log records 144 SSO tests; introspection branch `df8c5d0` records 149. This documentation-only reconciliation did not rerun tests, and the combined integration still requires its full gate |
+
+The last recorded SSO Worker version is
+`4d0c701a-c805-4254-ae2b-7c0df856b3c0`. Confidential first-party RPs currently
+use `client_secret_post`. Copy and Link being live does not waive consent,
+stable-`sub`, RP session, rollback, or global-logout requirements.
+
 ---
 
-# ⚠️ 2026-07-16 SESSION UPDATE(最新狀態,緊急 handoff)
+# 2026-07-16 Claude Session Record (Historical)
 
 > 寫於 2026-07-16 凌晨/清晨的長 session 末,owner 要求緊急詳細 handoff。
-> **以下這段為最新狀態,若與本檔後半(2026-07-15 snapshot)衝突,以本段為準。**
+> **本段是當時的 operational record，不再是 current source-of-truth header。**
+> 本段內較後面的「醒後進度」會取代同段前面較早的待辦；現況先看上方
+> `Current Local Source State`，再以 `codex.md` 與程式設定為準。
 > 本段不含任何 secret 值。
 
 ## 0. 一句話現況
@@ -97,6 +124,7 @@ PGID 這個 session 完成了大量開發並**已部署到 production**;SSO 目�
 ---
 
 > 以下為 2026-07-15 的原始 snapshot(部分已被上方更新取代,保留供歷史參照)。
+> **這不是現行 runbook。不要從本 snapshot 執行 remote/production 操作；其中 Copy 尚未 cutover、root 尚未納入 Git及 `client_secret_basic` 等敘述只代表 2026-07-15 當時狀態。**
 
 ---
 

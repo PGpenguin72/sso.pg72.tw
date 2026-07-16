@@ -20,13 +20,13 @@ PGID 是 PG72 自行掌控的**單一登入（SSO）身分系統**。你只要�
 - 帳號被盜時，無法可靠地一次從所有服務登出。
 - 登入與安全事件散落各處，沒有統一稽核。
 
-PGID 把「你是誰」這件事集中到一個由 PG72 自己掌控的地方，讓每個服務只要信任 PGID 就好。
+PGID 把「你是誰」這件事集中到一個由 PG72 自己掌控的地方，讓每個服務只要信任 PGID 就好。跨服務即時登出的完整 delivery contract 仍在建置中，不能只因中央帳號中心已上線就視為完成。
 
 ## 怎麼用
 
 一般使用者：
 
-1. 用 Google 登入 PGID（首次登入且 Google 已驗證 email 即建立帳號）。
+1. 受邀使用者用 Google 登入 PGID（首次登入仍要求 Google 已驗證 email）；production 目前不開放未受邀者自行建立帳號。
 2. 在帳號中心註冊一組 Passkey，之後可用指紋 / 臉部 / 硬體金鑰無密碼登入。
 3. 之後登入任何 PG72 服務時，會被導到 PGID 完成登入並在授權畫面按「允許」，就回到該服務。
 4. 在帳號中心管理個人資料、Passkey、登入中的裝置、已授權的應用程式與安全紀錄，並可隨時撤銷單一裝置、其他裝置或全部裝置。
@@ -56,11 +56,12 @@ PGID 把「你是誰」這件事集中到一個由 PG72 自己掌控的地方，
 
 ## 現況與邊界（誠實揭露）
 
-PGID 目前處於 Phase 0：production canary 已部署於 `https://sso.pg72.tw`，日常登入支援 Google 與 Passkey。以下為刻意的產品邊界：
+PGID 目前是部署於 `https://sso.pg72.tw` 的 invite-only beta；既有部署紀錄顯示 Copy 與 Link 已使用 PGID production 登入，但這不代表完整 Production GO。以下為刻意的產品邊界：
 
 - v1 日常登入主力是 Google 與 Passkey；另提供 Discord、GitHub、Facebook、Apple、Telegram 社群登入作為額外選項，各 provider 未設定 secret 時會自動隱藏。不提供密碼、Email OTP 或 TOTP 登入。
 - 服務的 OIDC client 由管理員 / developer 明確建立，不開放動態自助註冊。
-- back-channel logout（跨服務即時登出）與部分公開註冊的安全項目仍在進行中，完整清單見 [`codex.md`](../codex.md) §9.2。
+- Production `REGISTRATION_MODE` 仍是 `invite`；公開註冊程式路徑已備妥，但安全 gate 與 owner 核准尚未完成。
+- 中央 `sid`、back-channel logout（跨服務即時登出）、復原演練與完整 Production GO gate 仍在進行中，完整清單見 [`codex.md`](../codex.md) §9.2。
 
 任何安全宣稱都以可驗證的自動化 gate 與獨立審查為準，不用文件聲明取代驗證。
 

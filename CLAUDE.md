@@ -7,10 +7,10 @@
 - Issuer 固定為 `https://sso.pg72.tw`。
 - SSO 由 PG72 自行掌控，不使用 Cloudflare Access 作登入或授權層。
 - v1 日常登入主力是 Google 與 Passkey。
-- v1 另提供 Discord、GitHub、Facebook、Apple、Telegram 社群登入作為額外選項（owner 決策，2026-07-16）；各 provider 未設定 secret 時自動隱藏，登入頁在無任何可用社群登入時不顯示該區塊。
+- v1 程式另支援 Discord、GitHub、Facebook、Apple、Telegram 社群登入作為額外選項；只有設定對應 secret 的 provider 才會啟用，未設定時自動隱藏且不影響 Google/Passkey。
 - v1 不提供密碼、Email OTP 或 TOTP 登入。
-- 公開註冊已開放（owner 決策，2026-07-16），邀請功能保留可用。Google 首次登入需 verified email 直接建帳號；Passkey 註冊仍需先有帳號與已登入 session。
-- 公開註冊的完整安全 gate 尚未全部完成；未完成項目如實列於 `codex.md` §9.2（含 Turnstile、Terms/Privacy、獨立安全審查、DAST 等），不得以文件宣稱取代驗證。
+- Production `REGISTRATION_MODE` 目前是 `invite`。公開註冊程式路徑與測試已備妥，但必須在 `codex.md` §9.2 的安全 gate 通過並由 owner 明確切換後才可開啟；邀請功能在兩種模式都保留。
+- Public path 的 Google 首次登入只接受 verified email；Passkey 註冊仍需先有帳號與已登入 session。文件不得把「程式已備妥」寫成「已公開」。
 - 必須支援裝置 session、單一/全部撤銷、全域登出、audit 與管理員停權。
 - 不共用 `Domain=.pg72.tw` cookie。所有 app 使用 OIDC redirect 與自己的 host-only session。
 - Email 不是使用者主鍵；所有服務以不可變 OIDC `sub` 識別使用者。
@@ -74,6 +74,7 @@
 - Passkey RP ID 是 `sso.pg72.tw`，expected origin 是 `https://sso.pg72.tw`；不得擴大成 `pg72.tw`。
 - 關閉 implicit account linking；同 Email 帳號只能在已登入 session 中明確連結。
 - OIDC clients 精確比對 HTTPS redirect URI，production 不允許 wildcard。
+- 現行第一方 confidential RP 在 token endpoint 使用 `client_secret_post`；Better Auth `1.6.23` 的 HTTP Basic 互通問題未有可追蹤 patch 與 regression test 前，不改回 `client_secret_basic`。
 - Web app callback 在 backend 交換 code；token 不進 `localStorage`。
 - App 使用 server-side session + `Secure`、`HttpOnly`、host-only cookie。
 - RP session 保存中央 `sid` 與 `sub`。
@@ -101,15 +102,14 @@ File Browser/Roundcube production 部署必須從鎖定版本、checksum/image d
 
 ### Copy
 
-- 移除長效 6 位數 code login。
-- 移除 auth/security identifier 中的 `Math.random()`。
-- 將 Email ownership key migration 至 SSO `sub`。
-- 以 PGID OIDC 取代 NextAuth Google provider。
+- Production 已切換至 PGID OIDC；六位數訪客碼依產品決策保留，且必須與 PGID 使用者、Email、`sub` 保持分離。
+- 以不可變 issuer `sub` 綁定 PGID 身分；Email 不參與授權或訪客/SSO 合併。
+- Token vault、Web Crypto 訪客碼與登出撤銷修正已部署；仍待 owner 實機確認登出，中央 `sid` 與 back-channel logout 尚未完成。
 
 ### Link
 
-- 本機整合已完成：`oauth4webapi` BFF、PKCE/state/nonce、stable `sub` session、一次性 verified-email binding 與安全 error response。
-- 舊 `owner_email` 暫作綁定後固定的 local ownership key；尚待 Preview D1、中央 `sid` 與 back-channel logout。
+- Production 已切換至 PGID：`oauth4webapi` BFF、PKCE/state/nonce、stable `sub` session、一次性 verified-email binding 與安全 error response。
+- 舊 `owner_email` 暫作綁定後固定的 local ownership key；中央 `sid`、back-channel logout 與完整 Production GO 仍未完成。
 
 ### Status / XUGOU
 
@@ -132,10 +132,11 @@ File Browser/Roundcube production 部署必須從鎖定版本、checksum/image d
 - 現有 `1.8-git` snapshot 不可直接部署。
 - 上游已提供 Generic OIDC、PKCE、JWKS 與 back-channel logout，優先用原生設定。
 - IMAP/SMTP 是否可免密碼取決於 mail backend 的 XOAUTH2/OAUTHBEARER 支援，不能只靠 Web UI OIDC 假設。
+- Mail Path A 的 PGID introspection email claim 已本地實作並測試，但尚未 production 部署/驗證；VPS/mail cutover 仍需 owner 在場的維護窗口。
 
 ## Security Gate
 
-Owner 已於 2026-07-16 在下列 gate 未全部完成前決定開放公開註冊；此為已知偏離，未完成項目列於 `codex.md` §9.2 並必須持續補齊。Production 完整宣告或 gate 完成聲明前至少通過：
+目前是已部署的 invite beta，不是公開註冊或完整 Production GO。切換 public、宣告完整 Production GO 或聲明 gate 完成前至少通過：
 
 - TypeScript typecheck、lint、unit 與 integration tests。
 - `@cloudflare/vitest-pool-workers` workerd tests。

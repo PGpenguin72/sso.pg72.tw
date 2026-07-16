@@ -3,13 +3,15 @@
 PGID is the custom identity provider for PG72 services. Phase 0 runs on Cloudflare Workers and D1 and provides:
 
 - Google sign-in and Passkey authentication;
+- optional Discord, GitHub, Facebook, Apple, and Telegram sign-in that remains hidden unless its credentials are configured;
 - OAuth 2.1 / OpenID Connect Authorization Code with PKCE S256, EdDSA ID tokens, and a published JWKS;
-- admin-managed OAuth clients (dynamic registration disabled) with a mandatory consent screen and a namespaced `https://pg72.tw/role` claim;
+- admin/developer-managed OAuth clients (dynamic registration disabled), mandatory consent, and the `bootadmin`/`admin`/`developer`/`user` platform role model;
 - host-only central sessions, device revocation, invitations, account suspension, and audit events;
+- versioned D1 migrations through local source `0013`; the latest production record remains applied through `0012` until the owner verifies/applies `0013` remotely;
 - an independent OIDC relying party based on `oauth4webapi`;
 - workerd regression tests for discovery, security headers, registration policy, request aborts, D1 constraints, PKCE transactions, and callback replay.
 
-The canonical architecture and migration decisions are in [`codex.md`](./codex.md). A production canary is deployed at `https://sso.pg72.tw`, but production relying parties must not switch traffic until the production Google login and newly registered `sso.pg72.tw` Passkey gate passes.
+The canonical architecture and migration decisions are in [`codex.md`](./codex.md). PGID is deployed at `https://sso.pg72.tw` as an invite-only beta, and deployment records show Copy and Link using it in production. This is not full Production GO: public registration, central `sid`/back-channel logout, recovery drills, and other security gates remain incomplete.
 
 ## Documentation
 
@@ -25,7 +27,7 @@ The canonical architecture and migration decisions are in [`codex.md`](./codex.m
 
 ## Registration Policy
 
-The deployed `REGISTRATION_MODE` in `apps/sso/wrangler.jsonc` is currently `"invite"`. The owner recorded a decision (2026-07-16, `codex.md` §9) to move to `"public"` with invitations retained; the code supports and tests both modes, and the switch takes effect only when the owner deploys the `"public"` value. Invitations stay fully functional in either mode; a pending invitation still assigns its role (for example `admin`) and is consumed on first sign-in.
+The deployed `REGISTRATION_MODE` in `apps/sso/wrangler.jsonc` is currently `"invite"`. The code supports and tests both modes, but the switch to `"public"` requires the `codex.md` §9.2 gate, explicit owner approval, and a production deployment. Invitations stay fully functional in either mode; a pending invitation still assigns its role (for example `admin`) and is consumed on first sign-in.
 
 Current safeguards in public mode:
 
@@ -35,7 +37,7 @@ Current safeguards in public mode:
 - Suspended accounts and deleted (missing) users are blocked at session creation, so public mode does not bypass suspension. A deleted user who re-registers receives a brand-new `sub`.
 - Registration denials never reveal whether an account exists.
 
-Known-incomplete security gates, accepted by the owner when opening registration (tracked in `codex.md` §9.2): Turnstile/bot challenge (TODO), Terms/Privacy consent recording, abuse detection and response runbook, independent security review, OIDC conformance/security testing, DAST, SAST/secret/IaC scan gates, load testing, backup-restore and key-rotation drills, restricted state for new accounts, and full back-channel logout rollout.
+Known-incomplete gates that block opening registration (tracked in `codex.md` §9.2): Turnstile/bot challenge, Terms/Privacy consent recording, abuse detection and response runbook, independent security review, OIDC conformance/security testing, DAST, SAST/secret/IaC scan gates, load testing, backup-restore and key-rotation drills, restricted state for new accounts, and full back-channel logout rollout.
 
 ## Workspace
 
@@ -57,7 +59,7 @@ PG72 services integrate as standard OIDC relying parties. Integration status (se
 | Status (`status.pg72.tw`) | OIDC BFF + D1 opaque session | Local integration complete; Preview and back-channel logout pending. |
 | Upload admin (`upload.pg72.tw/admin`) | Authlib OIDC + SQLite session (`client_secret_post`) | Local integration complete; VPS Preview/cutover runbook prepared. |
 | File Browser (`file.pg72.tw`) | oauth2-proxy gateway + proxy auth header | Deploy config prepared (`deploy/pgid/`); not yet deployed. |
-| Roundcube (`webmail.pg72.tw`) | Native Generic OIDC + Dovecot XOAUTH2 for mail | Deploy config prepared; mail-server apply pending owner maintenance window. |
+| Roundcube (`webmail.pg72.tw`) | Native Generic OIDC + Dovecot XOAUTH2 for mail | PGID introspection email prerequisite implemented/tested locally; not production-verified. Mail-server apply still requires owner maintenance window. |
 
 Copy and Link have switched production traffic to PGID. Relying parties must use `client_secret_post` for the token endpoint (the provider's HTTP Basic parsing is not RFC-6749-percent-decode compatible). See `handoff.md` for cutover records.
 
@@ -136,15 +138,15 @@ Do not deploy the removed Preview configurations into the production account. Pr
 
 ### Production
 
-The `pg72-id` Worker was deployed on 2026-07-15 with the promoted identity D1, production queues/secrets, exact `sso.pg72.tw` custom domain, and production issuer/Passkey settings. Health, D1 readiness, discovery, JWKS, security headers, and Google authorization redirect smoke tests pass. The obsolete encrypted JWKS row and all sessions were rotated after the production secret mismatch was found; users must sign in again. The remaining interactive gate is a real Google callback followed by registration and authentication with a new `sso.pg72.tw` Passkey.
+The `pg72-id` Worker is deployed with the production identity D1, queues/secrets, exact `sso.pg72.tw` custom domain, and production issuer/Passkey settings. Existing records report migrations through `0012`, successful smoke checks, and Copy/Link cutover. The obsolete encrypted JWKS row and sessions were rotated after the 2026-07-15 production secret mismatch. These are deployment records, not a claim that the full gate below has passed.
 
-Production completion checklist:
+Full Production GO checklist:
 
 1. Production queues, secrets, exact bindings, custom domain, and migrations are configured.
 2. The promoted identity database is now production-only; the old Preview Worker, domain, queues, and Preview OAuth grants were removed.
 3. Do not run the local test client seed against production. The remote test client and its grants were removed.
 4. Create production OAuth clients through an authenticated admin operation with exact HTTPS redirect URIs.
 5. Configure Google callback `https://sso.pg72.tw/callback/google`.
-6. Re-run the real Google callback, register a new production Passkey, and verify Passkey login before changing Phase 0 status.
+6. Re-run real Google and production Passkey flows, verify Copy/Link sign-out, and complete central `sid`/back-channel logout, recovery, rotation, restore, DLQ, and independent-review gates before changing the beta status.
 
 Dynamic client registration, passwords, Email OTP, TOTP, cross-subdomain cookies, and Cloudflare Access authentication are intentionally disabled.

@@ -1,7 +1,6 @@
 PGID
 Copyright 2026 PGpenguin72
 
-This product includes software from the Better Auth and VitePress projects,
-licensed under the MIT License, and the Inter font, licensed under the SIL Open
-Font License 1.1. See THIRD_PARTY_NOTICES.md and the notices distributed with
-those components.
+This product includes third-party software licensed under the MIT License and
+the Inter font licensed under the SIL Open Font License 1.1. See the
+accompanying third-party notices and component license files.

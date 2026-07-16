@@ -20,3 +20,8 @@
 
 * [開發者串接教學](developers/overview.md)——從建 client 到跑通流程。
 * [認識 PGID](README.md)
+
+## 授權聲明
+
+PGID 的[授權條款](/LICENSE.txt)、[著作權聲明](/NOTICE.txt)與
+[第三方軟體聲明](/THIRD_PARTY_NOTICES.txt)會隨 Wiki 靜態版本一併公開。

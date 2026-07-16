@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { copyFile, writeFile } from "node:fs/promises";
 import { posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitepress";
@@ -11,7 +11,13 @@ import {
 } from "./summary.mjs";
 
 const WIKI_ROOT = fileURLToPath(new URL("../", import.meta.url));
+const REPOSITORY_ROOT = resolve(WIKI_ROOT, "..");
 const SITE_URL = "https://wiki.sso.pg72.tw";
+const LEGAL_FILES = [
+  ["LICENSE", "LICENSE.txt"],
+  ["NOTICE", "NOTICE.txt"],
+  ["THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.txt"],
+] as const;
 const siteMeta = JSON.parse(
   readFileSync(resolve(WIKI_ROOT, "book.json"), "utf8"),
 ) as { title: string; description: string };
@@ -92,18 +98,26 @@ export default defineConfig({
     );
   },
   async buildEnd(siteConfig) {
-    await writeFile(
-      resolve(siteConfig.outDir, "llms.txt"),
-      createLlmsText(
-        {
-          title: siteMeta.title,
-          description: siteMeta.description,
-          siteUrl: SITE_URL,
-        },
-        summary,
+    await Promise.all([
+      writeFile(
+        resolve(siteConfig.outDir, "llms.txt"),
+        createLlmsText(
+          {
+            title: siteMeta.title,
+            description: siteMeta.description,
+            siteUrl: SITE_URL,
+          },
+          summary,
+        ),
+        "utf8",
       ),
-      "utf8",
-    );
+      ...LEGAL_FILES.map(([source, output]) =>
+        copyFile(
+          resolve(REPOSITORY_ROOT, source),
+          resolve(siteConfig.outDir, output),
+        ),
+      ),
+    ]);
   },
   themeConfig: {
     logo: "/favicon.svg",

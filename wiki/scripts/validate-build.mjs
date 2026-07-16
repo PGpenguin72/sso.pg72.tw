@@ -213,11 +213,55 @@ for (const file of [
   "_headers",
   "favicon.svg",
   "fonts/Inter-LICENSE.txt",
+  "LICENSE.txt",
   "llms.txt",
+  "NOTICE.txt",
   "robots.txt",
   "sitemap.xml",
+  "THIRD_PARTY_NOTICES.txt",
 ]) {
   assert(existsSync(resolve(distDir, file)), `Missing static output: ${file}`);
+}
+
+const legalFiles = [
+  ["LICENSE", "LICENSE.txt"],
+  ["NOTICE", "NOTICE.txt"],
+  ["THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.txt"],
+];
+for (const [source, output] of legalFiles) {
+  assert(
+    readFileSync(resolve(repositoryRoot, source)).equals(
+      readFileSync(resolve(distDir, output)),
+    ),
+    `${output} must be byte-equivalent to repository ${source}`,
+  );
+}
+
+const thirdPartyNotices = readFileSync(
+  resolve(distDir, "THIRD_PARTY_NOTICES.txt"),
+  "utf8",
+);
+for (const marker of [
+  "## Inter Font",
+  "## VitePress 1.6.4",
+  "## Vue 3.5.39",
+  "`@vue/shared`",
+  "`@vue/reactivity`",
+  "`@vue/runtime-core`",
+  "`@vue/runtime-dom`",
+  "## VueUse 12.8.2",
+  "`@vueuse/core`",
+  "`@vueuse/shared`",
+  "`@vueuse/integrations`",
+  "## focus-trap 7.8.0",
+  "## tabbable 6.5.0",
+  "## MiniSearch 7.2.0",
+  "## mark.js 8.11.1",
+]) {
+  assert(
+    thirdPartyNotices.includes(marker),
+    `THIRD_PARTY_NOTICES.txt missing bundled runtime marker: ${marker}`,
+  );
 }
 
 const sitemap = readFileSync(resolve(distDir, "sitemap.xml"), "utf8");

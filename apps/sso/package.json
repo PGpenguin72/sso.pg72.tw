@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "vite build && node scripts/remove-built-dev-vars.mjs",
-    "cf-typegen": "pnpm build && wrangler types --strict-vars false --config dist/pg72_id/wrangler.json",
-    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "cf-typegen": "wrangler types --strict-vars false",
+    "check": "pnpm cf-typegen && pnpm typecheck && pnpm test && pnpm build",
     "db:migrate:local": "wrangler d1 migrations apply PG72_ID_DB --local",
     "db:migrate:remote": "wrangler d1 migrations apply PG72_ID_DB --remote",
     "db:seed-diary:local": "wrangler d1 execute PG72_ID_DB --local --file seed/diary-clients.sql",

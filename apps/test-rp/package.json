@@ -6,7 +6,7 @@
   "scripts": {
     "build": "wrangler deploy --dry-run --outdir dist",
     "cf-typegen": "wrangler types --strict-vars false",
-    "check": "pnpm typecheck && pnpm build",
+    "check": "pnpm cf-typegen && pnpm typecheck && pnpm test && pnpm build",
     "db:migrate:local": "wrangler d1 migrations apply TEST_RP_DB --local",
     "dev": "wrangler dev --port 5174",
     "test": "vitest run",

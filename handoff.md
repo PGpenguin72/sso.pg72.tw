@@ -82,11 +82,17 @@ PGID 這個 session 完成了大量開發並**已部署到 production**;SSO 目�
 
 ## 9. 立即接手該做的事(順序建議)
 
-1. 確認 production `4d0c701a` 健康(`curl https://sso.pg72.tw/health`)。
-2. 執行 A2(移除 diary-dev client)、A3(清 Link 舊 secret)——owner 已同意。
-3. 派 subagent 做設計統一(5 repos)、一般使用者 QA、mail PGID-introspection 前置。
-4. mail VPS 套用等維護窗口 + 投票。
-5. 教 owner 申請社群登入 client（A4)。
+**進度(2026-07-16 醒後)**:
+- ✅ A2:pg72-diary-dev 已不在 prod(另分頁移除),無需動作。
+- ✅ A3:Link 三個舊 secret(ALLOWED_EMAIL/GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET)已刪,只剩 PG72_ID_CLIENT_SECRET。
+- 🔄 **設計統一進行中**:5 個背景 agent 正在重塑 `~/ahsnccu-ann`、`原專案代碼/copy.pg72.tw`、`原專案代碼/link.pg72.tw`、`原專案代碼/upload.pg72.tw`、`~/diary.pg72.tw`,依 `morden_dark.txt`。**每個 repo 各自寫 `DESIGN-LOG.md` + 增量 commit,不 push**。若 token 中斷/CODEX 接手:去各 repo 讀 `DESIGN-LOG.md` 看進度,未完成的續作;完成後主線可把各 DESIGN-LOG 摘要併回 agentlog。這些是純視覺、不動邏輯。
+
+**尚未做(接手可續)**:
+1. **一般使用者 QA**:對 live PGID(https://sso.pg72.tw)跑「一般使用者」角色(D-QA 四角色已做資安/美術/工程,缺這個)。
+2. **mail PGID-introspection 前置**:實作/驗證 SSO `/oauth2/introspect` 對 access token 回 `active:true` + `email`(Path A 必要)。設定已在 `原專案代碼/webmail.pg72.tw/deploy/pgid/mail/`。
+3. **mail VPS 套用**:高風險,需 3-agent 投票 + 維護窗口 + owner 在場,勿擅自套。
+4. **教 owner 申請社群登入 client(A4)**:各平台開發者後台 → 取 client id/secret → 進 secret store;callback `https://sso.pg72.tw/callback/{discord|github|facebook|apple}`,Telegram 用 BotFather 設 domain。
+5. **設計統一收尾**:5 個 agent 完成後,主線把各 repo 的 reskin 驗證後(不 push),Copy 需 push 觸發 Pages、Link 用 wrangler pages deploy、其餘視 owner 指示部署。
 
 ---
 

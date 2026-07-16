@@ -140,6 +140,10 @@ Client 建立時的實際契約（對照 `apps/sso/worker/admin-clients.ts`）�
 
 Client secret 為 `pg72_cs_<suffix>` 格式，**只在建立時回傳一次**，資料庫只存 hash。遺失只能重新輪替。
 
+所有 client mutation（建立、trust metadata 更新、secret rotation、停用 / 啟用、刪除與 system-client provisioning）都必須使用有效的登入 session cookie，且請求的 `Origin` 必須精確等於 PGID 的 `AUTH_BASE_URL`；mutation 缺少 `Origin` 或來源不符時回 `403 {"error":"invalid_origin"}`。這些操作也要求 session 的 `createdAt` 距目前時間小於 10 分鐘；過期或未來時間都回精確的 `403 {"code":"SESSION_NOT_FRESH","error":"fresh_session_required"}`。
+
+此處的 fresh 只代表 session age gate，**不等於**使用者剛重新登入或完成 Passkey 驗證。高風險 client 操作的 Passkey step-up 尚未實作，仍是 production cutover 前必須關閉的安全欠項。
+
 ### 5.2 Client 類型
 
 | 類型 | 認證 | 用途 |
@@ -157,9 +161,17 @@ Client secret 為 `pg72_cs_<suffix>` 格式，**只在建立時回傳一次**，
 
 - **要用 `client_secret_post`**（credential 在 form body）。
 - **避免 `client_secret_basic`**（`Authorization: Basic ...`）。若你的 library 預設用 Basic，請顯式切成 post。
-- PGID token endpoint discovery 只宣告 `none` 與 `client_secret_post`；introspection 只宣告 `client_secret_post`；revocation 宣告 `none` 與 `client_secret_post`，讓 public client 能以 `client_id` 撤銷自己的 token。Pinned provider runtime 仍接受 legacy raw Basic 請求，但不對外宣告；在上游 percent-decode 問題修正並通過 regression 前，不把它當成 PGID 支援契約。
+- PGID token endpoint discovery 只宣告 `none` 與 `client_secret_post`；introspection 只宣告 `client_secret_post`；revocation 宣告 `none` 與 `client_secret_post`，讓 public client 能以 `client_id` 撤銷自己的 token。Pinned provider 的 token endpoint runtime 仍接受 legacy raw Basic 請求，但不對外宣告；introspection 的 Worker preflight 會拒絕 `Authorization` header。在上游 percent-decode 問題修正並通過 regression 前，不把 Basic 當成 PGID 支援契約。
 
 `oauth4webapi` 對應寫法：confidential 用 `oauth.ClientSecretPost(secret)`，public 用 `oauth.None()`（見第 8 節）。
+
+### 5.4 Mail introspection system client
+
+一般 client 只能 introspect 自己的 token。唯一 cross-client 例外是固定的 `pgid-mail-introspect`，且只能檢查簽發給 `pg72-webmail` 的 opaque access token；JWT、refresh token 與其他 client 配對一律不授權。
+
+此 service client 不能走一般 client 建立流程。具 `clients.manage_all` 權限且符合上述 session / Origin / freshness 條件的管理員，使用 `POST /api/admin/clients/provision-mail-introspector` 建立它。端點沒有定義 request 欄位；在 4 KiB admin body 上限內，送入的 body 目前會被忽略，不用來設定 client。成功回 `201` 與只顯示一次的 `clientSecret`；已存在時回 `409 client_exists`。資料庫只存 secret hash，client 沒有 redirect URI、scope 或可簽發 token 的 grant。Production 尚未部署此 local-source 行為，也尚未 provision 該 client。
+
+`pgid-mail-introspect` 與 `pg72-webmail` 是 system-reserved client ID，developer 不能 claim。Provision、secret rotation、停用與刪除都要求 `clients.manage_all` 與上述 fresh-session gate；這不構成 Passkey step-up。
 
 ---
 
@@ -356,7 +368,9 @@ await createLocalSession({
 
 ### Introspection / Revocation（選用）
 
-- Introspection：`POST /oauth2/introspect`，帶 token 與 client 認證（`client_secret_post`）。回傳 `active` 與 token metadata。管理 / 高敏感服務應即時檢查、fail closed。
+- Introspection：`POST /oauth2/introspect`，`application/x-www-form-urlencoded` body 帶 `client_id`、`client_secret` 與 `token`（`client_secret_post`）；body 上限 4 KiB，不接受 Basic 或 GET。`client_id`、`client_secret`、`token`、`token_type_hint` 這四個單值欄位各自出現超過一次時會拒絕；不要把此規則解讀成所有擴充欄位都禁止重複。`token_type_hint` 只是查詢順序提示，猜錯時仍會查另一種 token。
+- 已成功認證的 caller 查詢無效、過期、撤銷或無權查看的 token 時，回 HTTP `200` 與精確的 `{"active":false}`，不洩漏原因。錯誤 client credential 回 `401 invalid_client`；協議錯誤回 `400`/`405`/`413`/`415`；限流與 limiter failure 分別回 `429`/`503`。
+- Mail Path A 還要求 access token 有 live central session、`email` scope，且目前 user 存在、為 `active`、`emailVerified=true`。成功回應只保留 `active`、`client_id`、`scope`、`iss`、`exp`、`iat`、`email`、`email_verified`，刻意不回 `sub` 或 `sid`。Email 只用於 Dovecot 既有 mailbox username 映射，不成為 PGID 或其他 RP 的身分主鍵。
 - Revocation：`POST /oauth2/revoke`，帶 token 與 client 認證。撤銷後該 token 不可再用。
 
 ---

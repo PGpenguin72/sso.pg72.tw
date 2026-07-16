@@ -22,7 +22,13 @@ import {
   redirectHostsFromUris,
   trustUrlOrNull,
 } from "./client-metadata";
-import { normalizeEmail, readRuntimeConfig } from "./config";
+import {
+  FRESH_SESSION_MAX_AGE_MS,
+  MAIL_INTROSPECTION_CLIENT_ID,
+  WEBMAIL_CLIENT_ID,
+  normalizeEmail,
+  readRuntimeConfig,
+} from "./config";
 import {
   adminOauthReportRoutes,
   oauthReportRoutes,
@@ -89,6 +95,23 @@ interface OAuthMetadata {
   [key: string]: unknown;
 }
 
+interface IntrospectionPayload {
+  active?: unknown;
+  client_id?: unknown;
+  email?: unknown;
+  email_verified?: unknown;
+  error?: unknown;
+  exp?: unknown;
+  iat?: unknown;
+  iss?: unknown;
+  scope?: unknown;
+}
+
+interface IntrospectionPreflight {
+  clientId: string | null;
+  response: Response | null;
+}
+
 // `/update-user` and `/unlink-account` are intentionally absent (and listed in
 // `disabledPaths` in auth.ts): profile updates and unlinking go through the
 // validated first-party routes in worker/account.ts instead.
@@ -124,7 +147,166 @@ const OAUTH_METADATA_PATHS = new Set([
 
 const DEV_CSP_NONCE = "cGc3Mi12aXRlLWRldg==";
 const PASSKEY_NAME_MAX_LENGTH = 64;
-const FRESH_SESSION_MAX_AGE_MS = 10 * 60 * 1000;
+const OAUTH_CLIENT_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{2,63}$/;
+
+function introspectionJson(
+  payload: Record<string, unknown>,
+  status = 200,
+): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: {
+      "Cache-Control": "no-store",
+      "Content-Type": "application/json",
+      Pragma: "no-cache",
+    },
+  });
+}
+
+export function introspectionRateLimitKeys(
+  ip: string,
+  clientId: string | null,
+): { clientIp: string; ip: string } {
+  const clientClass =
+    clientId === MAIL_INTROSPECTION_CLIENT_ID ? "mail" : "other";
+  return {
+    ip: `introspection:ip:${ip}`,
+    clientIp: `introspection:${clientClass}:${ip}`,
+  };
+}
+
+async function introspectionLimitResponse(
+  limiter: RateLimit,
+  key: string,
+): Promise<Response | null> {
+  try {
+    const result = await limiter.limit({ key });
+    return result.success
+      ? null
+      : introspectionJson({ error: "rate_limited" }, 429);
+  } catch {
+    return introspectionJson({ error: "temporarily_unavailable" }, 503);
+  }
+}
+
+async function introspectionPreflight(
+  request: Request,
+  env: Env,
+  ip: string,
+): Promise<IntrospectionPreflight> {
+  if (request.method !== "POST") {
+    return {
+      clientId: null,
+      response: introspectionJson({ error: "invalid_request" }, 405),
+    };
+  }
+
+  const contentType = request.headers.get("content-type")?.toLowerCase() ?? "";
+  const mediaType = contentType.split(";", 1)[0]?.trim();
+  if (mediaType !== "application/x-www-form-urlencoded") {
+    return {
+      clientId: null,
+      response: introspectionJson({ error: "invalid_request" }, 415),
+    };
+  }
+  if (request.headers.has("authorization")) {
+    return {
+      clientId: null,
+      response: introspectionJson({ error: "invalid_request" }, 400),
+    };
+  }
+
+  let form: FormData;
+  try {
+    form = await request.clone().formData();
+  } catch {
+    return {
+      clientId: null,
+      response: introspectionJson({ error: "invalid_request" }, 400),
+    };
+  }
+
+  const clientIds = form.getAll("client_id");
+  const candidate = clientIds.length === 1 ? clientIds[0] : null;
+  const clientId =
+    typeof candidate === "string" && OAUTH_CLIENT_ID_PATTERN.test(candidate)
+      ? candidate
+      : null;
+  const duplicateParameter = [
+    "client_id",
+    "client_secret",
+    "token",
+    "token_type_hint",
+  ].some((name) => form.getAll(name).length > 1);
+  const limited = await introspectionLimitResponse(
+    env.INTROSPECTION_CLIENT_RATE_LIMITER,
+    introspectionRateLimitKeys(ip, clientId).clientIp,
+  );
+  if (limited) return { clientId, response: limited };
+  if (duplicateParameter) {
+    return {
+      clientId,
+      response: introspectionJson({ error: "invalid_request" }, 400),
+    };
+  }
+
+  return { clientId, response: null };
+}
+
+async function normalizeMailIntrospectionResponse(
+  clientId: string | null,
+  response: Response,
+): Promise<Response> {
+  let payload: IntrospectionPayload;
+  try {
+    payload = (await response.clone().json()) as IntrospectionPayload;
+  } catch {
+    return clientId === MAIL_INTROSPECTION_CLIENT_ID
+      ? introspectionJson({ error: "server_error" }, 500)
+      : response;
+  }
+
+  if (response.status !== 200 && payload.error === "invalid_client") {
+    return introspectionJson({ error: "invalid_client" }, 401);
+  }
+  if (clientId !== MAIL_INTROSPECTION_CLIENT_ID) return response;
+
+  if (response.status !== 200) {
+    return introspectionJson(
+      {
+        error:
+          typeof payload.error === "string"
+            ? payload.error
+            : "invalid_request",
+      },
+      response.status,
+    );
+  }
+
+  const scopes =
+    typeof payload.scope === "string" ? payload.scope.split(/\s+/) : [];
+  if (
+    payload.active !== true ||
+    payload.client_id !== WEBMAIL_CLIENT_ID ||
+    typeof payload.email !== "string" ||
+    payload.email.length === 0 ||
+    payload.email_verified !== true ||
+    !scopes.includes("email")
+  ) {
+    return introspectionJson({ active: false });
+  }
+
+  return introspectionJson({
+    active: true,
+    client_id: WEBMAIL_CLIENT_ID,
+    scope: payload.scope,
+    ...(typeof payload.iss === "string" ? { iss: payload.iss } : {}),
+    ...(typeof payload.exp === "number" ? { exp: payload.exp } : {}),
+    ...(typeof payload.iat === "number" ? { iat: payload.iat } : {}),
+    email: payload.email,
+    email_verified: true,
+  });
+}
 
 function isAuthPath(pathname: string): boolean {
   return (
@@ -393,6 +575,24 @@ app.route("/api/admin/users", adminUserRoutes);
 app.route("/", accountRoutes);
 app.route("/", oauthReportRoutes);
 app.route("/", telegramRoutes);
+
+app.use("/oauth2/introspect", async (c, next) => {
+  const ip = c.req.header("cf-connecting-ip") ?? "local";
+  const limited = await introspectionLimitResponse(
+    c.env.INTROSPECTION_IP_RATE_LIMITER,
+    introspectionRateLimitKeys(ip, null).ip,
+  );
+  if (limited) return limited;
+  await next();
+});
+
+app.use(
+  "/oauth2/introspect",
+  bodyLimit({
+    maxSize: 4 * 1024,
+    onError: () => introspectionJson({ error: "invalid_request" }, 413),
+  }),
+);
 
 app.use(
   "/oauth2/token",
@@ -953,8 +1153,13 @@ app.all("*", async (c) => {
       );
     }
 
-    if (isSensitiveAuthPath(pathname)) {
-      const ip = c.req.header("cf-connecting-ip") ?? "local";
+    const ip = c.req.header("cf-connecting-ip") ?? "local";
+    let introspectionClientId: string | null = null;
+    if (pathname === "/oauth2/introspect") {
+      const preflight = await introspectionPreflight(c.req.raw, c.env, ip);
+      introspectionClientId = preflight.clientId;
+      if (preflight.response) return preflight.response;
+    } else if (isSensitiveAuthPath(pathname)) {
       const result = await c.env.AUTH_RATE_LIMITER.limit({ key: ip });
       if (!result.success) {
         return c.json({ error: "rate_limited" }, 429);
@@ -996,6 +1201,12 @@ app.all("*", async (c) => {
 
     if (isAuthNavigationPath(pathname)) {
       return normalizeOAuthNavigationRedirect(c.req.raw, response);
+    }
+    if (pathname === "/oauth2/introspect") {
+      return normalizeMailIntrospectionResponse(
+        introspectionClientId,
+        response,
+      );
     }
     return OAUTH_METADATA_PATHS.has(pathname)
       ? advertiseManagedClientAuthMethods(response)

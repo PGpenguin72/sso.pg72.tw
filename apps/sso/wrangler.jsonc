@@ -38,6 +38,18 @@
       "name": "REGISTRATION_RATE_LIMITER",
       "namespace_id": "1003",
       "simple": { "limit": 5, "period": 60 }
+    },
+    {
+      // Dovecot authenticates many users through one protected-resource
+      // client/IP pair, so introspection must not share the 30/min auth limit.
+      "name": "INTROSPECTION_IP_RATE_LIMITER",
+      "namespace_id": "1004",
+      "simple": { "limit": 1200, "period": 60 }
+    },
+    {
+      "name": "INTROSPECTION_CLIENT_RATE_LIMITER",
+      "namespace_id": "1005",
+      "simple": { "limit": 600, "period": 60 }
     }
   ],
   "queues": {

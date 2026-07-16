@@ -9,9 +9,10 @@ GOOGLE_CLIENT_ID="replace-with-google-oauth-client-id"
 GOOGLE_CLIENT_SECRET="replace-with-google-oauth-client-secret"
 BOOTSTRAP_ADMIN_EMAIL="you@example.com"
 
-# --- Optional social login providers (placeholders) ---
-# Each provider only activates when BOTH its id and secret are set. Leave these
-# as placeholders locally; real values go into Wrangler secrets, never here.
+# --- Optional social login providers (disabled by default) ---
+# Empty values are intentional: copying this template must not enable a provider.
+# For local testing, set BOTH its id and secret only in the ignored .dev.vars.
+# Deployed credentials belong in Wrangler secrets, never in this tracked file.
 # Developer-portal callback (redirect) URL to register for each provider:
 #   Discord:  https://sso.pg72.tw/callback/discord
 #   GitHub:   https://sso.pg72.tw/callback/github
@@ -19,17 +20,17 @@ BOOTSTRAP_ADMIN_EMAIL="you@example.com"
 #   Apple:    https://sso.pg72.tw/callback/apple
 # Telegram uses the Login Widget (no OAuth callback); set the bot's domain to
 # sso.pg72.tw in @BotFather and post the widget payload to /api/auth/telegram.
-DISCORD_CLIENT_ID="placeholder-discord-client-id"
-DISCORD_CLIENT_SECRET="placeholder-discord-client-secret"
-GITHUB_CLIENT_ID="placeholder-github-client-id"
-GITHUB_CLIENT_SECRET="placeholder-github-client-secret"
-FACEBOOK_CLIENT_ID="placeholder-facebook-client-id"
-FACEBOOK_CLIENT_SECRET="placeholder-facebook-client-secret"
+DISCORD_CLIENT_ID=""
+DISCORD_CLIENT_SECRET=""
+GITHUB_CLIENT_ID=""
+GITHUB_CLIENT_SECRET=""
+FACEBOOK_CLIENT_ID=""
+FACEBOOK_CLIENT_SECRET=""
 # Apple's client secret is a short-lived ES256 JWT you generate from your Apple
 # private key (Sign in with Apple); paste the current JWT here.
-APPLE_CLIENT_ID="placeholder-apple-services-id"
-APPLE_CLIENT_SECRET="placeholder-apple-client-secret-jwt"
-APPLE_APP_BUNDLE_IDENTIFIER="tw.pg72.placeholder"
-# Telegram bot token from @BotFather (format 123456:ABC...). Placeholder only.
-TELEGRAM_BOT_TOKEN="123456:placeholder-telegram-bot-token"
-TELEGRAM_BOT_USERNAME="placeholder_bot_username"
+APPLE_CLIENT_ID=""
+APPLE_CLIENT_SECRET=""
+APPLE_APP_BUNDLE_IDENTIFIER=""
+# Telegram bot token from @BotFather (format 123456:ABC...).
+TELEGRAM_BOT_TOKEN=""
+TELEGRAM_BOT_USERNAME=""

@@ -22,6 +22,10 @@ PGID **不開放動態自助註冊**。每個 client 由 PGID 管理員或具 `d
 * confidential client 固定登記為 `client_secret_post`；RP 必須在後端以 form body 傳送 client credentials。
 * public client 沒有 secret。
 
+建立、更新、輪替 secret、停用 / 啟用或刪除 client 都是同源 admin mutation：請求必須帶有效的 PGID session cookie，且 `Origin` 必須精確等於 PGID 的 `AUTH_BASE_URL`。這些操作只接受 `createdAt` 距目前時間小於 10 分鐘的 session；不符合時固定回 `403` 與 `{"code":"SESSION_NOT_FRESH","error":"fresh_session_required"}`。
+
+這個 10 分鐘判斷只是 session age gate，不代表使用者最近重新登入，也不代表完成 Passkey 驗證。高風險 client 操作的 Passkey step-up 仍是 production cutover 前的安全欠項。
+
 ## 本機開發
 
 本機 callback（例如 `http://localhost:5174/callback`）要註冊成**獨立的 development client**，不要把本機網址混進 production client 的 redirect URI。
@@ -39,6 +43,10 @@ OIDC_SCOPE=openid profile email offline_access
 ## Client 認證方式（重要）
 
 confidential client 換 token 時，請把 `client_id` / `client_secret` 放在 **token 請求的 form body**（`client_secret_post`），**不要**用 HTTP Basic header。現行 OAuth provider 版本對 Basic header 的 client credential 處理與標準不相容，可能導致認證失敗。細節與範例見 [PGID 串接 API 手冊 §5.3](../../docs/api/PGID-integration.md#53-client-認證方式重要)。
+
+## System-reserved clients
+
+`pg72-webmail` 與 `pgid-mail-introspect` 是 PGID 保留的 system client ID，developer 不能建立或接管。`pgid-mail-introspect` 是無登入 grant 的 mail service client，只能由 manage-all 管理員透過專用 provisioning 操作建立；該端點沒有 request 欄位，body 會被忽略，secret 仍只顯示一次。它只能 introspect `pg72-webmail` 的 opaque access token，不能查其他 client、JWT 或 refresh token。完整契約見 [PGID 串接 API 手冊 §5.4](../../docs/api/PGID-integration.md#54-mail-introspection-system-client)。
 
 ## 下一步
 

@@ -8,7 +8,9 @@ import { recordAudit, type WaitUntilContext } from "./audit";
 import { ownedClientShutdownStatements } from "./client-ownership";
 import {
   CLIENT_SECRET_PREFIX,
+  MAIL_INTROSPECTION_CLIENT_ID,
   TRUSTED_CLIENT_IDS,
+  WEBMAIL_CLIENT_ID,
   normalizeEmail,
   readRuntimeConfig,
 } from "./config";
@@ -333,6 +335,7 @@ export function createAuth(
         idTokenExpiresIn: 60 * 10,
         refreshTokenExpiresIn: 60 * 60 * 24 * 30,
         codeExpiresIn: 60,
+        rateLimit: { introspect: false },
         clientPrivileges: ({ user }) =>
           user !== undefined &&
           hasPermission(
@@ -351,6 +354,28 @@ export function createAuth(
             config,
           ),
         }),
+        authorizeOpaqueAccessTokenIntrospection: ({
+          introspectionClientId,
+          scopes,
+          sessionId,
+          tokenClientId,
+          user,
+        }) =>
+          introspectionClientId === MAIL_INTROSPECTION_CLIENT_ID &&
+          tokenClientId === WEBMAIL_CLIENT_ID &&
+          scopes.includes("email") &&
+          typeof sessionId === "string" &&
+          user?.emailVerified === true &&
+          user.status === "active",
+        customAccessTokenClaims: ({ user, scopes }) =>
+          user?.emailVerified === true &&
+          user.status === "active" &&
+          scopes.includes("email")
+            ? {
+                email: user.email,
+                email_verified: true,
+              }
+            : {},
         customUserInfoClaims: ({ user }) => ({
           "https://pg72.tw/role": effectivePlatformRole(
             user.role,

@@ -83,7 +83,7 @@ pnpm --filter @pg72/test-rp db:migrate:local
 pnpm --filter @pg72/id db:seed-test-rp:local
 ```
 
-Edit `apps/sso/.dev.vars` with a random local secret and Google credentials. The checked-out file is ignored and contains non-working development placeholders.
+Copy tracked `apps/sso/.dev.vars.example` to ignored `apps/sso/.dev.vars`, then replace the required placeholders with a random local secret and development Google credentials. Optional provider values are intentionally empty so copying the template cannot enable a provider; only fill them in when testing that provider. Never commit the real `.dev.vars`.
 
 ```bash
 openssl rand -base64 32

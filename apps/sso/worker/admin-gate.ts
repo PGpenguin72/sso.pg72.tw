@@ -1,7 +1,10 @@
 import type { Context } from "hono";
 
 import { createAuth } from "./auth";
-import { readRuntimeConfig } from "./config";
+import {
+  FRESH_SESSION_MAX_AGE_MS,
+  readRuntimeConfig,
+} from "./config";
 import {
   effectivePlatformRole,
   hasPermission,
@@ -28,6 +31,7 @@ export type AdminGate =
 export async function requireAdminPermission(
   c: Context<AppEnv>,
   permission: AdminPermission,
+  options: { fresh?: boolean } = {},
 ): Promise<AdminGate> {
   const auth = createAuth(c.env, c.executionCtx);
   const session = await auth.api.getSession({ headers: c.req.raw.headers });
@@ -43,6 +47,26 @@ export async function requireAdminPermission(
   );
   if (session.user.status !== "active" || !hasPermission(role, permission)) {
     return { ok: false, response: c.json({ error: "forbidden" }, 403) };
+  }
+  if (options.fresh) {
+    const createdAt = new Date(session.session.createdAt).getTime();
+    const sessionAgeMs = Date.now() - createdAt;
+    const sessionIsFresh =
+      Number.isFinite(createdAt) &&
+      sessionAgeMs >= 0 &&
+      sessionAgeMs < FRESH_SESSION_MAX_AGE_MS;
+    if (!sessionIsFresh) {
+      return {
+        ok: false,
+        response: c.json(
+          {
+            code: "SESSION_NOT_FRESH",
+            error: "fresh_session_required",
+          },
+          403,
+        ),
+      };
+    }
   }
 
   const rateLimit = await c.env.ADMIN_RATE_LIMITER.limit({

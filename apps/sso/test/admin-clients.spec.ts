@@ -147,6 +147,89 @@ async function fetchClientRow(clientId: string): Promise<ClientRow | null> {
     .first<ClientRow>();
 }
 
+function interposeAfterManagedClientLoad(
+  afterLoad: () => Promise<void>,
+): { database: D1Database; wasIntercepted: () => boolean } {
+  const realDatabase = env.PG72_ID_DB;
+  let intercepted = false;
+
+  const wrapManagedSelect = (
+    statement: D1PreparedStatement,
+  ): D1PreparedStatement =>
+    new Proxy(statement, {
+      get(target, property) {
+        if (property === "bind") {
+          return (...values: unknown[]) =>
+            wrapManagedSelect(target.bind(...values));
+        }
+        if (property === "first") {
+          return async (columnName?: string) => {
+            const result =
+              columnName === undefined
+                ? await target.first()
+                : await target.first(columnName);
+            if (!intercepted && result !== null) {
+              intercepted = true;
+              await afterLoad();
+            }
+            return result;
+          };
+        }
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+  const database = new Proxy(realDatabase, {
+    get(target, property) {
+      if (property === "prepare") {
+        return (query: string) => {
+          const statement = target.prepare(query);
+          return query.includes(
+            "SELECT id, ownerUserId, public, clientSecret, tos, policy, metadata",
+          )
+            ? wrapManagedSelect(statement)
+            : statement;
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+
+  return { database, wasIntercepted: () => intercepted };
+}
+
+async function insertReplacementClient(
+  clientId: string,
+  clientRowId: string,
+  ownerUserId: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await env.PG72_ID_DB.prepare(
+    `INSERT INTO oauthClient (
+      id, clientId, clientSecret, disabled, skipConsent, enableEndSession,
+      subjectType, scopes, createdAt, updatedAt, name, redirectUris,
+      postLogoutRedirectUris, tokenEndpointAuthMethod, grantTypes,
+      responseTypes, public, type, requirePKCE, ownerUserId, metadata
+    ) VALUES (?, ?, ?, 0, 0, 0, 'public', '["openid"]', ?, ?, ?, ?, NULL,
+              'client_secret_post', '["authorization_code"]', '["code"]',
+              0, 'web', 1, ?, ?)`,
+  )
+    .bind(
+      clientRowId,
+      clientId,
+      "replacement-secret-hash",
+      now,
+      now,
+      "Replacement Client",
+      JSON.stringify([`https://${clientId}.example/replacement-callback`]),
+      ownerUserId,
+      JSON.stringify({ developer_name: "Replacement Owner" }),
+    )
+    .run();
+}
+
 describe("Admin OAuth client management", () => {
   it("requires an authenticated session", async () => {
     const listResponse = await exports.default.fetch(CLIENTS_URL);
@@ -894,6 +977,191 @@ describe("Admin OAuth client management", () => {
       }),
     );
     expect(repeatedDelete.status).toBe(404);
+  });
+
+  it("rejects a stale developer mutation after the owner account is deleted", async () => {
+    const developer = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "developer",
+    );
+    const clientId = `orphan-race-${crypto.randomUUID()}`;
+    expect(
+      (await createClient(developer.headers, confidentialClientBody(clientId)))
+        .status,
+    ).toBe(201);
+
+    const original = await env.PG72_ID_DB.prepare(
+      "SELECT id FROM oauthClient WHERE clientId = ?",
+    )
+      .bind(clientId)
+      .first<{ id: string }>();
+    expect(original?.id).toBeTruthy();
+
+    const interposed = interposeAfterManagedClientLoad(async () => {
+      await env.PG72_ID_DB.prepare("DELETE FROM user WHERE id = ?")
+        .bind(developer.userId)
+        .run();
+    });
+    const requestEnv = {
+      ...env,
+      PG72_ID_DB: interposed.database,
+    } as Env;
+    const ctx = createExecutionContext();
+    const response = await app.fetch(
+      new Request(`${CLIENTS_URL}/${clientId}/status`, {
+        method: "POST",
+        headers: developer.headers,
+        body: JSON.stringify({ disabled: true }),
+      }),
+      requestEnv,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(interposed.wasIntercepted()).toBe(true);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "client_not_found" });
+    const after = await env.PG72_ID_DB.prepare(
+      "SELECT id, ownerUserId, disabled FROM oauthClient WHERE clientId = ?",
+    )
+      .bind(clientId)
+      .first<{ id: string; ownerUserId: string | null; disabled: number }>();
+    expect(after).toEqual({
+      id: original?.id,
+      ownerUserId: null,
+      disabled: 0,
+    });
+    const audit = await env.PG72_ID_DB.prepare(
+      `SELECT COUNT(*) AS count
+         FROM audit_event
+        WHERE event_type = 'oauth_client.disabled' AND client_id = ?`,
+    )
+      .bind(clientId)
+      .first<{ count: number }>();
+    expect(audit?.count).toBe(0);
+  });
+
+  it("does not let a stale admin request delete a replacement client", async () => {
+    const admin = await createAdmin();
+    const replacementOwner = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "developer",
+    );
+    const clientId = `replacement-race-${crypto.randomUUID()}`;
+    expect(
+      (await createClient(admin.headers, confidentialClientBody(clientId))).status,
+    ).toBe(201);
+
+    const original = await env.PG72_ID_DB.prepare(
+      "SELECT id FROM oauthClient WHERE clientId = ?",
+    )
+      .bind(clientId)
+      .first<{ id: string }>();
+    const replacementId = crypto.randomUUID();
+    const replacementAccessTokenId = crypto.randomUUID();
+    const replacementCodeId = crypto.randomUUID();
+    const interposed = interposeAfterManagedClientLoad(async () => {
+      await env.PG72_ID_DB.prepare(
+        "DELETE FROM oauthClient WHERE clientId = ?",
+      )
+        .bind(clientId)
+        .run();
+      await insertReplacementClient(
+        clientId,
+        replacementId,
+        replacementOwner.userId,
+      );
+
+      const now = new Date();
+      const expiresAt = new Date(
+        now.getTime() + 60 * 60 * 1000,
+      ).toISOString();
+      await env.PG72_ID_DB.batch([
+        env.PG72_ID_DB.prepare(
+          `INSERT INTO oauthAccessToken
+            (id, token, clientId, userId, expiresAt, createdAt, scopes)
+           VALUES (?, ?, ?, ?, ?, ?, '["openid"]')`,
+        ).bind(
+          replacementAccessTokenId,
+          crypto.randomUUID(),
+          clientId,
+          replacementOwner.userId,
+          expiresAt,
+          now.toISOString(),
+        ),
+        env.PG72_ID_DB.prepare(
+          `INSERT INTO verification
+            (id, identifier, value, expiresAt, createdAt, updatedAt)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          replacementCodeId,
+          crypto.randomUUID(),
+          JSON.stringify({
+            type: "authorization_code",
+            userId: replacementOwner.userId,
+            query: { client_id: clientId },
+          }),
+          expiresAt,
+          now.toISOString(),
+          now.toISOString(),
+        ),
+      ]);
+    });
+    const requestEnv = {
+      ...env,
+      PG72_ID_DB: interposed.database,
+    } as Env;
+    const ctx = createExecutionContext();
+    const response = await app.fetch(
+      new Request(`${CLIENTS_URL}/${clientId}`, {
+        method: "DELETE",
+        headers: admin.headers,
+      }),
+      requestEnv,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(interposed.wasIntercepted()).toBe(true);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "client_not_found" });
+    expect(replacementId).not.toBe(original?.id);
+    const replacement = await env.PG72_ID_DB.prepare(
+      `SELECT id, ownerUserId, disabled, name
+         FROM oauthClient
+        WHERE clientId = ?`,
+    )
+      .bind(clientId)
+      .first<{
+        id: string;
+        ownerUserId: string | null;
+        disabled: number;
+        name: string;
+      }>();
+    expect(replacement).toEqual({
+      id: replacementId,
+      ownerUserId: replacementOwner.userId,
+      disabled: 0,
+      name: "Replacement Client",
+    });
+    const relatedRows = await env.PG72_ID_DB.prepare(
+      `SELECT
+        (SELECT COUNT(*) FROM oauthAccessToken WHERE id = ?1) AS access_tokens,
+        (SELECT COUNT(*) FROM verification WHERE id = ?2) AS authorization_codes,
+        (SELECT COUNT(*) FROM audit_event
+          WHERE event_type = 'oauth_client.deleted' AND client_id = ?3) AS audits`,
+    )
+      .bind(replacementAccessTokenId, replacementCodeId, clientId)
+      .first<{
+        access_tokens: number;
+        authorization_codes: number;
+        audits: number;
+      }>();
+    expect(relatedRows).toEqual({
+      access_tokens: 1,
+      authorization_codes: 1,
+      audits: 0,
+    });
   });
 
   it("requires a developer identity for new clients", async () => {

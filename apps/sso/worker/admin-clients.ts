@@ -1,7 +1,13 @@
 import { Hono, type Context } from "hono";
 
 import { requireAdminPermission, type AdminActor } from "./admin-gate";
-import { recordAudit } from "./audit";
+import {
+  auditInsertForExistingClientStatement,
+  auditInsertStatement,
+  createAuditEvent,
+  enqueueSecurityEvent,
+  type SecurityEvent,
+} from "./audit";
 import {
   DEVELOPER_NAME_METADATA_KEY,
   developerNameFromMetadata,
@@ -11,7 +17,10 @@ import {
 } from "./client-metadata";
 import {
   CLIENT_SECRET_PREFIX,
+  MAIL_INTROSPECTION_CLIENT_ID,
+  SYSTEM_RESERVED_CLIENT_IDS,
   TRUSTED_CLIENT_IDS,
+  WEBMAIL_CLIENT_ID,
   readRuntimeConfig,
   type RuntimeConfig,
 } from "./config";
@@ -27,6 +36,7 @@ const CLIENT_URI_MAX_LENGTH = 256;
 const REDIRECT_URI_MAX_LENGTH = 512;
 const REDIRECT_URI_MAX_COUNT = 8;
 const CLIENT_SECRET_BYTES = 32;
+const INTROSPECTION_ONLY_GRANT = "urn:pg72:grant-type:introspection-only";
 
 interface CreateClientInput {
   clientId?: unknown;
@@ -74,6 +84,35 @@ interface AdminClientRow {
   ownerUserId: string | null;
   createdAt: string | null;
   updatedAt: string | null;
+}
+
+interface ManagedClientRow {
+  id: string;
+  ownerUserId: string | null;
+  public: number | null;
+  clientSecret: string | null;
+  tos: string | null;
+  policy: string | null;
+  metadata: string | null;
+}
+
+interface ManagedClientGuard {
+  clientId: string;
+  clientRowId: string;
+  expectedOwnerUserId?: string;
+}
+
+const MANAGED_CLIENT_PREDICATE = `id = ?
+  AND clientId = ?
+  AND (? IS NULL OR ownerUserId = ?)`;
+
+function managedClientGuardBindings(guard: ManagedClientGuard): unknown[] {
+  return [
+    guard.clientRowId,
+    guard.clientId,
+    guard.expectedOwnerUserId ?? null,
+    guard.expectedOwnerUserId ?? null,
+  ];
 }
 
 function toBase64Url(bytes: Uint8Array): string {
@@ -226,14 +265,22 @@ async function readJson<T>(request: Request): Promise<T | null> {
  * Deletes pending authorization codes issued to a client. Mirrors the
  * verification-table cleanup used by consent revocation in worker/index.ts.
  */
-function pendingAuthorizationCodeCleanup(env: Env, clientId: string) {
+function pendingAuthorizationCodeCleanup(
+  env: Env,
+  guard: ManagedClientGuard,
+) {
   return env.PG72_ID_DB.prepare(
     `DELETE FROM verification
       WHERE CASE WHEN json_valid(value) THEN
         json_extract(value, '$.type') = 'authorization_code'
         AND json_extract(value, '$.query.client_id') = ?
-      ELSE 0 END`,
-  ).bind(clientId);
+      ELSE 0 END
+        AND EXISTS (
+          SELECT 1
+            FROM oauthClient
+           WHERE ${MANAGED_CLIENT_PREDICATE}
+        )`,
+  ).bind(guard.clientId, ...managedClientGuardBindings(guard));
 }
 
 /**
@@ -253,47 +300,53 @@ async function loadManagedClient(
   c: Context<AppEnv>,
   actor: AdminActor,
   clientId: string,
-): Promise<{ ownerUserId: string | null } | null> {
+): Promise<ManagedClientRow | null> {
   const row = await c.env.PG72_ID_DB.prepare(
-    "SELECT ownerUserId FROM oauthClient WHERE clientId = ? LIMIT 1",
+    `SELECT id, ownerUserId, public, clientSecret, tos, policy, metadata
+       FROM oauthClient
+      WHERE clientId = ?
+      LIMIT 1`,
   )
     .bind(clientId)
-    .first<{ ownerUserId: string | null }>();
+    .first<ManagedClientRow>();
   if (!row) return null;
+  if (SYSTEM_RESERVED_CLIENT_IDS.has(clientId) && !managesAllClients(actor)) {
+    return null;
+  }
   if (!managesAllClients(actor) && row.ownerUserId !== actor.userId) {
     return null;
   }
   return row;
 }
 
-async function auditClientChange(
-  c: Context<AppEnv>,
+function mutationGuard(
+  actor: AdminActor,
+  clientId: string,
+  client: ManagedClientRow,
+): ManagedClientGuard {
+  return {
+    clientId,
+    clientRowId: client.id,
+    // Developers must still own the exact row when the batch executes.
+    // Admins may manage ownership changes, but never a replacement row.
+    ...(managesAllClients(actor)
+      ? {}
+      : { expectedOwnerUserId: client.ownerUserId ?? actor.userId }),
+  };
+}
+
+function clientAuditEvent(
   eventType: string,
   clientId: string,
   adminUserId: string,
-): Promise<void> {
-  try {
-    await recordAudit(
-      c.env,
-      {
-        eventType,
-        outcome: "success",
-        clientId,
-        subjectId: adminUserId,
-        actorUserId: adminUserId,
-      },
-      c.executionCtx,
-    );
-  } catch (error) {
-    console.error(
-      JSON.stringify({
-        event: "oauth_client_audit_failed",
-        eventType,
-        clientId,
-        error: error instanceof Error ? error.name : "UnknownError",
-      }),
-    );
-  }
+): SecurityEvent {
+  return createAuditEvent({
+    eventType,
+    outcome: "success",
+    clientId,
+    subjectId: adminUserId,
+    actorUserId: adminUserId,
+  });
 }
 
 export const adminClientRoutes = new Hono<AppEnv>();
@@ -323,8 +376,97 @@ adminClientRoutes.get("/", async (c) => {
   return c.json({ clients: result.results.map(clientView) });
 });
 
+adminClientRoutes.post("/provision-mail-introspector", async (c) => {
+  const gate = await requireAdminPermission(c, "clients.manage_all", {
+    fresh: true,
+  });
+  if (!gate.ok) return gate.response;
+
+  const existing = await c.env.PG72_ID_DB.prepare(
+    "SELECT clientId FROM oauthClient WHERE clientId = ? LIMIT 1",
+  )
+    .bind(MAIL_INTROSPECTION_CLIENT_ID)
+    .first();
+  if (existing) {
+    return c.json({ error: "client_exists" }, 409);
+  }
+
+  const clientSecretSuffix = generateClientSecretSuffix();
+  const storedClientSecret = await hashClientSecretSuffix(clientSecretSuffix);
+  const now = new Date().toISOString();
+  const metadata = {
+    [DEVELOPER_NAME_METADATA_KEY]: "PG72 Mail Infrastructure",
+    introspectionTargetClientId: WEBMAIL_CLIENT_ID,
+    purpose: "mail-token-introspection",
+  };
+  const auditEvent = clientAuditEvent(
+    "oauth_client.created",
+    MAIL_INTROSPECTION_CLIENT_ID,
+    gate.actor.userId,
+  );
+
+  try {
+    await c.env.PG72_ID_DB.batch([
+      c.env.PG72_ID_DB.prepare(
+        `INSERT INTO oauthClient (
+          id, clientId, clientSecret, disabled, skipConsent, enableEndSession,
+          subjectType, scopes, createdAt, updatedAt, name, redirectUris,
+          postLogoutRedirectUris, tokenEndpointAuthMethod, grantTypes,
+          responseTypes, public, type, requirePKCE, ownerUserId, metadata
+        ) VALUES (?, ?, ?, 0, 0, 0, 'public', '[]', ?, ?, ?, '[]', NULL,
+                  'client_secret_post', ?, '[]', 0, 'service', 1, ?, ?)`,
+      ).bind(
+          crypto.randomUUID(),
+          MAIL_INTROSPECTION_CLIENT_ID,
+          storedClientSecret,
+          now,
+          now,
+          "PGID Mail Token Introspection",
+          JSON.stringify([INTROSPECTION_ONLY_GRANT]),
+          null,
+          JSON.stringify(metadata),
+        ),
+      auditInsertStatement(c.env, auditEvent),
+    ]);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.includes("UNIQUE constraint failed")
+    ) {
+      return c.json({ error: "client_exists" }, 409);
+    }
+    throw error;
+  }
+
+  await enqueueSecurityEvent(c.env, auditEvent, c.executionCtx);
+
+  return c.json(
+    {
+      client: {
+        clientId: MAIL_INTROSPECTION_CLIENT_ID,
+        name: "PGID Mail Token Introspection",
+        disabled: false,
+        public: false,
+        scopes: [],
+        redirectUris: [],
+        postLogoutRedirectUris: [],
+        grantTypes: [INTROSPECTION_ONLY_GRANT],
+        tokenEndpointAuthMethod: "client_secret_post",
+        hasSecret: true,
+        trusted: false,
+        ownerUserId: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+      // The plaintext secret is returned exactly once and never stored.
+      clientSecret: `${CLIENT_SECRET_PREFIX}${clientSecretSuffix}`,
+    },
+    201,
+  );
+});
+
 adminClientRoutes.post("/", async (c) => {
-  const gate = await requireAdminPermission(c, "clients.manage");
+  const gate = await requireAdminPermission(c, "clients.manage", { fresh: true });
   if (!gate.ok) return gate.response;
 
   const config = readRuntimeConfig(c.env);
@@ -373,6 +515,15 @@ adminClientRoutes.post("/", async (c) => {
   }
   if (TRUSTED_CLIENT_IDS.has(clientId)) {
     return c.json({ error: "trusted_client_locked" }, 409);
+  }
+  if (clientId === MAIL_INTROSPECTION_CLIENT_ID) {
+    return c.json({ error: "system_client_requires_provisioning" }, 409);
+  }
+  if (
+    SYSTEM_RESERVED_CLIENT_IDS.has(clientId) &&
+    !managesAllClients(gate.actor)
+  ) {
+    return c.json({ error: "reserved_client_id" }, 403);
   }
 
   if (
@@ -474,41 +625,50 @@ adminClientRoutes.post("/", async (c) => {
     ? await hashClientSecretSuffix(clientSecretSuffix)
     : null;
   const now = new Date().toISOString();
+  const ownerUserId = SYSTEM_RESERVED_CLIENT_IDS.has(clientId)
+    ? null
+    : gate.actor.userId;
+  const auditEvent = clientAuditEvent(
+    "oauth_client.created",
+    clientId,
+    gate.actor.userId,
+  );
 
   try {
-    await c.env.PG72_ID_DB.prepare(
-      `INSERT INTO oauthClient (
-        id, clientId, clientSecret, disabled, skipConsent, enableEndSession,
-        subjectType, scopes, createdAt, updatedAt, name, uri, redirectUris,
-        postLogoutRedirectUris, tokenEndpointAuthMethod, grantTypes,
-        responseTypes, public, type, requirePKCE, ownerUserId, tos, policy,
-        metadata
-      ) VALUES (?, ?, ?, 0, 0, ?, 'public', ?, ?, ?, ?, ?, ?, ?, ?, ?, '["code"]', ?, ?, 1, ?, ?, ?, ?)`,
-    )
-      .bind(
-        crypto.randomUUID(),
-        clientId,
-        storedClientSecret,
-        enableEndSession ? 1 : 0,
-        JSON.stringify(scopes),
-        now,
-        now,
-        name,
-        uri,
-        JSON.stringify(redirectUris),
-        postLogoutRedirectUris.length > 0
-          ? JSON.stringify(postLogoutRedirectUris)
-          : null,
-        tokenEndpointAuthMethod,
-        JSON.stringify(grantTypes),
-        isPublic ? 1 : 0,
-        isPublic ? null : "web",
-        gate.actor.userId,
-        termsOfService.url,
-        privacyPolicy.url,
-        JSON.stringify({ [DEVELOPER_NAME_METADATA_KEY]: developerName }),
-      )
-      .run();
+    await c.env.PG72_ID_DB.batch([
+      c.env.PG72_ID_DB.prepare(
+        `INSERT INTO oauthClient (
+          id, clientId, clientSecret, disabled, skipConsent, enableEndSession,
+          subjectType, scopes, createdAt, updatedAt, name, uri, redirectUris,
+          postLogoutRedirectUris, tokenEndpointAuthMethod, grantTypes,
+          responseTypes, public, type, requirePKCE, ownerUserId, tos, policy,
+          metadata
+        ) VALUES (?, ?, ?, 0, 0, ?, 'public', ?, ?, ?, ?, ?, ?, ?, ?, ?, '["code"]', ?, ?, 1, ?, ?, ?, ?)`,
+      ).bind(
+          crypto.randomUUID(),
+          clientId,
+          storedClientSecret,
+          enableEndSession ? 1 : 0,
+          JSON.stringify(scopes),
+          now,
+          now,
+          name,
+          uri,
+          JSON.stringify(redirectUris),
+          postLogoutRedirectUris.length > 0
+            ? JSON.stringify(postLogoutRedirectUris)
+            : null,
+          tokenEndpointAuthMethod,
+          JSON.stringify(grantTypes),
+          isPublic ? 1 : 0,
+          isPublic ? null : "web",
+          ownerUserId,
+          termsOfService.url,
+          privacyPolicy.url,
+          JSON.stringify({ [DEVELOPER_NAME_METADATA_KEY]: developerName }),
+        ),
+      auditInsertStatement(c.env, auditEvent),
+    ]);
   } catch (error) {
     if (
       error instanceof Error &&
@@ -519,12 +679,7 @@ adminClientRoutes.post("/", async (c) => {
     throw error;
   }
 
-  await auditClientChange(
-    c,
-    "oauth_client.created",
-    clientId,
-    gate.actor.userId,
-  );
+  await enqueueSecurityEvent(c.env, auditEvent, c.executionCtx);
 
   return c.json(
     {
@@ -544,7 +699,7 @@ adminClientRoutes.post("/", async (c) => {
         tokenEndpointAuthMethod,
         hasSecret: !isPublic,
         trusted: false,
-        ownerUserId: gate.actor.userId,
+        ownerUserId,
         createdAt: now,
         updatedAt: now,
       },
@@ -558,7 +713,7 @@ adminClientRoutes.post("/", async (c) => {
 });
 
 adminClientRoutes.patch("/:clientId", async (c) => {
-  const gate = await requireAdminPermission(c, "clients.manage");
+  const gate = await requireAdminPermission(c, "clients.manage", { fresh: true });
   if (!gate.ok) return gate.response;
 
   const clientId = c.req.param("clientId");
@@ -570,36 +725,21 @@ adminClientRoutes.patch("/:clientId", async (c) => {
   }
   // Same ownership rule as every other mutation: developers may only edit
   // the trust metadata of clients they own (404 keeps client IDs private).
-  if (!(await loadManagedClient(c, gate.actor, clientId))) {
+  const managedClient = await loadManagedClient(c, gate.actor, clientId);
+  if (!managedClient) {
     return c.json({ error: "client_not_found" }, 404);
   }
+  const guard = mutationGuard(gate.actor, clientId, managedClient);
 
   const input = await readJson<ClientTrustInput>(c.req.raw);
   if (!input) {
     return c.json({ error: "invalid_request" }, 400);
   }
 
-  const row = await c.env.PG72_ID_DB.prepare(
-    `SELECT clientId, tos, policy, metadata
-       FROM oauthClient
-      WHERE clientId = ?
-      LIMIT 1`,
-  )
-    .bind(clientId)
-    .first<{
-      clientId: string;
-      tos: string | null;
-      policy: string | null;
-      metadata: string | null;
-    }>();
-  if (!row) {
-    return c.json({ error: "client_not_found" }, 404);
-  }
-
   // Preserve unrelated metadata keys (e.g. the diary client stores its
   // backchannel_logout_uri here); only developer_name is managed by this
   // endpoint.
-  const metadata = parseClientMetadataRecord(row.metadata);
+  const metadata = parseClientMetadataRecord(managedClient.metadata);
   let developerName = developerNameFromMetadata(metadata);
   if (input.developerName !== undefined) {
     if (!validDeveloperName(input.developerName)) {
@@ -614,7 +754,7 @@ adminClientRoutes.patch("/:clientId", async (c) => {
   }
   metadata[DEVELOPER_NAME_METADATA_KEY] = developerName;
 
-  let termsOfServiceUrl = trustUrlOrNull(row.tos);
+  let termsOfServiceUrl = trustUrlOrNull(managedClient.tos);
   if (input.termsOfServiceUrl !== undefined) {
     const parsed = optionalTrustUrl(input.termsOfServiceUrl);
     if (!parsed.ok) {
@@ -623,7 +763,7 @@ adminClientRoutes.patch("/:clientId", async (c) => {
     termsOfServiceUrl = parsed.url;
   }
 
-  let privacyPolicyUrl = trustUrlOrNull(row.policy);
+  let privacyPolicyUrl = trustUrlOrNull(managedClient.policy);
   if (input.privacyPolicyUrl !== undefined) {
     const parsed = optionalTrustUrl(input.privacyPolicyUrl);
     if (!parsed.ok) {
@@ -633,29 +773,34 @@ adminClientRoutes.patch("/:clientId", async (c) => {
   }
 
   const now = new Date().toISOString();
-  const update = await c.env.PG72_ID_DB.prepare(
+  const update = c.env.PG72_ID_DB.prepare(
     `UPDATE oauthClient
         SET metadata = ?, tos = ?, policy = ?, updatedAt = ?
-      WHERE clientId = ?`,
+      WHERE ${MANAGED_CLIENT_PREDICATE}`,
   )
     .bind(
       JSON.stringify(metadata),
       termsOfServiceUrl,
       privacyPolicyUrl,
       now,
-      clientId,
-    )
-    .run();
-  if (update.meta.changes !== 1) {
-    return c.json({ error: "client_not_found" }, 404);
-  }
-
-  await auditClientChange(
-    c,
+      ...managedClientGuardBindings(guard),
+    );
+  const auditEvent = clientAuditEvent(
     "oauth_client.trust_updated",
     clientId,
     gate.actor.userId,
   );
+  const results = await c.env.PG72_ID_DB.batch([
+    update,
+    auditInsertForExistingClientStatement(c.env, auditEvent, guard),
+  ]);
+  if (
+    results[0]?.meta.changes !== 1 ||
+    results[1]?.meta.changes !== 1
+  ) {
+    return c.json({ error: "client_not_found" }, 404);
+  }
+  await enqueueSecurityEvent(c.env, auditEvent, c.executionCtx);
 
   return c.json({
     clientId,
@@ -667,7 +812,7 @@ adminClientRoutes.patch("/:clientId", async (c) => {
 });
 
 adminClientRoutes.post("/:clientId/rotate-secret", async (c) => {
-  const gate = await requireAdminPermission(c, "clients.manage");
+  const gate = await requireAdminPermission(c, "clients.manage", { fresh: true });
   if (!gate.ok) return gate.response;
 
   const clientId = c.req.param("clientId");
@@ -677,43 +822,40 @@ adminClientRoutes.post("/:clientId/rotate-secret", async (c) => {
   if (TRUSTED_CLIENT_IDS.has(clientId)) {
     return c.json({ error: "trusted_client_locked" }, 409);
   }
-  if (!(await loadManagedClient(c, gate.actor, clientId))) {
+  const managedClient = await loadManagedClient(c, gate.actor, clientId);
+  if (!managedClient) {
     return c.json({ error: "client_not_found" }, 404);
   }
-
-  const client = await c.env.PG72_ID_DB.prepare(
-    `SELECT clientId, public, clientSecret
-       FROM oauthClient
-      WHERE clientId = ?
-      LIMIT 1`,
-  )
-    .bind(clientId)
-    .first<{ clientId: string; public: number | null; clientSecret: string | null }>();
-  if (!client) {
-    return c.json({ error: "client_not_found" }, 404);
-  }
-  if (client.public === 1 || !client.clientSecret) {
+  const guard = mutationGuard(gate.actor, clientId, managedClient);
+  if (managedClient.public === 1 || !managedClient.clientSecret) {
     return c.json({ error: "public_client_has_no_secret" }, 400);
   }
 
   const clientSecretSuffix = generateClientSecretSuffix();
   const storedClientSecret = await hashClientSecretSuffix(clientSecretSuffix);
   const now = new Date().toISOString();
-  const update = await c.env.PG72_ID_DB.prepare(
-    "UPDATE oauthClient SET clientSecret = ?, updatedAt = ? WHERE clientId = ?",
+  const update = c.env.PG72_ID_DB.prepare(
+    `UPDATE oauthClient
+        SET clientSecret = ?, updatedAt = ?
+      WHERE ${MANAGED_CLIENT_PREDICATE}`,
   )
-    .bind(storedClientSecret, now, clientId)
-    .run();
-  if (update.meta.changes !== 1) {
-    return c.json({ error: "client_not_found" }, 404);
-  }
-
-  await auditClientChange(
-    c,
+    .bind(storedClientSecret, now, ...managedClientGuardBindings(guard));
+  const auditEvent = clientAuditEvent(
     "oauth_client.secret_rotated",
     clientId,
     gate.actor.userId,
   );
+  const results = await c.env.PG72_ID_DB.batch([
+    update,
+    auditInsertForExistingClientStatement(c.env, auditEvent, guard),
+  ]);
+  if (
+    results[0]?.meta.changes !== 1 ||
+    results[1]?.meta.changes !== 1
+  ) {
+    return c.json({ error: "client_not_found" }, 404);
+  }
+  await enqueueSecurityEvent(c.env, auditEvent, c.executionCtx);
 
   return c.json({
     clientId,
@@ -724,7 +866,7 @@ adminClientRoutes.post("/:clientId/rotate-secret", async (c) => {
 });
 
 adminClientRoutes.post("/:clientId/status", async (c) => {
-  const gate = await requireAdminPermission(c, "clients.manage");
+  const gate = await requireAdminPermission(c, "clients.manage", { fresh: true });
   if (!gate.ok) return gate.response;
 
   const clientId = c.req.param("clientId");
@@ -735,15 +877,23 @@ adminClientRoutes.post("/:clientId/status", async (c) => {
   if (TRUSTED_CLIENT_IDS.has(clientId)) {
     return c.json({ error: "trusted_client_locked" }, 409);
   }
-  if (!(await loadManagedClient(c, gate.actor, clientId))) {
+  const managedClient = await loadManagedClient(c, gate.actor, clientId);
+  if (!managedClient) {
     return c.json({ error: "client_not_found" }, 404);
   }
+  const guard = mutationGuard(gate.actor, clientId, managedClient);
 
   const now = new Date().toISOString();
   const statements = [
     c.env.PG72_ID_DB.prepare(
-      "UPDATE oauthClient SET disabled = ?, updatedAt = ? WHERE clientId = ?",
-    ).bind(input.disabled ? 1 : 0, now, clientId),
+      `UPDATE oauthClient
+          SET disabled = ?, updatedAt = ?
+        WHERE ${MANAGED_CLIENT_PREDICATE}`,
+    ).bind(
+      input.disabled ? 1 : 0,
+      now,
+      ...managedClientGuardBindings(guard),
+    ),
   ];
   if (input.disabled) {
     // Disabling immediately cuts off issued credentials: access tokens are
@@ -751,32 +901,53 @@ adminClientRoutes.post("/:clientId/status", async (c) => {
     // are purged. Consents are kept so re-enabling does not force re-consent.
     statements.push(
       c.env.PG72_ID_DB.prepare(
-        "DELETE FROM oauthAccessToken WHERE clientId = ?",
-      ).bind(clientId),
+        `DELETE FROM oauthAccessToken
+          WHERE clientId = ?
+            AND EXISTS (
+              SELECT 1
+                FROM oauthClient
+               WHERE ${MANAGED_CLIENT_PREDICATE}
+            )`,
+      ).bind(clientId, ...managedClientGuardBindings(guard)),
       c.env.PG72_ID_DB.prepare(
-        "UPDATE oauthRefreshToken SET revoked = ? WHERE clientId = ? AND revoked IS NULL",
-      ).bind(now, clientId),
-      pendingAuthorizationCodeCleanup(c.env, clientId),
+        `UPDATE oauthRefreshToken
+            SET revoked = ?
+          WHERE clientId = ?
+            AND revoked IS NULL
+            AND EXISTS (
+              SELECT 1
+                FROM oauthClient
+               WHERE ${MANAGED_CLIENT_PREDICATE}
+            )`,
+      ).bind(now, clientId, ...managedClientGuardBindings(guard)),
+      pendingAuthorizationCodeCleanup(c.env, guard),
     );
   }
-
-  const results = await c.env.PG72_ID_DB.batch(statements);
-  if (results[0]?.meta.changes !== 1) {
-    return c.json({ error: "client_not_found" }, 404);
-  }
-
-  await auditClientChange(
-    c,
+  const auditEvent = clientAuditEvent(
     input.disabled ? "oauth_client.disabled" : "oauth_client.enabled",
     clientId,
     gate.actor.userId,
   );
+  const auditStatementIndex = statements.length;
+  statements.push(
+    auditInsertForExistingClientStatement(c.env, auditEvent, guard),
+  );
+
+  const results = await c.env.PG72_ID_DB.batch(statements);
+  if (
+    results[0]?.meta.changes !== 1 ||
+    results[auditStatementIndex]?.meta.changes !== 1
+  ) {
+    return c.json({ error: "client_not_found" }, 404);
+  }
+
+  await enqueueSecurityEvent(c.env, auditEvent, c.executionCtx);
 
   return c.json({ clientId, disabled: input.disabled, at: now });
 });
 
 adminClientRoutes.delete("/:clientId", async (c) => {
-  const gate = await requireAdminPermission(c, "clients.manage");
+  const gate = await requireAdminPermission(c, "clients.manage", { fresh: true });
   if (!gate.ok) return gate.response;
 
   const clientId = c.req.param("clientId");
@@ -786,31 +957,37 @@ adminClientRoutes.delete("/:clientId", async (c) => {
   if (TRUSTED_CLIENT_IDS.has(clientId)) {
     return c.json({ error: "trusted_client_locked" }, 409);
   }
-  if (!(await loadManagedClient(c, gate.actor, clientId))) {
+  const managedClient = await loadManagedClient(c, gate.actor, clientId);
+  if (!managedClient) {
     return c.json({ error: "client_not_found" }, 404);
   }
+  const guard = mutationGuard(gate.actor, clientId, managedClient);
 
   // Deleting the client cascades to oauthAccessToken, oauthRefreshToken and
   // oauthConsent via foreign keys; pending authorization codes live in the
   // verification table and are purged explicitly.
-  const results = await c.env.PG72_ID_DB.batch([
-    pendingAuthorizationCodeCleanup(c.env, clientId),
-    c.env.PG72_ID_DB.prepare(
-      "DELETE FROM oauthClient WHERE clientId = ?",
-    ).bind(clientId),
-  ]);
-  // meta.changes includes rows removed by ON DELETE CASCADE, so only a zero
-  // count means the client did not exist.
-  if (!results[1]?.meta.changes) {
-    return c.json({ error: "client_not_found" }, 404);
-  }
-
-  await auditClientChange(
-    c,
+  const auditEvent = clientAuditEvent(
     "oauth_client.deleted",
     clientId,
     gate.actor.userId,
   );
+  const results = await c.env.PG72_ID_DB.batch([
+    pendingAuthorizationCodeCleanup(c.env, guard),
+    auditInsertForExistingClientStatement(c.env, auditEvent, guard),
+    c.env.PG72_ID_DB.prepare(
+      `DELETE FROM oauthClient WHERE ${MANAGED_CLIENT_PREDICATE}`,
+    ).bind(...managedClientGuardBindings(guard)),
+  ]);
+  // meta.changes includes rows removed by ON DELETE CASCADE, so only a zero
+  // count means the client did not exist.
+  if (
+    results[1]?.meta.changes !== 1 ||
+    !results[2]?.meta.changes
+  ) {
+    return c.json({ error: "client_not_found" }, 404);
+  }
+
+  await enqueueSecurityEvent(c.env, auditEvent, c.executionCtx);
 
   return c.json({ deleted: true, clientId });
 });

@@ -6,6 +6,17 @@ export type RegistrationMode = "invite" | "public";
  * the SHA-256 (base64url, unpadded) hash of the suffix.
  */
 export const CLIENT_SECRET_PREFIX = "pg72_cs_";
+export const FRESH_SESSION_MAX_AGE_MS = 10 * 60 * 1000;
+
+/** Fixed clients for the Mail Path A token-introspection trust relationship. */
+export const MAIL_INTROSPECTION_CLIENT_ID = "pgid-mail-introspect";
+export const WEBMAIL_CLIENT_ID = "pg72-webmail";
+
+/** Client IDs that developers may not claim through the generic client API. */
+export const SYSTEM_RESERVED_CLIENT_IDS: ReadonlySet<string> = new Set([
+  MAIL_INTROSPECTION_CLIENT_ID,
+  WEBMAIL_CLIENT_ID,
+]);
 
 /**
  * Clients cached in-memory by the OAuth provider. Their rows must not be

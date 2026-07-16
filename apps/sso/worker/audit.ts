@@ -21,7 +21,7 @@ export interface WaitUntilContext {
   waitUntil(promise: Promise<unknown>): void;
 }
 
-interface RecordAuditInput {
+export interface RecordAuditInput {
   eventType: string;
   outcome: AuditOutcome;
   actorUserId?: string;
@@ -30,12 +30,15 @@ interface RecordAuditInput {
   metadata?: AuditMetadata;
 }
 
-export async function recordAudit(
-  env: Env,
-  input: RecordAuditInput,
-  executionCtx?: WaitUntilContext,
-): Promise<void> {
-  const event: SecurityEvent = {
+export interface ExistingClientAuditGuard {
+  clientId: string;
+  clientRowId: string;
+  /** Omitted for actors with clients.manage_all. */
+  expectedOwnerUserId?: string;
+}
+
+export function createAuditEvent(input: RecordAuditInput): SecurityEvent {
+  return {
     eventId: crypto.randomUUID(),
     eventType: input.eventType,
     occurredAt: new Date().toISOString(),
@@ -45,31 +48,110 @@ export async function recordAudit(
     subjectId: input.subjectId,
     metadata: input.metadata,
   };
+}
 
-  await env.PG72_ID_DB.prepare(
+export function auditInsertStatement(
+  env: Env,
+  event: SecurityEvent,
+): D1PreparedStatement {
+  return env.PG72_ID_DB.prepare(
     `INSERT INTO audit_event
       (id, event_type, actor_user_id, client_id, subject_id, outcome,
        metadata_json, occurred_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(
-      event.eventId,
-      event.eventType,
-      event.actorUserId ?? null,
-      event.clientId ?? null,
-      event.subjectId ?? null,
-      event.outcome,
-      event.metadata ? JSON.stringify(event.metadata) : null,
-      event.occurredAt,
-    )
-    .run();
+  ).bind(
+    event.eventId,
+    event.eventType,
+    event.actorUserId ?? null,
+    event.clientId ?? null,
+    event.subjectId ?? null,
+    event.outcome,
+    event.metadata ? JSON.stringify(event.metadata) : null,
+    event.occurredAt,
+  );
+}
 
-  const queued = env.SECURITY_EVENTS.send(event);
-  if (executionCtx) {
+export function auditInsertForExistingClientStatement(
+  env: Env,
+  event: SecurityEvent,
+  guard: ExistingClientAuditGuard,
+): D1PreparedStatement {
+  return env.PG72_ID_DB.prepare(
+    `INSERT INTO audit_event
+      (id, event_type, actor_user_id, client_id, subject_id, outcome,
+       metadata_json, occurred_at)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (
+        SELECT 1
+          FROM oauthClient
+         WHERE id = ?
+           AND clientId = ?
+           AND (? IS NULL OR ownerUserId = ?)
+      )`,
+  ).bind(
+    event.eventId,
+    event.eventType,
+    event.actorUserId ?? null,
+    event.clientId ?? null,
+    event.subjectId ?? null,
+    event.outcome,
+    event.metadata ? JSON.stringify(event.metadata) : null,
+    event.occurredAt,
+    guard.clientRowId,
+    guard.clientId,
+    guard.expectedOwnerUserId ?? null,
+    guard.expectedOwnerUserId ?? null,
+  );
+}
+
+function logSecurityEventEnqueueFailure(
+  event: SecurityEvent,
+  stage: "queue_send" | "wait_until",
+  error: unknown,
+): void {
+  console.error(
+    JSON.stringify({
+      event: "security_event_enqueue_failed",
+      eventId: event.eventId,
+      eventType: event.eventType,
+      stage,
+      error: error instanceof Error ? error.name : "UnknownError",
+    }),
+  );
+}
+
+export async function enqueueSecurityEvent(
+  env: Env,
+  event: SecurityEvent,
+  executionCtx?: WaitUntilContext,
+): Promise<void> {
+  if (!executionCtx) {
+    await env.SECURITY_EVENTS.send(event);
+    return;
+  }
+
+  const queued = Promise.resolve()
+    .then(() => env.SECURITY_EVENTS.send(event))
+    .catch((error: unknown) => {
+      logSecurityEventEnqueueFailure(event, "queue_send", error);
+    });
+
+  try {
     executionCtx.waitUntil(queued);
-  } else {
+  } catch (error) {
+    logSecurityEventEnqueueFailure(event, "wait_until", error);
     await queued;
   }
+}
+
+export async function recordAudit(
+  env: Env,
+  input: RecordAuditInput,
+  executionCtx?: WaitUntilContext,
+): Promise<void> {
+  const event = createAuditEvent(input);
+  await auditInsertStatement(env, event).run();
+  await enqueueSecurityEvent(env, event, executionCtx);
 }
 
 export async function consumeSecurityEvents(

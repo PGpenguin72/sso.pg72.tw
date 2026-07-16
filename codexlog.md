@@ -142,3 +142,15 @@
   there is no valid timestamp, no success audit, and no mutation unlock.
 - The focused real-assertion Passkey suite passed 17/17 after this change. The
   full final gate is still pending.
+
+## 2026-07-16 17:31 CST - Test-RP type generation made hermetic
+
+- The optional test-RP `check` initially lacked its ignored generated Env
+  declarations in the clean worktree. Running the existing `cf-typegen` then
+  exposed Wrangler's strict literal-var inference: `ENVIRONMENT` became only
+  `"development"`, making the runtime production guard a TypeScript error.
+- Updated the test-RP type-generation script to use
+  `wrangler types --strict-vars false`, matching the established SSO script.
+  The generated file remains ignored.
+- After regeneration, test-RP typecheck and Wrangler dry-run build passed. The
+  required test-RP protocol suite had already passed 4/4.

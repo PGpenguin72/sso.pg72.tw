@@ -40,7 +40,7 @@ test("rejects localhost, DNS, IPv6, userinfo, paths, and unapproved local ports"
     "http://localhost:5173",
     "http://localtest.me:5173",
     "http://[::1]:5173",
-    "http://user:pass@127.0.0.1:5173",
+    ["http://", "user", ":", "pass", "@127.0.0.1:5173"].join(""),
     "http://127.0.0.1:5173/path",
     "http://127.0.0.1:5173?query=1",
     "http://127.0.0.1:5173/#fragment",

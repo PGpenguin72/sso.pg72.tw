@@ -40,7 +40,7 @@ invite-only，尚未部署這個 restricted path。
 * 查看每個應用拿到哪些授權。
 * **撤銷授權**：撤銷後，該應用需要你重新授權才能再次存取；它先前的授權碼、access token 與 refresh token 會一併失效。
 
-> 注意：撤銷授權會阻止該應用未來取得新 token，但**不一定會立即清掉該應用自己的登入 cookie**。跨服務的即時登出（back-channel logout）仍在逐步上線中。若要徹底登出某服務，也請到該服務登出。
+> 注意：撤銷授權會阻止該應用未來取得新 token，但**不一定會立即清掉該應用自己的登入 cookie**。PGID 的跨服務登出 delivery 已在 local source 完成，但 production migration、Queue 與各服務 receiver 尚未上線；目前若要徹底登出某服務，也請到該服務登出。
 
 ## 安全紀錄
 

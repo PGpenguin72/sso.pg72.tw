@@ -14,6 +14,7 @@
 * [串接總覽](developers/overview.md)
 * [建立 OAuth Client](developers/register-client.md)
 * [跑通 OIDC 登入流程](developers/oidc-flow.md)
+* [實作 Back-Channel Logout](developers/backchannel-logout.md)
 * [Consent 與 Scopes](developers/consent-and-scopes.md)
 * [Mail Token Introspection](developers/mail-introspection.md)
 * [社群登入說明](developers/social-login.md)

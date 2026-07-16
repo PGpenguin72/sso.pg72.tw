@@ -7,7 +7,7 @@
 
 ## 0. Phase 0 實作狀態
 
-截至 2026-07-17，repository source 包含 SSO Worker、React 帳號中心、D1 migrations `0001`–`0017`、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理、ID-token central `sid` contract、Mail Path A introspection prerequisite、Passkey client-mutation step-up、Telegram verified-email enrollment boundary、全域 provider-identity 唯一 ownership、Turnstile-backed public-registration intent、版本化法律同意紀錄、公開新帳號 restricted access 與 abuse-response runbook，以及使用 `oauth4webapi` 的獨立 test RP。每個 release candidate 都必須重跑本 repository 的 typecheck、workerd suite、production build 與 test RP protocol gate；本地通過不得寫成遠端已部署。
+截至 2026-07-17，repository source 包含 SSO Worker、React 帳號中心、D1 migrations `0001`–`0018`、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理、ID-token central `sid` contract、durable global logout ledger/outbox/Queue delivery、Mail Path A introspection prerequisite、Passkey client-mutation step-up、Telegram verified-email enrollment boundary、全域 provider-identity 唯一 ownership、Turnstile-backed public-registration intent、版本化法律同意紀錄、公開新帳號 restricted access 與 abuse-response runbook，以及使用 `oauth4webapi` 的獨立 test RP。每個 release candidate 都必須重跑本 repository 的 typecheck、workerd suite、production build 與 test RP protocol gate；本地通過不得寫成遠端已部署。
 
 `0013_confidential_client_secret_post.sql` 將既有 confidential client metadata 正規化為 `client_secret_post`；它不旋轉 secret、不改 grant/token。`0014_passkey_step_up.sql` 新增 session step-up timestamp 與短效 challenge table。兩者都不代表 production 已套用；現有 deployment record 仍只確認 production D1 至 `0012`，必須由 owner 在維護窗口依序確認與執行。
 
@@ -16,6 +16,8 @@
 `0016_public_registration_intent.sql` 新增短效、一次性 public-registration intent、user 初次法律同意欄位與不可變 history。新增欄位已納入 Better Auth user schema，因此任何含此變更的 Worker 都必須在部署前先套用 `0016`；migration 可在 `invite` 模式下先套用，且本身不會開啟公開註冊。
 
 `0017_restricted_account_access.sql` 新增獨立於 lifecycle status 的 `user.accessLevel`、既有資料 `standard` default/backfill，以及 restricted role/provider-link/client-owner D1 guards。任何含 restricted request guard 的 Worker 都必須在部署前先套用 `0017`；migration 可在 `invite` 模式下先套用且不會改變現有 production 註冊模式。Production 尚未套用 `0017` 或部署此 Worker。
+
+`0018_global_logout.sql` 新增 client back-channel URI、實際 `(sid, client_id)` visit ledger、durable logout delivery/attempt evidence 與 access-token visit trigger；舊而未被 runtime 使用的 delivery table 會保留為 `logout_delivery_legacy_0018`。任何含 global-logout Worker 的環境都必須先套用 `0018`，並 provision 專用 logout Queue/DLQ。Production 尚未套用 `0018`、部署此 Worker、provision 專用 Queue，或完成任何 production RP receiver 驗收。
 
 ### 0.1 Provider Identity Migration Preflight
 
@@ -28,9 +30,9 @@ GROUP BY providerId, accountId
 HAVING COUNT(*) > 1;
 ```
 
-必須回傳零列。若有任何 duplicate，停止 rollout，獨立審查受影響的使用者與 audit evidence；不得自動刪除、重新指派或合併 identity owner。之後先建立 private backup / Time Travel checkpoint，於隔離 Preview 驗證後才依序套用 `0013`、`0014`、`0015`、`0016`、`0017`。
+必須回傳零列。若有任何 duplicate，停止 rollout，獨立審查受影響的使用者與 audit evidence；不得自動刪除、重新指派或合併 identity owner。之後先建立 private backup / Time Travel checkpoint，於隔離 Preview 驗證後才依序套用 `0013`、`0014`、`0015`、`0016`、`0017`、`0018`。
 
-既有公開部署紀錄顯示 `pg72-id` 已部署至 `https://sso.pg72.tw`，production D1 已套用至 `0012`，Copy 與 Link 也已切換 production traffic 至 PGID。這些紀錄建立了「已部署 invite beta」現況，但仍不是完整 Production GO：visited-client ledger、back-channel logout、DLQ 告警、完整復原演練與其他 §9.2 gate 尚未完成。任何 maintenance operation 前都必須由授權 operator 重新驗證實際遠端版本與 migration 狀態。
+既有公開部署紀錄顯示 `pg72-id` 已部署至 `https://sso.pg72.tw`，production D1 已套用至 `0012`，Copy 與 Link 也已切換 production traffic 至 PGID。這些紀錄建立了「已部署 invite beta」現況，但仍不是完整 Production GO：global logout ledger/outbox/delivery 只在 local source 完成，Preview/production migration、專用 Queue/DLQ、各 RP receiver、外部告警、完整復原演練與其他 §9.2 gate 尚未完成。任何 maintenance operation 前都必須由授權 operator 重新驗證實際遠端版本與 migration 狀態。
 
 Preview 必須使用獨立 Cloudflare account、D1、queue、secret、domain、Google callback 與 Rate Limiting namespace，不得以 production D1 或 production secret 代替 Preview。
 
@@ -94,8 +96,8 @@ PG72 目前有多個需要登入的網站，每個服務各自使用 Google OAut
 
 | 服務 | Ownership | 現有狀況 | 預定整合方式 | 狀態 |
 | --- | --- | --- | --- | --- |
-| `copy.pg72.tw` | 第一方 | Next.js / NextAuth、6 位數訪客碼、D1 | PGID OIDC client；訪客碼保持獨立 | Production live；登出實機確認、中央 `sid`/back-channel logout 待完成 |
-| `link.pg72.tw` | 第一方 | Cloudflare Pages / D1，具有 user/admin | BFF OIDC client，保留應用內角色 | Production live；中央 `sid`/back-channel logout 待完成 |
+| `copy.pg72.tw` | 第一方 | Next.js / NextAuth、6 位數訪客碼、D1 | PGID OIDC client；訪客碼保持獨立 | Production live；PGID delivery 只在 local source，Copy receiver/rollout 待完成 |
+| `link.pg72.tw` | 第一方 | Cloudflare Pages / D1，具有 user/admin | BFF OIDC client，保留應用內角色 | Production live；PGID delivery 只在 local source，Link receiver/rollout 待完成 |
 | `status.pg72.tw` | 維護中的 XUGOU fork | Workers / D1 / agent push | OIDC BFF + server-side session；agent auth 分離 | 本機整合與 10 tests 完成；待 Preview D1 |
 | `upload.pg72.tw/admin` | 第一方 | FastAPI / SQLite / streaming upload | Admin 原生 OIDC；upload capability 分離 | 本機整合與 11 tests 完成；待 VPS Preview |
 | `webmail.pg72.tw` | 上游 Roundcube | Cloudflare Access + Webmail/IMAP login | 打包上游 stable release，設定原生 Generic OIDC | 上游 1.8-git 原始碼已檢視 |
@@ -157,9 +159,9 @@ Better Auth 僅作為協議與驗證引擎。PGID 自行實作產品介面、邀
 
 GitHub issue 內的 workaround 不是正式安全保證。任何 workaround 必須以 package patch 固定、附 regression test，並在升級時重新驗證。若 Phase 0 prototype 無法可靠通過以上測試，不在故障基礎上繼續堆功能；改由 VPS 上成熟 IdP/protocol runtime 承擔 Issuer，仍保留 `https://sso.pg72.tw` 與相同 RP contract。
 
-目前 `@better-auth/oauth-provider@1.6.23` 另以 tracked exact-version package patch `patches/@better-auth__oauth-provider@1.6.23.patch` 固定 Mail Path A introspection 行為。Patch 預設仍是 same-client introspection，只提供 opt-in hook 讓 PGID 實作 §10.5 的單一 cross-client 例外；同時修正 `APIError.status` 的 RFC 7662 inactive 判斷、把 `token_type_hint` 維持為 hint 而非限制 lookup，以及分類 token-controlled JOSE/kid failure。這不是可泛用的跨 client 授權開關。
+目前 `@better-auth/oauth-provider@1.6.23` 另以 tracked exact-version package patch `patches/@better-auth__oauth-provider@1.6.23.patch` 固定兩個窄行為。Mail Path A 保持 same-client introspection 預設，只提供 opt-in hook 讓 PGID 實作 §10.5 的單一 cross-client 例外；同時修正 `APIError.status` 的 RFC 7662 inactive 判斷、把 `token_type_hint` 維持為 hint 而非限制 lookup，以及分類 token-controlled JOSE/kid failure。RP-initiated logout 則在 provider 完成 ID token signature/issuer/audience/client/`sid` 驗證後提供 opt-in revoke hook，讓 PGID 在刪除 session 前原子 snapshot visit/outbox；未設定 hook 時保留 upstream 行為。這些都不是可泛用的授權或驗證 bypass。
 
-升級 Better Auth 時不得把 patch 機械套到其他版本，也不得用 `allowUnusedPatches` 隱藏版本不符。只有 pinned stable provider 已提供經審核的等價行為、乾淨 frozen install 能在移除 patch 後通過，且完整 introspection/protocol regression suite 全數通過，才可移除或重作這個 patch；core 與所有 plugins 仍須維持 exact pin 並一起評估 migration/advisory。
+升級 Better Auth 時不得把 patch 機械套到其他版本，也不得用 `allowUnusedPatches` 隱藏版本不符。只有 pinned stable provider 已提供經審核的等價 introspection 與 pre-delete logout hook、乾淨 frozen install 能在移除 patch 後通過，且完整 introspection/end-session/global-logout protocol regression suite 全數通過，才可移除或重作這個 patch；core 與所有 plugins 仍須維持 exact pin 並一起評估 migration/advisory。
 
 ## 6. 高階架構
 
@@ -241,9 +243,11 @@ Queue 用於：
 - Audit archive delivery。
 - 通知與之後可能加入的 Email 工作。
 
-Queue 是 at-least-once delivery。所有 consumer 必須以 `event_id` 或 logout token 的 `jti` 去重，並支援重試。無法成功送達的事件進入 Dead Letter Queue 並產生管理告警。
+Queue 是 at-least-once delivery。所有 consumer 必須以 `event_id` 或 logout token 的 `jti` 去重，並支援重試。無法成功送達的 Queue message 進入對應 Dead Letter Queue；外部告警只有在真的配置、測試並由 operator acknowledgement 後才能宣稱存在。
 
-Queue 不作為撤銷或 audit 真實來源；D1 中的 session/token 狀態與 `audit_event` 才是 source of truth。需要 audit 的 client mutation 必須將狀態變更與 D1 audit insert 放在同一個 batch，成功後才回應；Queue 只在 D1 commit 後作 best-effort security-event fan-out。Queue 在接受事件前失敗可能漏掉 fan-out，目前只有 redacted log，尚無 durable outbox/replayer 或告警補送；補齊這項是 full Production GO 前必須決定的債務。Queue 失敗不得讓已提交的 D1 狀態看似回滾，也不得把未入 D1 的事件視為已稽核。
+Queue 不作為撤銷或 audit 真實來源；D1 中的 session/token 狀態與 `audit_event` 才是 source of truth。Global logout 另以 `logout_delivery` 作 durable delivery source：中央撤銷、audit 與每個 visited RP 的 endpoint snapshot 同一 D1 batch commit，專用 `LOGOUT_DELIVERIES` Queue 只作 accelerator，每分鐘 Cron 會重送 due/expired-lease row。因此 Queue send failure 不會遺失 logout work，也不會讓已提交的中央撤銷看似回滾。
+
+一般 security-event fan-out 仍是不同保證：client mutation 先將狀態與 audit 同批 commit，`SECURITY_EVENTS` Queue 只在 commit 後 best effort 發送。Queue 在接受事件前失敗目前可能漏掉該 fan-out，只有 redacted log，尚無通用 durable outbox/replayer 或告警補送；補齊這項是 full Production GO 前必須決定的債務。不得用 global logout outbox 的可靠性宣稱所有 Queue workload 都已 durable。
 
 ### 7.4 Auth Gateway
 
@@ -337,7 +341,8 @@ access:                  standard <-> restricted
 - [ ] 負載測試、備份還原演練、key rotation 與 Queue retry/DLQ 演練。
 - [x] Local source 的 persistent restricted-account state、request guards、D1 race guards、admin controls 與 workerd regression。
 - [ ] 套用 `0017`、部署 restricted-account Worker 至隔離 Preview，完成獨立 review、race/rollback/ordinary-OIDC smoke，再納入 production rollout；不得因 local gate 通過而宣稱已部署。
-- [ ] Back-channel logout 全面上線與 DLQ 告警。
+- [x] Local source 的 visited-client ledger、durable logout outbox、專用 Queue consumer、Cron replayer、bounded retry、redacted operator replay 與 test-RP receiver/regression。
+- [ ] 套用 `0018`、provision 隔離 logout Queue/DLQ、完成 Preview multi-RP/failure/rollback exercise、部署各 production RP receiver，並實作及測試外部 DLQ/dead-delivery 告警；local source 完成不等於全面上線。
 - [ ] 將 local source 已實作的 Passkey step-up 與 migration `0014` 部署至 production，完成獨立 review 與實機 smoke；10 分鐘 session-age freshness 仍是額外條件，不能替代重新驗證。
 
 ### 9.3 Google
@@ -455,18 +460,20 @@ SSO 無法只靠刪除自己的 cookie 清除所有 RP cookie。因此所有第�
 
 ### 11.2 RP Session Contract
 
-現行 local source 已完成第一步：所有 user ID token 都帶 nonempty central
-`sid`，refresh grant 只接受屬於同一 user 的 live session，test RP 也會拒絕
-缺少或為空的 `sid`。`(sid, client_id)` visit ledger、logout-token delivery 與
-各 production RP receiver 仍是 Phase 2 工作，不能因此宣稱全域登出完成。
+現行 local source 已完成所有 user ID token 的 nonempty central `sid`、refresh
+grant live-session binding、`(sid, client_id)` visit ledger、D1 durable delivery
+outbox/attempt evidence、專用 Queue/DLQ consumer、Cron replayer、operator replay
+API，以及 test RP 的 idempotent receiver。Production 尚未套用 `0018`、provision
+專用 Queue/DLQ 或部署任何經驗收的 RP receiver，外部告警也尚未實作；因此仍
+不能宣稱全域登出已在 production 完成。
 
 - ID token 包含 `sid`。
 - RP 建立本機 session 時保存 `sid` 與 `sub`。
 - SSO 在授權完成時記錄 `(sid, client_id)`，用來識別該 session 存取過的服務。
-- RP 提供已註冊的 `backchannel_logout_uri`。
-- RP 收到 logout token 後，以 `iss`、`aud`、signature、`exp`、`iat`、`events`、`sid/sub` 與 `jti` 驗證。
+- RP 提供管理員明確註冊的精確 `backchannelLogoutUri`；production 必須 HTTPS，不允許 wildcard、fragment 或任何 `@`。Development 的 HTTP loopback 必須含明確 port。
+- RP 收到 logout token 後，以 `iss`、`aud`、signature/`kid`、`exp`、`iat`、`events`、`sid`、`jti` 與 no-`nonce` 驗證；token lifetime 不超過五分鐘。
 - RP 依 `sid` 移除所有對應本機 sessions。
-- Logout endpoint 必須冪等；相同 `jti` 重複送達不得造成錯誤副作用。
+- Logout endpoint 必須把 `jti` receipt 與 session deletion 同一 transaction commit；相同 `jti` 重複送達回 `200`/`204`，不同 `sid` 的 conflicting reuse 必須拒絕。
 
 ### 11.3 撤銷流程
 
@@ -474,31 +481,39 @@ SSO 無法只靠刪除自己的 cookie 清除所有 RP cookie。因此所有第�
 User/Admin requests revoke
         |
         v
-D1 marks central session inactive
+D1 batch commits central revocation
         |
-        +--> revoke OAuth access/refresh tokens
+        +--> delete central session + access/refresh tokens
         |
-        +--> append audit event
+        +--> append success audit event
         |
-        +--> enqueue one logout event per visited client
+        +--> snapshot one durable delivery per visited client
                           |
-                          v
-                 signed logout token
+                          +--> dedicated Queue after commit
+                          |          |
+                          |          v
+                          |   signed logout token
+                          |          |
+                          |          v
+                          |   RP deletes by sid
                           |
-                          v
-                 RP removes local session
+                          +--> Cron re-enqueues due/expired leases
 ```
 
-中央撤銷狀態必須先完成，Queue 發送才可開始。即使 Queue 暫時失敗，introspection 或 gateway 檢查也必須看到 session 已失效。
+中央撤銷、audit 與 durable delivery rows 必須先原子完成，Queue 發送才可開始。即使 Queue 暫時失敗，introspection 或 gateway 檢查也必須看到 session 已失效；replayer 由 D1 row 復原送達，不得恢復中央 session/token 作補償。
 
 ### 11.4 撤銷 SLA 與故障政策
 
 - 管理服務：要求立即撤銷，每次請求確認中央狀態，確認失敗時 fail closed。
-- 公開服務：Queue 主動推送，另允許最多 30 秒撤銷快取。
-- Queue 重試失敗：進 Dead Letter Queue、顯示於管理後台並告警。
+- 公開服務：專用 Queue 主動推送，另允許最多 30 秒撤銷快取。
+- Delivery 只有 HTTP `200`/`204` 成功；network/timeout、`408`、`425`、`429`、`5xx` retry，其他 `4xx` permanent，最多五次 bounded attempts。
+- 過期 lease 由每分鐘 Cron 回收；dead/retry row 可由具 `users.manage`、fresh session 與 Passkey step-up 的管理員人工 replay。`202` 代表 D1 reset/audit 已 commit、立即 Queue send 失敗而等待 Cron，不代表 rollback。
+- Redacted 管理 API 不回 endpoint snapshot、`sid`、`jti` 或 token。Repository 尚無外部 DLQ/dead-delivery paging；只有完成配置與演練後才能宣稱告警存在。
 - SSO 暫時不可用：公開服務可依風險提供短期既有 session grace period；管理服務不得繞過驗證。
 
 「立即撤銷」與「SSO 故障時所有服務仍完全可用」無法同時保證。以上政策優先保護管理與高敏感服務。
+
+Preview acceptance、唯讀 migration check、triage、manual replay 與 rollback 詳見 [`docs/runbooks/global-logout.md`](./docs/runbooks/global-logout.md)。RP 實作契約另見 [`docs/api/PGID-integration.md`](./docs/api/PGID-integration.md) §5.5。
 
 ## 12. 帳號中心與管理後台
 
@@ -522,7 +537,7 @@ D1 marks central session inactive
 - Session 與 token 強制撤銷。
 - Signing keys 與 rotation 狀態。
 - Security/audit event 查詢與匯出。
-- Queue delivery、retry 與 Dead Letter Queue 狀態。
+- Redacted logout delivery、retry/dead 與 manual replay evidence；外部 Queue/DLQ dashboard/paging 仍須另行配置。
 - 註冊模式與 abuse controls。
 
 ### 12.3 平台角色階層
@@ -561,7 +576,7 @@ D1 marks central session inactive
 - `oauth_refresh_tokens`
 - `oauth_consents`
 
-本 repository 的實際 Better Auth `user` table 另有 PGID additional fields：`role`、`status`、`accessLevel`、初次 Terms/Privacy version 與 `legalAcceptedAt`。`accessLevel` 只接受 `standard`/`restricted`，migration `0017` 對既有 rows default/backfill `standard`。
+本 repository 的實際 Better Auth `user` table 另有 PGID additional fields：`role`、`status`、`accessLevel`、初次 Terms/Privacy version 與 `legalAcceptedAt`。`accessLevel` 只接受 `standard`/`restricted`，migration `0017` 對既有 rows default/backfill `standard`。Migration `0018` 另在 `oauthClient` 加入 nullable `backchannelLogoutUri`，並把相容的 legacy metadata 值一次性 backfill 到 dedicated column。
 
 ### 13.2 PG72 application tables
 
@@ -570,7 +585,10 @@ D1 marks central session inactive
 - `user_platform_roles`
 - `client_roles`
 - `user_client_roles`
-- `rp_session_visits`
+- `rp_session_client`（實際 central `sid`/client visit ledger）
+- `logout_delivery`（D1 durable delivery source of truth）
+- `logout_delivery_attempt`（每個 replay generation/attempt evidence）
+- `logout_delivery_legacy_0018`（只保留 pre-`0018` evidence，不送達）
 - `recovery_codes`（planned，尚未實作）
 - `audit_events`
 - `security_events`
@@ -674,7 +692,7 @@ Better Auth 曾出現 OAuth/OIDC 與 account linking 相關安全公告。因此
 
 告警不得直接包含完整 Email、IP、token、authorization code 或 credential ID。
 
-本清單是目標，不代表 repository 已配置外部 dashboard、paging 或自動封鎖。Local source 目前的持久 evidence 與人工初始門檻見 [`docs/runbooks/public-registration-abuse.md`](./docs/runbooks/public-registration-abuse.md)；在隔離 Preview 驗證門檻、指派 operator 並測試 alert delivery 前，不得把 runbook 寫成 operational monitoring 已完成。
+本清單是目標，不代表 repository 已配置外部 dashboard、paging 或自動封鎖。Public-registration 的持久 evidence 與人工初始門檻見 [`docs/runbooks/public-registration-abuse.md`](./docs/runbooks/public-registration-abuse.md)；global logout 的 D1 evidence、Preview acceptance、manual replay 與 rollback 見 [`docs/runbooks/global-logout.md`](./docs/runbooks/global-logout.md)。在隔離 Preview 驗證門檻、指派 operator 並測試 alert delivery 前，不得把任一 runbook 寫成 operational monitoring 已完成。
 
 ## 18. Service Integration Patterns
 
@@ -710,7 +728,7 @@ Better Auth 曾出現 OAuth/OIDC 與 account linking 相關安全公告。因此
 - Auth.js JWT 只保存 opaque vault session ID；access/refresh token 以獨立 key 做 AES-GCM 加密後存 D1。
 - Refresh 使用 `active -> refreshing -> active` 與 lease/generation CAS；timeout、5xx、write-back unknown 或 abandoned refresh 不重用舊 token，只允許 terminal reauthentication。
 - 主動登出先撤銷 server-side vault row，成功後才清瀏覽器 cookie。
-- 既有部署紀錄顯示登出修復已上線，仍待 owner 實機確認；中央 `sid` 與 back-channel logout 尚未完成，因此不代表完整 Production GO。
+- 既有部署紀錄顯示本機登出修復已上線，仍待 owner 實機確認；PGID local source 已有 central `sid`/delivery，但 Copy receiver、`0018`/Queue rollout 與 multi-RP 實機驗收尚未完成，因此不代表完整 Production GO。
 
 #### Link
 
@@ -718,7 +736,7 @@ Better Auth 曾出現 OAuth/OIDC 與 account linking 相關安全公告。因此
 - D1 session 以穩定 `sso_subject` 解析使用者；verified email 只供既有 local user 一次性綁定。舊 `owner_email` 暫保留為綁定後不再隨 UserInfo 改變的 local ownership key。
 - Admin bootstrap 以 singleton D1 record 關閉 email bootstrap，production error 不回傳原始 exception。
 - 所有 cookie-authenticated mutation 強制 exact Origin，短網址 target 僅接受 HTTP(S)。
-- Callback：`/api/auth/callback`；migration：`migration-003-pg72-oidc.sql`。中央 `sid` 與 back-channel logout 尚未完成，因此不代表完整 Production GO。
+- Callback：`/api/auth/callback`；migration：`migration-003-pg72-oidc.sql`。PGID local source 已有 central `sid`/delivery，但 Link receiver、`0018`/Queue rollout 與實機驗收尚未完成，因此不代表完整 Production GO。
 
 #### Status / XUGOU
 
@@ -726,7 +744,7 @@ Better Auth 曾出現 OAuth/OIDC 與 account linking 相關安全公告。因此
 - 已加入 `oauth4webapi` PKCE/state/nonce/replay 驗證、verified-email legacy binding 與本機 role gate；帳密登入、註冊及 password update surface 回傳 retired response。
 - Agent register/report 保持獨立；registration token 改用 `AGENT_TOKEN_SIGNING_KEY` HMAC-SHA-256，並修正 Agent GET/PUT/DELETE owner/admin IDOR。
 - CORS 與 unsafe mutation 只允許精確 `APP_BASE_URL`；runtime 與 dev dependency audit 目前為 0 known vulnerabilities。
-- Callback：`/api/auth/oidc/callback`；migration：`backend/drizzle/0005_lovely_vargas.sql`。現有本機 session 最長 12 小時，中央 consent revoke 不會即時清除，仍須 back-channel logout。
+- Callback：`/api/auth/oidc/callback`；migration：`backend/drizzle/0005_lovely_vargas.sql`。現有本機 session 最長 12 小時；PGID delivery local source 已完成，但 Status receiver 與 Preview rollout 尚未完成，中央 consent revoke 仍不會即時清除本機 session。
 
 #### Upload
 
@@ -789,10 +807,12 @@ Webmail 仍須分成兩個問題：
 
 - 撤銷單一裝置只影響對應 `sid`。
 - 撤銷所有裝置使所有中央 sessions 與 refresh tokens 失效。
-- 所有已存取 clients 都收到 logout event。
-- Queue 重複投遞不造成錯誤。
-- RP 暫時離線後重試成功。
-- 永久失敗事件進 DLQ 並顯示告警。
+- Access-token trigger 只為 live user session 記錄實際 client visit；Client Credentials 不可寫入 ledger。
+- 中央撤銷、token/session deletion、audit 與所有 visited-client durable rows 原子 commit；強制 outbox failure 必須整批 rollback。
+- 所有已存取 clients 都收到 logout event；partial Queue send failure 不遺失其他 D1 work。
+- Queue 重複投遞與相同 `jti` receiver replay 不造成錯誤；相同 `jti`/不同 `sid` fail closed。
+- Timeout/`408`/`425`/`429`/`5xx` bounded retry，permanent `4xx` 或 exhausted attempts 進 dead state；expired lease 由 replayer 回收。
+- Manual replay 要求 permission/fresh/Passkey step-up，且 list response 不暴露 endpoint、`sid`、`jti` 或 token。
 - 管理服務在 SSO/D1 無法確認時 fail closed。
 
 ### 19.4 Security tests
@@ -829,7 +849,7 @@ Webmail 仍須分成兩個問題：
 
 - Copy 與 Link 已切換 production traffic 至 PGID；Copy 六位數訪客碼保持獨立。
 - Email 只用於一次性 legacy binding，日常 authentication 已改用 SSO `sub`。
-- 這是已部署的 invite beta，不是完整 Production GO；ID-token `sid` 已在 local source 完成，仍待 visited-client ledger、back-channel logout、rollback drill 及單一/全域登出驗收。
+- 這是已部署的 invite beta，不是完整 Production GO；ID-token `sid`、visited-client ledger、durable back-channel delivery 與 test receiver 已在 local source 完成，仍待 `0018`/Queue/DLQ Preview rollout、各 production RP receiver、外部告警、rollback drill 及單一/全域登出實機驗收。
 
 ### Phase 3：Legacy 與管理服務
 

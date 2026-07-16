@@ -14,6 +14,7 @@ PGID **不開放動態自助註冊**。每個 client 由 standard access 的 PGI
 | Grant types | 預設 `authorization_code`；要長期登入就加 `refresh_token`（此時 scopes 必含 `offline_access`）。 |
 | 服務條款 / 隱私權連結 | 顯示在 consent 畫面。 |
 | 是否啟用 end-session | 若你要用 RP-initiated logout 端點。所有 user ID token 都會帶 central `sid`；此設定只控制端點權限。 |
+| Back-channel logout URI | 選填的精確 receiver endpoint。Production 必須 HTTPS，不接受 wildcard、fragment 或任何 `@`；development HTTP loopback 必須含 port。需依 [Back-Channel Logout](backchannel-logout.md) 驗證並依 `sid` 冪等刪除本機 session。 |
 
 ## 建立後你會拿到
 
@@ -40,6 +41,7 @@ OIDC_CLIENT_ID=your-client-id
 OIDC_CLIENT_SECRET=pg72_cs_xxxxxxxx   # 僅 confidential，放 secret 儲存，勿進原始碼
 OIDC_REDIRECT_URI=https://app.example.com/callback
 OIDC_SCOPE=openid profile email offline_access
+OIDC_BACKCHANNEL_LOGOUT_URI=https://app.example.com/backchannel-logout
 ```
 
 ## Client 認證方式（重要）

@@ -120,7 +120,7 @@ await createLocalSession({
 ## Refresh 與登出
 
 * 有 `offline_access` 時會拿到 refresh token（30 天、rotation）。每次 refresh 後改存新的 refresh token 並丟棄舊的。原 central session 不存在、過期或不再屬於同一 user 時，PGID 以 `invalid_grant` fail closed。
-* 登出：先清你服務自己的 session。每個 user ID token 都帶 central `sid`；跨服務即時登出的 visited-client ledger 與 back-channel delivery 仍在逐步上線。`enableEndSession` 只控制 client 能否呼叫 `end_session_endpoint`，不控制 `sid` claim。
+* 登出：先清你服務自己的 session。每個 user ID token 都帶 central `sid`；PGID 的 visited-client ledger/durable delivery 已在 local source 完成，但 migration、Queue/DLQ 與各 RP receiver 尚未 rollout。Client 設定 `backchannelLogoutUri` 時，依 [Back-Channel Logout](backchannel-logout.md) 驗完整 logout token、以 `jti` 冪等並依 `sid` 刪除本機 sessions。`enableEndSession` 只控制 client 能否呼叫 `end_session_endpoint`，不控制 `sid` claim。
 
 ## 下一步
 

@@ -4,7 +4,7 @@
 > 對象：要把服務接上 PGID 的第一方 / 受管開發者
 > Issuer：`https://sso.pg72.tw`
 > 協議：OAuth 2.1 / OpenID Connect，Authorization Code + PKCE S256
-> 最後對照程式碼：`apps/sso/worker/auth.ts`、`apps/sso/worker/index.ts`、`apps/sso/worker/account-access.ts`、`apps/sso/worker/admin-users.ts`、`apps/sso/worker/admin-clients.ts`、`apps/sso/worker/passkey-step-up.ts`、`apps/sso/worker/public-registration.ts`、`apps/test-rp/worker/index.ts`
+> 最後對照程式碼：`apps/sso/worker/auth.ts`、`apps/sso/worker/index.ts`、`apps/sso/worker/account-access.ts`、`apps/sso/worker/admin-users.ts`、`apps/sso/worker/admin-clients.ts`、`apps/sso/worker/passkey-step-up.ts`、`apps/sso/worker/public-registration.ts`、`apps/sso/worker/global-logout.ts`、`apps/sso/worker/logout-delivery.ts`、`apps/test-rp/worker/index.ts`
 
 本手冊是**精簡技術參考**：端點、scopes、claims、token 壽命、client 認證方式與可複製的串接範例。教學導向、逐步導覽與一般使用者說明在 [`wiki/`](../../wiki/SUMMARY.md)；完整架構規格與安全設計以 [`codex.md`](../../codex.md) 為準。若本文件與 `codex.md` 衝突，以 `codex.md` 為準並在同一變更修正本文件。
 
@@ -45,6 +45,8 @@ Discovery 目前回報的重點欄位（對照 `@better-auth/oauth-provider@1.6.
 | `subject_types_supported` | `["public"]` |
 | `claims_supported` | `["https://pg72.tw/role"]` |
 | `authorization_response_iss_parameter_supported` | `true` |
+| `backchannel_logout_supported` | `true` |
+| `backchannel_logout_session_supported` | `true` |
 
 `grant_types_supported` 是伺服器層級能力；**單一 client 實際可用的 grant 由該 client 的註冊決定**（見第 5 節）。`client_credentials` 不用於瀏覽器登入的人類使用者。
 
@@ -141,6 +143,7 @@ Client 建立時的實際契約（對照 `apps/sso/worker/admin-clients.ts`）�
 | `public` | `true` = public client（無 secret，`token_endpoint_auth_method: none`）；`false` = confidential（發一次性 secret）。 |
 | `tokenEndpointAuthMethod` | 由 `public` 推導：public → `none`；confidential → `client_secret_post`。 |
 | `enableEndSession` | 是否允許此 client 呼叫 `end_session_endpoint`；不影響 ID token 是否帶 `sid`。 |
+| `backchannelLogoutUri` | 選填；RP 接收 logout token 的精確 endpoint。Production 必須 HTTPS，不接受 wildcard、fragment 或任何 `@`；本機 HTTP loopback 必須含明確 port，且只供 development client。 |
 | `tos` / `policy` | consent 畫面顯示的服務條款 / 隱私權連結。 |
 | `developerName` | consent 畫面顯示的開發者身分。 |
 
@@ -275,6 +278,40 @@ client_id=pgid-mail-introspect&client_secret=URL_ENCODED_SECRET_FROM_PGID_MAIL_I
 | `503` | `temporarily_unavailable` | Dedicated limiter binding 無法判定；fail closed 並短暫重試。 |
 
 更精簡的 operator / developer 導覽見 [`wiki/developers/mail-introspection.md`](../../wiki/developers/mail-introspection.md)。
+
+### 5.5 Back-channel logout
+
+Local source 已實作 migration `0018` 的 `(sid, client_id)` visit ledger、D1 durable
+outbox、專用 Queue/DLQ、bounded retry/Cron replayer、redacted admin delivery view 與
+test RP receiver。這些能力尚未套用到 Preview 或 production，各 production RP 也
+尚未完成 receiver 驗收；不能把 source contract 寫成已上線。
+
+RP 設定 `backchannelLogoutUri` 後，PGID 只會在該 central session 實際完成 user
+token exchange 時記錄 visit。中央 revoke 會先在同一個 D1 batch 撤銷 session、
+access/refresh tokens、寫 audit 並建立每個 visited client 的 durable delivery；
+Queue 不是真實來源，漏掉 Queue message 仍可由每分鐘 replayer 復原。
+
+Receiver 接受 `POST application/x-www-form-urlencoded`，body 必須只有一個
+`logout_token`。驗證要求：
+
+- EdDSA signature / `kid`（公鑰取自 discovery 的 `jwks_uri`）；
+- `iss` 精確等於 PGID issuer，`aud` 包含自己的 `client_id`；
+- 合理的 `iat` / `exp`，且 logout token lifetime 不超過五分鐘；
+- `events` 包含 `http://schemas.openid.net/event/backchannel-logout`；
+- nonempty `sid` 與 `jti`，且不得含 `nonce`。
+
+驗證成功後，以 `sid` 刪除全部對應的 server-side RP sessions，並將 `jti` 的
+idempotency receipt 與刪除放進同一個 transaction。第一次與相同 `jti` 的重送都
+回 `200` 或 `204`；相同 `jti` 搭配不同 `sid` 必須拒絕。PGID 只有在收到 `200` 或
+`204` 時標記 delivered；timeout、network error、`408`、`425`、`429`、`5xx`
+會 bounded retry，其他 `4xx` 視為 permanent failure。
+
+管理員可用 `GET /api/admin/logout-deliveries?status=dead&limit=50` 查看遮蔽後的
+delivery evidence。`POST /api/admin/logout-deliveries/{deliveryId}/replay` 只接受
+dead/retry row，並要求 `users.manage`、fresh session 與 Passkey step-up。Replay 回
+`202` 表示 D1 reset/audit 已提交、只是立即送 Queue 失敗，Cron 仍會接手；不是
+rollback。完整驗收與 rollback 見
+[`docs/runbooks/global-logout.md`](../runbooks/global-logout.md)。
 
 ---
 
@@ -470,7 +507,7 @@ await createLocalSession({
 7. **驗 ID token**：用 `jwks_uri` 的 EdDSA 公鑰驗章，並檢查 `iss = https://sso.pg72.tw`、`aud = client_id`、`exp` 未過、`nonce` 相符，以及 `sid` 是 nonempty string；缺少 `sid` 必須中止 callback。
 8. **取 UserInfo**：`GET /oauth2/userinfo`，`Authorization: Bearer <access_token>`。檢查 `email_verified`。
 9. **建立本機 session**：以 `sub` 對應帳號，保存 nonempty `sid` + `sub`；token 存 server 端，不進 `localStorage` 或可被 JS 讀取的 cookie。
-10. **登出**：本機登出清自己 session；ID token 已提供中央 `sid`，但跨服務 delivery 仍要等 visited-client ledger 與 back-channel logout（見 `codex.md` §11）。啟用 `enableEndSession` 的 client 可用 `end_session_endpoint` 做 RP-initiated logout；未啟用的 client 仍會收到 `sid`，但不能呼叫該端點。
+10. **登出**：本機登出先清自己的 session；若 client 設定 `backchannelLogoutUri`，也必須依 §5.5 實作冪等 receiver，讓 PGID 以 central `sid` 清除對應本機 sessions。Local PGID ledger/delivery source 已完成，但 Preview/production migration、Queue/DLQ 與各 RP receiver rollout 仍未完成。啟用 `enableEndSession` 的 client 可用 `end_session_endpoint` 做 RP-initiated logout；未啟用的 client 仍會收到 `sid`，但不能呼叫該端點。
 
 ### Introspection / Revocation（選用）
 
@@ -493,7 +530,8 @@ await createLocalSession({
 - [ ] 不送 `resource` 參數。
 - [ ] Server-side session 保存 nonempty `sid` + `sub`；缺少 `sid` 時 callback fail closed；token 不進 `localStorage`。
 - [ ] 錯誤訊息不洩漏帳號存在與否；log 遮蔽 token / code / 完整 email / IP。
-- [ ] 規劃冪等 back-channel logout endpoint（Phase 2 契約，見 `codex.md` §11.2）。
+- [ ] 註冊精確 HTTPS `backchannelLogoutUri`；receiver 依 §5.5 驗完整 logout token、以 `jti` 冪等並依 `sid` 刪除本機 sessions。
+- [ ] 在隔離 Preview 驗證重送、錯誤 claims/signature、timeout/`429`/`5xx`、永久 `4xx` 與 multi-RP revoke；不得用 local source 通過取代 rollout evidence。
 
 ---
 
@@ -502,6 +540,8 @@ await createLocalSession({
 - 架構規格：[`codex.md`](../../codex.md)（單一事實來源）
 - 安全政策與已接受 finding：[`SECURITY.md`](../../SECURITY.md)
 - 使用者 / 開發者教學站：[`wiki/`](../../wiki/SUMMARY.md)
+- Back-channel logout 教學：[`wiki/developers/backchannel-logout.md`](../../wiki/developers/backchannel-logout.md)
+- Global logout runbook：[`docs/runbooks/global-logout.md`](../runbooks/global-logout.md)
 - 可運作 RP 範例：`apps/test-rp/worker/index.ts`
 - Better Auth OAuth Provider：<https://better-auth.com/docs/plugins/oauth-provider/>
 - `oauth4webapi`：<https://github.com/panva/oauth4webapi>

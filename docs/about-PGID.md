@@ -20,7 +20,7 @@ PGID 是 PG72 自行掌控的**單一登入（SSO）身分系統**。你只要�
 - 帳號被盜時，無法可靠地一次從所有服務登出。
 - 登入與安全事件散落各處，沒有統一稽核。
 
-PGID 把「你是誰」這件事集中到一個由 PG72 自己掌控的地方，讓接入 PGID 的服務只要信任 PGID 就好。跨服務即時登出的完整 delivery contract 仍在建置中，不能只因中央帳號中心已上線就視為完成。
+PGID 把「你是誰」這件事集中到一個由 PG72 自己掌控的地方，讓接入 PGID 的服務只要信任 PGID 就好。跨服務即時登出的 ledger、durable delivery 與 test receiver 已在 local source 完成，但 Preview/production migration、專用 Queue/DLQ、各服務 receiver 與外部告警尚未完成，不能只因程式碼或中央帳號中心已存在就視為上線。
 
 ## 怎麼用
 
@@ -61,7 +61,7 @@ PGID 目前是部署於 `https://sso.pg72.tw` 的 invite-only beta；既有部�
 - v1 日常登入主力是 Google 與 Passkey；另提供 Discord、GitHub、Facebook、Apple、Telegram 社群登入作為額外選項，各 provider 未設定 secret 時會自動隱藏。公開新帳號只可由 Google verified-email flow 建立；既有 linked provider 可繼續登入，只有 standard account 可新增明確連結。Telegram 不提供 verified email，只能登入已明確連結的既有帳號，restricted account 不能新增 Telegram link。不提供密碼、Email OTP 或 TOTP 登入。Restricted path 目前只在 local source，production 尚未部署。
 - 服務的 OIDC client 由管理員 / developer 明確建立，不開放動態自助註冊。
 - Production `REGISTRATION_MODE` 仍是 `invite`；公開註冊 local source 已包含 Turnstile-backed 一次性 intent、版本化法律同意、persistent restricted access 與 manual abuse-response runbook，但 migrations、實際政策版本核准、環境配置、獨立審查、Preview threshold/alert 驗證、其餘安全 gate 與 owner 啟用核准尚未完成。
-- ID token 的中央 `sid` 已在 local source 實作；visited-client ledger、back-channel logout（跨服務即時登出）、復原演練與完整 Production GO gate 仍在進行中，完整清單見 [`codex.md`](../codex.md) §9.2。
+- ID token 的中央 `sid`、visited-client ledger、durable back-channel delivery 與 test receiver 已在 local source 實作；migration `0018`、Queue/DLQ provisioning、production RP receivers、外部告警、復原演練與完整 Production GO gate 仍在進行中，完整清單見 [`codex.md`](../codex.md) §9.2。
 
 任何安全宣稱都以可驗證的自動化 gate 與獨立審查為準，不用文件聲明取代驗證。
 

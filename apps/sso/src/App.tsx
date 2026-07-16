@@ -45,6 +45,7 @@ import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { authClient } from "./auth-client";
+import { PUBLIC_PRODUCT_COPY } from "./public-copy";
 
 interface DeviceSession {
   id: string;
@@ -617,7 +618,7 @@ function SignInView({ pending }: { pending: boolean }) {
           <Brand />
           <span className="eyebrow">Secure account</span>
           <h1>{oauthQuery ? "繼續登入" : "登入 PGID"}</h1>
-          <p>使用 Google、Passkey 或其他社群帳號登入。</p>
+          <p>{PUBLIC_PRODUCT_COPY.signIn}</p>
         </div>
 
         <div className="auth-actions" aria-busy={pending || busy !== null}>
@@ -1206,7 +1207,7 @@ function DeletePasskeyDialog({
         </div>
         <h2 id="delete-passkey-title">刪除「{label}」？</h2>
         <p id="delete-passkey-description">
-          刪除後無法再用這把 Passkey 登入。你的 Google 登入方式不會受到影響。
+          刪除後無法再用這把 Passkey 登入。{PUBLIC_PRODUCT_COPY.recovery}
         </p>
         {error ? (
           <div className="dialog-error" role="alert">
@@ -1517,8 +1518,8 @@ function TermsContent() {
         <p>
           歡迎使用 PGID（以下稱「本服務」），由 PG72（以下稱「我們」）提供，網址為{" "}
           <span className="mono">https://sso.pg72.tw</span>。PGID 是 PG72
-          自建的身分認證服務（Identity Provider），讓你以單一身分登入 PG72
-          旗下與已授權的第三方應用程式。
+          自建的身分認證服務（Identity Provider），讓你以單一身分登入已接入 PGID
+          的 PG72 服務與經核准的第三方應用程式。
         </p>
         <p>使用本服務即表示你同意本條款。若你不同意，請勿使用本服務。</p>
       </section>
@@ -1546,7 +1547,8 @@ function TermsContent() {
       <section className="public-section">
         <h2>2. 帳號資格與註冊</h2>
         <ul className="public-list">
-          <li>本服務初期採<strong>邀請制</strong>，未來可能開放公開註冊。</li>
+          <li>{PUBLIC_PRODUCT_COPY.inviteAccess}</li>
+          <li>{PUBLIC_PRODUCT_COPY.passkeyAccess}</li>
           <li>你必須提供正確資訊，並就你帳號下的一切活動負責。</li>
           <li>
             你必須妥善保管你的登入方式（Passkey 裝置、社群帳號）。若懷疑帳號遭盜用，請立即透過第
@@ -1842,23 +1844,16 @@ function AboutPage() {
   return (
     <PublicPageShell
       title="關於 PGID"
-      lead="一組帳號，安全登入 PG72 的所有服務。"
+      lead={PUBLIC_PRODUCT_COPY.aboutLead}
       icon={<Sparkles aria-hidden="true" />}
     >
       <section className="public-section">
         <h2>PGID 是什麼？</h2>
-        <p>
-          PGID（PG72 ID）是 PG72 自建的單一登入（SSO）與身分中心。你只需要一組
-          PGID 帳號，就能登入 PG72 旗下的各項服務，不必為每個網站重複註冊。
-        </p>
+        <p>{PUBLIC_PRODUCT_COPY.aboutOverview}</p>
       </section>
       <section className="public-section">
         <h2>怎麼使用？</h2>
-        <p>
-          以 Google 或 Passkey 登入 PGID 後，前往其他 PG72
-          服務時會導向這裡完成授權，再安全地返回原本的應用程式。你可以在帳號中心管理
-          Passkey、裝置 session、已授權的應用程式與安全活動。
-        </p>
+        <p>{PUBLIC_PRODUCT_COPY.aboutUsage}</p>
       </section>
       <section className="public-section">
         <h2>為什麼選擇 PGID？</h2>
@@ -1873,15 +1868,20 @@ function AboutPage() {
           </li>
           <li>
             <strong>一致的體驗</strong>
-            ：一個帳號登入所有 PG72 服務，個人資料集中管理。
+            ：{PUBLIC_PRODUCT_COPY.aboutConsistency}
           </li>
         </ul>
       </section>
       <section className="public-section">
         <h2>開始使用</h2>
+        <ul className="public-list">
+          <li>{PUBLIC_PRODUCT_COPY.inviteAccess}</li>
+          <li>{PUBLIC_PRODUCT_COPY.passkeyAccess}</li>
+          <li>{PUBLIC_PRODUCT_COPY.recovery}</li>
+        </ul>
         <p>
-          前往 <a href="/">登入頁</a>，以 Google 或 Passkey
-          登入即可。相關條款請見 <a href="/tos">服務條款</a> 與{" "}
+          收到邀請後，可前往 <a href="/">登入頁</a> 使用 Google 完成首次登入；已有
+          PGID 帳號則可使用已註冊的 Passkey。相關條款請見 <a href="/tos">服務條款</a> 與{" "}
           <a href="/pp">隱私權政策</a>。
         </p>
       </section>

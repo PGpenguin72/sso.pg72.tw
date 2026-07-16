@@ -67,3 +67,13 @@
 | 2026-07-16 (醒) | 派工(設計統一) | ~/ahsnccu-ann, 原專案代碼/{copy,link,upload}, ~/diary.pg72.tw | 各 repo | 派 5 個設計 agent 依 morden_dark 重塑各 repo,各自寫 DESIGN-LOG.md + 增量 commit,不 push;背景執行 | 進行中 |
 | 2026-07-16 (醒) | 教學(A4) | sso.pg72.tw | docs/social-login-setup.md | 寫社群登入申請+設定教學(Discord/GitHub/Facebook/Apple/Telegram 各自步驟、callback、env 名、wrangler 指令) | 完成 |
 | 2026-07-16 (醒) | 設計 agent 回報 | 原專案代碼/upload.pg72.tw | static/css/style.css, *.html, DESIGN-LOG.md | upload morden_dark 重塑完成(branch windows, commit 31881ef/7bf9b0f/f32f452);純視覺,13測試過,未 push | 完成 |
+
+## 2026-07-16 下午 — Codex 交接接手 + temp 清理 + reskin 重啟(調度)
+
+- 時間:owner 回歸後。已讀 `to_claude.md`(Codex handoff, commit 74126a2)。
+- Codex 已完成:`4a44b43` / `9efdece` / `69118ad` 進 main;剩 `/private/tmp/pgid-mail-docs` docs-only commit 待完成。
+- 本輪一次派出 6 個 subagent(皆背景平行):
+  1. docs 交接 agent:完成 pgid-mail-docs §7 修正 + docs-only commit + cherry-pick 回 main + 完整驗證(SSO 166 / RP 4)。
+  2. temp 清理 agent:清 /private/tmp 的 pg72-* QA 殘留、pgid-* log/工具目錄、4 個已合併/報廢的 Codex worktree(保留 pgid-mail-docs、D1 備份 .sql、claude session 目錄),並檢查主 repo .claude/worktrees 的 11 個 agent worktree(僅刪已等價進 main 者)。
+  3-6. reskin 接續 agent × 4:ahsnccu-ann、copy.pg72.tw、link.pg72.tw、diary.pg72.tw,接續上次 503 中斷的 morden_dark 重塑(讀各 repo DESIGN-LOG.md 恢復進度;純視覺、本地 commit、不 push、不部署)。
+- 各 agent 完成後會自行 append 日誌到本檔或各 repo 的 DESIGN-LOG.md。

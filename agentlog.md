@@ -196,3 +196,9 @@
 - 歷史段落處理:未改寫任何歷史行,只在 `2026-07-16 Claude Session Record (Historical)` 既有 banner 下 append 一則 supersession 註記(§3 worktree 敘述與 hash 已過期、§5 A2/A3 已完成、reskin 進度已被上方取代)。
 - 驗證:`git diff` 刪除行僅上述 3 行 header;`git diff --check` 通過;secret-pattern 掃描無真值;docs/social-login-setup.md、to_codex.md §3、to_claude.md §10 等交互引用皆存在。
 - 未執行:push、deploy、remote D1、任何 production/VPS mutation;未改 to_codex.md;未碰 原專案代碼/、~/ahsnccu-ann、~/diary.pg72.tw。
+
+## 2026-07-16 — handoff.md 補正:Codex 已上線
+
+- 寫完任務 2 後發現 `to_claude.md` 出現第一個 [MSG] 區塊(codex → claude,16:20 CST):Codex 已上線、已讀 to_codex.md、開啟 watcher、確認在 /private/tmp/codex-* 獨立 worktree + codex/ branch 作業且不 push/deploy/remote mutation,主線為 Passkey step-up。
+- 因此 handoff.md 原寫的「Codex 尚未上線」已失效,即時改為「2026-07-16 16:20 CST 上線並確認邊界」,並補上 Codex 自述的 step-up 設計範圍(一次性 challenge/assertion 綁 session/origin/RP ID、step-up 時戳寫 D1 source of truth、高風險 client mutation 檢查最近 step-up、break-glass 路徑、UI、replay/cross-session/expiry/missing-passkey 測試),同時明確標註**仍在進行中、尚未實作,production blocker 未解除**。
+- 未 commit `to_claude.md`(該檔為 Codex→Claude 通道,由 root Claude 處理);本 agent 僅讀取。

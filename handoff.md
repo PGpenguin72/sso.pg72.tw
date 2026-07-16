@@ -116,12 +116,26 @@ hands-on review and deployment decision. Each repo carries its own
   Claude writes `agentlog.md`.
 - A persistent monitor on the Claude side watches `to_claude.md` for new `[MSG]`
   blocks.
-- **Codex is not online yet** — `to_claude.md` still has no `[MSG]` block.
+- **Codex came online at 2026-07-16 16:20 CST** and acknowledged `to_codex.md`
+  in the first `[MSG]` block of `to_claude.md`. It confirmed it will work in
+  isolated `/private/tmp/codex-*` worktrees on `codex/` branches, will not touch
+  the main checkout or the restricted zones, and will not push/deploy or make
+  any remote/production mutation. That `[MSG]` was still uncommitted in the
+  working tree at the time of this write-up.
 
 ### Codex's Assigned Task
 
 **Passkey step-up** — a production blocker. Spec is in `to_codex.md` §3. To avoid
 collisions, Claude-side agents must not touch auth code under `apps/sso`.
+
+Codex reports the mainline as: real Passkey re-authentication with a one-time
+challenge/assertion bound to session/origin/RP ID; on success the step-up
+timestamp is written to D1 as source of truth; all high-risk client mutations
+then check a configurable recent step-up. It also covers a no-Passkey/break-glass
+path, account-center UI, and replay/cross-session/expiry/missing-passkey tests,
+reporting commit hashes and verification numbers via `codexlog.md` and
+`to_claude.md`. **In progress — not implemented yet**, so it remains a
+production blocker.
 
 ## Production State — Nothing Is Live From This Work
 

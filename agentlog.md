@@ -158,3 +158,17 @@
 - Main 驗證:pnpm install --offline --frozen-lockfile 通過;首次 pnpm --filter @pg72/id check 因主 checkout 的 ignored worker-configuration.d.ts 過舊(缺 INTROSPECTION_*_RATE_LIMITER)typecheck 失敗,以 pnpm --filter @pg72/id cf-typegen 本地重產(純本地 wrangler types,無 remote)後重跑:SSO 13 files/166 tests 通過 + typecheck + production build;@pg72/test-rp 1 file/4 tests 通過;find apps/sso/dist 無 .dev.vars*;git status 僅剩 morden_dark.txt(.claude/ 仍在磁碟,settings.local.json 被 ~/.config/git/ignore 全域忽略、worktrees 已清空故不再顯示)。
 - 未執行:git push、wrangler deploy、remote D1、任何 production/Cloudflare/VPS/secret-store mutation。Production 側(deploy、migration 0013、provision pgid-mail-introspect、Passkey step-up、VPS cutover)全部未做。
 - /private/tmp/pgid-mail-docs worktree 任務已完成,可由 owner/清理 agent 刪除(本 agent 依指示不刪)。
+
+## 2026-07-16 — CRASH-SAFE 快照(token 隨時可能中斷)
+
+**當前確定狀態(全部已 commit,可安全中斷):**
+- main = 8643616。工作區乾淨,untracked 僅 `morden_dark.txt`(owner 的,保留)。
+- Codex docs 交接**已完成**:worktree commit 456b027 → main cherry-pick 8caf27e;13 檔 docs truth/link review 完成;§7 十項中實際修 3 類 7 處(Queue 語意去除「補送已存在」暗示、secret incident 順序改為 disable→rotate→更新→維護窗口 re-enable+smoke、provision body 語意),其餘 7 項確認原稿正確。
+- 驗證通過:frozen offline install、@pg72/id check = typecheck + 166/166 tests(13 files)+ production build、@pg72/test-rp 4/4、dist 無 .dev.vars*。
+- 插曲:主 checkout 首次 typecheck 失敗,因 ignored 的 `apps/sso/worker-configuration.d.ts` 過舊缺兩個 INTROSPECTION limiter binding;以 `pnpm --filter @pg72/id cf-typegen` 純本地重產後全過。
+- **to_claude.md §10 交接完成條件已全數滿足** → Codex 這份 handoff 可正式關閉。
+- 5 個 reskin(upload/ahsnccu-ann/link/copy/diary)全部完成,皆本地 commit、未 push、未部署。
+- temp 清理完成(~1.8GB);worktree 只剩主 checkout + pgid-mail-docs(後者已功成身退,待刪)。
+- `to_codex.md` 已建立(Claude→Codex 指揮通道);Codex **尚未上線**,to_claude.md 末尾仍無 [MSG] 區塊。
+
+**Production 仍未做(不可寫成已上線):** 無 push、無 deploy、無 remote D1、migration 0013 未套用、pgid-mail-introspect 未 provision、Passkey step-up 未實作(production blocker,已指派 Codex)、mail VPS/Roundcube/Dovecot 未 cutover。

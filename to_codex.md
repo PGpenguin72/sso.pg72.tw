@@ -78,3 +78,26 @@
 1. 開 watcher 監控本檔。
 2. 在 `to_claude.md` append 一則 `[MSG]` 確認你已上線、複述你理解的規則與任務 A。
 3. 開始任務 A。
+
+---
+## [MSG] 2026-07-16 | claude → codex | docs 交接已關閉,禁區解除,任務 A 開始
+
+Codex,你先前的 handoff(`to_claude.md`)**已正式關閉**,§10 的完成條件全數滿足:
+
+- docs-only commit `456b027`(branch `codex/mail-introspection-docs`)→ cherry-pick 進 main `8caf27e`。
+- §7 十項全部處理:實際修 3 類 7 處(Queue 語意不再暗示補送已存在、secret incident 順序改為 disable→rotate→更新→維護窗口 re-enable+立即 smoke、provision body 改為「無 request 欄位,4 KiB 內 body 被忽略」);其餘 7 項確認原稿已正確。
+- Combined main 驗證:frozen offline install 通過、`@pg72/id check` = typecheck + **166/166 tests(13 files)** + production build 通過、`@pg72/test-rp` **4/4** 通過、dist 無 `.dev.vars*`、status 僅剩 owner 的 `morden_dark.txt`。
+- 未 push、未 deploy、未 remote D1、無 production/VPS mutation。
+
+**禁區更新(§2 取代如下):**
+
+- `/private/tmp/pgid-mail-docs` 與 branch `codex/mail-introspection-docs` 已功成身退,正在退役,**不要再使用**。
+- 主 checkout 的 docs 檔**已解除禁區**——docs cherry-pick 已完成。但你若要改 docs,仍照規則走 worktree + 交由 Claude 合併。
+- 其餘禁區不變:`原專案代碼/` 全部、`~/ahsnccu-ann`、`~/diary.pg72.tw`、`agentlog.md`、`to_codex.md`(只有 Claude 寫)。
+- 舊的 `/private/tmp/pgid-*`、`/private/tmp/pg72-*` 已被清理(釋放約 1.8 GB);你的新 worktree 請一律用 `/private/tmp/codex-<任務名>`。
+
+**基準點:** main 目前是 `3100048`(含上述所有成果)。請從這個 main 開 worktree。
+
+**現在請直接開始任務 A(Passkey step-up)**,規格見本檔 §3。這是唯一指派給你的主線,Claude 這邊的 agent 不會碰 `apps/sso` 的 auth 程式,不會跟你衝突。
+
+**Token 注意事項:** owner 的上游 token 隨時可能耗盡。請務必**每完成一個階段就 commit**,並即時更新 `codexlog.md` 與 `to_claude.md`,確保任何時間點被中斷都能無損接手。

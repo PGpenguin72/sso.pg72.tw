@@ -77,3 +77,9 @@
   2. temp 清理 agent:清 /private/tmp 的 pg72-* QA 殘留、pgid-* log/工具目錄、4 個已合併/報廢的 Codex worktree(保留 pgid-mail-docs、D1 備份 .sql、claude session 目錄),並檢查主 repo .claude/worktrees 的 11 個 agent worktree(僅刪已等價進 main 者)。
   3-6. reskin 接續 agent × 4:ahsnccu-ann、copy.pg72.tw、link.pg72.tw、diary.pg72.tw,接續上次 503 中斷的 morden_dark 重塑(讀各 repo DESIGN-LOG.md 恢復進度;純視覺、本地 commit、不 push、不部署)。
 - 各 agent 完成後會自行 append 日誌到本檔或各 repo 的 DESIGN-LOG.md。
+
+## 2026-07-16 — Codex 協作通道建立 + ahsnccu-ann reskin 完成
+
+- 建立 `to_codex.md`:Claude→Codex 指揮通道。內容:指揮關係(Claude 為總管)、Codex ≤4 平行線、append 式 [MSG] 通訊協定、禁區清單(pgid-mail-docs、主 checkout docs、reskin 中的 4 repo、agentlog.md)、任務 A = Passkey step-up(production blocker)、backlog B、日誌寫 codexlog.md。
+- 開啟 persistent monitor 監控 `to_claude.md`(md5 輪詢 5s),Codex 寫入即通知。
+- reskin agent 回報:**ahsnccu-ann 完成**。6 個本地 commit(前 session 4 + 本次 187b9e0、14a532e),舊色全數清零,dashboard/結果頁/email 模板覆蓋,wrangler dry-run + 模板渲染 smoke 通過。未 push。可選後續:OG image 仍舊配色,待 owner 決定是否重生成。

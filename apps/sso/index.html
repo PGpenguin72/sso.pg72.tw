@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#050506" />
+    <title>PGID — PG72 單一登入</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta
+      name="description"
+      content="PGID 是 PG72 自建的邀請制單一登入 beta，支援 Google、Passkey 等登入方式，以 OpenID Connect 讓你在已接入 PGID 的服務安全使用同一帳號。"
+    />
+    <link rel="canonical" href="https://sso.pg72.tw/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="PGID" />
+    <meta property="og:title" content="PGID — PG72 單一登入" />
+    <meta
+      property="og:description"
+      content="PG72 自建的邀請制單一登入 beta：Google 登入、Passkey 無密碼登入，OpenID Connect 授權，集中管理 PGID session 與應用授權。"
+    />
+    <meta property="og:url" content="https://sso.pg72.tw/" />
+    <meta property="og:locale" content="zh_Hant_TW" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="PGID — PG72 單一登入" />
+    <meta
+      name="twitter:description"
+      content="PG72 自建的邀請制單一登入 beta：Google 登入、Passkey 無密碼登入，OpenID Connect 授權。"
+    />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Organization",
+            "@id": "https://pg72.tw/#org",
+            "name": "PG72",
+            "url": "https://pg72.tw",
+            "email": "contact@pg72.tw"
+          },
+          {
+            "@type": "WebSite",
+            "@id": "https://sso.pg72.tw/#site",
+            "url": "https://sso.pg72.tw",
+            "name": "PGID",
+            "inLanguage": "zh-Hant",
+            "publisher": { "@id": "https://pg72.tw/#org" }
+          },
+          {
+            "@type": "SoftwareApplication",
+            "name": "PGID",
+            "applicationCategory": "SecurityApplication",
+            "operatingSystem": "Web",
+            "description": "PG72 自建的邀請制 OpenID Connect / OAuth 2.1 單一登入 beta，支援 Google 與 Passkey 登入。",
+            "url": "https://sso.pg72.tw",
+            "offers": { "@type": "Offer", "price": "0", "priceCurrency": "TWD" },
+            "publisher": { "@id": "https://pg72.tw/#org" }
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <div class="ambient" aria-hidden="true">
+      <div class="ambient-grid"></div>
+      <div class="ambient-noise"></div>
+      <span class="ambient-blob ambient-blob-1"></span>
+      <span class="ambient-blob ambient-blob-2"></span>
+    </div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

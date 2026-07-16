@@ -1,0 +1,4 @@
+OIDC_ISSUER="http://localhost:5173"
+OIDC_CLIENT_ID="pg72-test-rp"
+RP_BASE_URL="http://localhost:5174"
+ENVIRONMENT="development"

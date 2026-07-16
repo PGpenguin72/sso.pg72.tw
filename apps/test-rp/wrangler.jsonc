@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pg72-oidc-test-rp",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-07-14",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "TEST_RP_DB",
+      "database_name": "pg72-oidc-test-rp",
+      "database_id": "00000000-0000-0000-0000-000000000002",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "OIDC_ISSUER": "http://localhost:5173",
+    "OIDC_CLIENT_ID": "pg72-test-rp",
+    "RP_BASE_URL": "http://localhost:5174",
+    "ENVIRONMENT": "development"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": { "enabled": true, "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 0.1 }
+  }
+}

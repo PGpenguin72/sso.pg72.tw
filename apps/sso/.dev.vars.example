@@ -1,0 +1,36 @@
+# Copy to .dev.vars for local development. Never commit the real values.
+AUTH_BASE_URL="http://localhost:5173"
+PASSKEY_RP_ID="localhost"
+PASSKEY_ORIGIN="http://localhost:5173"
+REGISTRATION_MODE="public"
+ENVIRONMENT="development"
+BETTER_AUTH_SECRET="generate-with-openssl-rand-base64-32"
+GOOGLE_CLIENT_ID="replace-with-google-oauth-client-id"
+GOOGLE_CLIENT_SECRET="replace-with-google-oauth-client-secret"
+BOOTSTRAP_ADMIN_EMAIL="you@example.com"
+
+# --- Optional social login providers (disabled by default) ---
+# Empty values are intentional: copying this template must not enable a provider.
+# For local testing, set BOTH its id and secret only in the ignored .dev.vars.
+# Deployed credentials belong in Wrangler secrets, never in this tracked file.
+# Developer-portal callback (redirect) URL to register for each provider:
+#   Discord:  https://sso.pg72.tw/callback/discord
+#   GitHub:   https://sso.pg72.tw/callback/github
+#   Facebook: https://sso.pg72.tw/callback/facebook
+#   Apple:    https://sso.pg72.tw/callback/apple
+# Telegram uses the Login Widget (no OAuth callback); set the bot's domain to
+# sso.pg72.tw in @BotFather and post the widget payload to /api/auth/telegram.
+DISCORD_CLIENT_ID=""
+DISCORD_CLIENT_SECRET=""
+GITHUB_CLIENT_ID=""
+GITHUB_CLIENT_SECRET=""
+FACEBOOK_CLIENT_ID=""
+FACEBOOK_CLIENT_SECRET=""
+# Apple's client secret is a short-lived ES256 JWT you generate from your Apple
+# private key (Sign in with Apple); paste the current JWT here.
+APPLE_CLIENT_ID=""
+APPLE_CLIENT_SECRET=""
+APPLE_APP_BUNDLE_IDENTIFIER=""
+# Telegram bot token from @BotFather (format 123456:ABC...).
+TELEGRAM_BOT_TOKEN=""
+TELEGRAM_BOT_USERNAME=""

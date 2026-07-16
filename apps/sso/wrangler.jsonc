@@ -1,0 +1,106 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pg72-id",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-07-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "routes": [
+    { "pattern": "sso.pg72.tw", "custom_domain": true }
+  ],
+  "assets": {
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
+  },
+  "d1_databases": [
+    {
+      "binding": "PG72_ID_DB",
+      "database_name": "pg72-id",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "AUTH_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": { "limit": 30, "period": 60 }
+    },
+    {
+      "name": "ADMIN_RATE_LIMITER",
+      "namespace_id": "1002",
+      "simple": { "limit": 20, "period": 60 }
+    },
+    {
+      // New-account creation budget. Deliberately stricter than the
+      // sign-in limiter (AUTH_RATE_LIMITER) because public registration
+      // is the most abusable surface.
+      "name": "REGISTRATION_RATE_LIMITER",
+      "namespace_id": "1003",
+      "simple": { "limit": 5, "period": 60 }
+    },
+    {
+      // Dovecot authenticates many users through one protected-resource
+      // client/IP pair, so introspection must not share the 30/min auth limit.
+      "name": "INTROSPECTION_IP_RATE_LIMITER",
+      "namespace_id": "1004",
+      "simple": { "limit": 1200, "period": 60 }
+    },
+    {
+      "name": "INTROSPECTION_CLIENT_RATE_LIMITER",
+      "namespace_id": "1005",
+      "simple": { "limit": 600, "period": 60 }
+    }
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "SECURITY_EVENTS", "queue": "pg72-id-security-events" }
+    ],
+    "consumers": [
+      {
+        "queue": "pg72-id-security-events",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "pg72-id-security-events-dlq"
+      }
+    ]
+  },
+  "vars": {
+    "AUTH_BASE_URL": "https://sso.pg72.tw",
+    "PASSKEY_RP_ID": "sso.pg72.tw",
+    "PASSKEY_ORIGIN": "https://sso.pg72.tw",
+    "PASSKEY_STEP_UP_MAX_AGE_SECONDS": "600",
+    "REGISTRATION_MODE": "invite",
+    "ENVIRONMENT": "production"
+  },
+  // `secrets.required` is the only key Wrangler recognises here (it drives type
+  // generation and local "missing secret" warnings), so ONLY the core secrets
+  // the Worker cannot start without belong in it.
+  //
+  // Optional social-login secrets are deliberately NOT listed as required: each
+  // provider activates only when its id/secret pair is present (see
+  // worker/auth.ts and worker/telegram.ts), so a missing value never fails
+  // startup or the core Google/Passkey login. They are typed in
+  // worker/social-providers.env.d.ts and documented in .dev.vars.example.
+  // Optional (set later via Wrangler secrets / Secrets Store, never committed):
+  //   DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET,
+  //   GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET,
+  //   FACEBOOK_CLIENT_ID, FACEBOOK_CLIENT_SECRET,
+  //   APPLE_CLIENT_ID, APPLE_CLIENT_SECRET, APPLE_APP_BUNDLE_IDENTIFIER,
+  //   TELEGRAM_BOT_TOKEN
+  "secrets": {
+    "required": [
+      "BETTER_AUTH_SECRET",
+      "GOOGLE_CLIENT_ID",
+      "GOOGLE_CLIENT_SECRET",
+      "BOOTSTRAP_ADMIN_EMAIL"
+    ]
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": { "enabled": true, "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 0.1 }
+  }
+}

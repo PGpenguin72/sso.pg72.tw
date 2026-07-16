@@ -529,7 +529,7 @@ function TelegramLogin({
   );
 }
 
-function SignInView({ pending }: { pending: boolean }) {
+export function SignInView({ pending }: { pending: boolean }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [enabledSocial, setEnabledSocial] = useState<string[] | null>(null);
@@ -1125,7 +1125,7 @@ function DeleteAccountDialog({
   );
 }
 
-function DeletePasskeyDialog({
+export function DeletePasskeyDialog({
   busy,
   error,
   passkey,
@@ -1817,7 +1817,7 @@ function PrivacyContent() {
   );
 }
 
-function LegalPage({ kind }: { kind: "pp" | "tos" }) {
+export function LegalPage({ kind }: { kind: "pp" | "tos" }) {
   const isTerms = kind === "tos";
   return (
     <PublicPageShell
@@ -1840,7 +1840,7 @@ function LegalPage({ kind }: { kind: "pp" | "tos" }) {
   );
 }
 
-function AboutPage() {
+export function AboutPage() {
   return (
     <PublicPageShell
       title="關於 PGID"

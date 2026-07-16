@@ -2,7 +2,7 @@
 
 > PGID 是 PG72 自建的單一登入（SSO）身分服務，issuer 為 https://sso.pg72.tw。
 > 以 OpenID Connect / OAuth 2.1（Authorization Code + PKCE S256）提供身分驗證，
-> 日常登入方式為 Google 與 Passkey（無密碼），另支援 Discord/GitHub/Facebook/Apple/Telegram。
+> 日常登入方式為 Google 登入與 Passkey 無密碼登入，另支援 Discord/GitHub/Facebook/Apple/Telegram。
 > Production 目前仍是邀請制 beta；verified Google Email 不取代邀請，Passkey 只供既有帳號使用。
 > Email 不是主鍵，接入 PGID 的服務以不可變的 OIDC `sub` 識別使用者。
 

@@ -1,5 +1,99 @@
 # PGID Engineering Handoff
 
+---
+
+# ⚠️ 2026-07-16 SESSION UPDATE(最新狀態,緊急 handoff)
+
+> 寫於 2026-07-16 凌晨/清晨的長 session 末,owner 要求緊急詳細 handoff。
+> **以下這段為最新狀態,若與本檔後半(2026-07-15 snapshot)衝突,以本段為準。**
+> 本段不含任何 secret 值。
+
+## 0. 一句話現況
+
+PGID 這個 session 完成了大量開發並**已部署到 production**;SSO 目前 production Worker 版本是 **`4d0c701a-c805-4254-ae2b-7c0df856b3c0`**。Copy 與 Link 兩個 RP 已正式用 PGID 登入。workspace 已納入 git(但**尚無 remote、從未 push**)。多項 owner 待辦與待決事項在 `msg.md`,每步操作記在 `agentlog.md`。
+
+## 1. Production 部署狀態(SSO Worker `pg72-id`)
+
+- **目前 active 版本:`4d0c701a-c805-4254-ae2b-7c0df856b3c0`**(2026-07-16 部署)。
+- **Rollback 順序(新→舊)**:`4d0c701a`(現行,全功能+morden_dark 重塑) → `5ae88125`(角色/面板/consent/個資,無社群/頭貼) → `3738b93c`(PGID 改名+admin client) → `eafd3330`(改名前) → `0367d345`(Passkey 管理前)。
+- **D1 migration 已套用到 0012**(remote 無 pending):0011=`user_avatar`(頭貼上傳表)、0012=`oauth_client_report`(檢舉表)。0006–0010 是角色階層/client owner/頭貼欄位/consent trust/重邀修復。
+- **`REGISTRATION_MODE` 仍是 `invite`**(公開註冊路徑已就緒但未開;owner 決定日後過安全 gate 再開)。
+- 本版新增功能:sidebar 分層帳號中心、頭貼上傳、OAuth 檢舉、consent 重設計(顯示開發者/授權網域/scope)、安全活動時間軸、四級角色(bootadmin/admin/developer/user)、使用者管理面板、社群登入(Discord/GitHub/Facebook/Apple + Telegram Login Widget)、/tos /pp /about 公開頁、SEO(robots/sitemap/llms.txt/meta/JSON-LD/favicon)、**morden_dark 視覺重塑**(近黑+靛藍+分層背景+Inter 自託管)。
+- **社群登入的 client id/secret 全未設定**(env 未設→該 provider 按鈕自動隱藏,不影響 Google/Passkey)。真值待 owner 到各平台申請後進 secret store。callback URL:`https://sso.pg72.tw/callback/{discord|github|facebook|apple}`;Telegram 走 BotFather 設 domain + POST `/api/auth/telegram`,並需 `TELEGRAM_BOT_TOKEN` + `TELEGRAM_BOT_USERNAME`。
+- 部署煙霧測試(2026-07-16)通過:health、新端點未認證 401、social-config/telegram-config 回 200 空、robots/llms/favicon/Inter woff2 正常、Link RP authorize 正常。
+
+## 2. RP(Relying Party)production 狀態
+
+- **Copy(`copy.pg72.tw`)= 已上線**。SSO client `pg72-copy`(confidential,`client_secret_post`)。redirect `https://copy.pg72.tw/api/auth/callback/pg72-id`。已套 Copy D1 migration 0002–0007。**登出修復已 push**(commit `351552a` 到 GitHub master 觸發 Pages 部署)。六位數 guest code 保留。**owner 待驗證登出**(msg.md A4 已回,尚待確認)。
+- **Link(`link.pg72.tw`)= 已上線**。SSO client `pg72-link`(confidential,**必須用 `client_secret_post`**)。redirect `https://link.pg72.tw/api/auth/callback`。已套 Link migration-003(重建 sessions,全站登出過)。Link 在 **PGpenguin72 Cloudflare 帳號**(`9e1e36d2ce92a214f3e9dbb96b0be9d2`),Pages 專案名 `link-short`。git commits 為本地(`b12e51d`、`46f67c8`、`305353a` 等),**未 push 到 GitHub**;production 是用 `wrangler pages deploy` 直接部署。
+- **prod SSO D1 內的 OAuth client**:`pg72-copy`、`pg72-link`、`pg72-diary`、**`pg72-diary-dev`(owner 已同意移除,尚未執行)**,可能還有 `pg72-test-rp`。`pg72-diary`/`pg72-diary-dev` 是 owner 另一個 Claude 分頁 seed 的(diary.pg72.tw)。
+- Status/Upload/File/Webmail:尚未 cutover;整合方案/設定已備妥在各自 repo 的 `deploy/pgid/` 或 `docs/pgid-cutover-runbook.md`。
+
+## 3. Git / 版本控制狀態(重要)
+
+- **workspace root `/Users/pgpenguin72/sso.pg72.tw` 已是 git repo**(branch `main`,baseline commit `405bec6`),**最新 commit `48a73e4`**。**尚無 remote,從未 push。** `原專案代碼/` 已被根 `.gitignore` 排除(各自獨立 repo)。
+- 本 session 的功能都以 worktree 分支開發後合併回 main(前端/後端/文件/QA修正/reskin 皆已 merge)。`.claude/worktrees/` 下可能還有已合併的 worktree,可清。
+- **各服務 repo(原專案代碼/)**:Copy=master 已 push GitHub;Link/Status/Upload/Webmail/File=本地 commit,**未 push**(Copy 以外都只在本地)。
+- **未追蹤檔**:`.claude/`、`morden_dark.txt`(owner 提供的主題,建議保留)、可能還有 diary 相關 seed。
+
+## 4. 關鍵技術陷阱(務必知道,踩過)
+
+1. **client_secret_post,不要用 HTTP Basic**:PGID 的 token endpoint(`@better-auth/oauth-provider@1.6.23`)解 Basic 只做 `split(":")`、**不 percent-decode**;oauth4webapi 的 `ClientSecretBasic` 會把 `-`/`_` 依 RFC 6749 percent-encode(`pg72-link`→`pg72%2Dlink`),導致 `invalid_client`。**所有 RP 一律用 `client_secret_post`**。長期修法(未做):對 oauth-provider 打可追蹤 patch 做 percent-decode + regression test。詳見記憶 `oauth4webapi-basic-auth-interop-bug`。
+2. **wrangler d1 remote 不要帶 `CLOUDFLARE_ACCOUNT_ID` 環境變數 override**——會誤觸 `7404 database not found`。用 OAuth token 預設帳號即可。
+3. **多 Cloudflare 帳號**:SSO/Copy 的資源在 `Weichenstudio@gmail.com` 帳號(`e8f763b9a77fe946439952d609d90cf4`);Link(`link-short`)在 `PGpenguin72` 帳號(`9e1e36d2ce92a214f3e9dbb96b0be9d2`)。查 Pages/D1 要選對帳號。
+4. **不可刪 `pg72-id-preview` D1**——名稱誤導但那是 live production 身分庫。
+5. **不可隨意 rotate `BETTER_AUTH_SECRET`**——它加密 D1 內的 JWKS 私鑰,亂 rotate 會讓所有 session 掛掉(2026-07-15 事故就是這個)。
+6. **Pages secret 更新後要重新部署才生效**(Link 除錯時踩過)。
+7. **不可 reset 各服務 dirty worktree / 不碰 clone 專案**。
+
+## 5. 待辦與待決(完整見 `msg.md`)
+
+**Owner 已回覆但我尚未執行(被此 handoff 中斷)**:
+- **A2:移除 prod SSO D1 的 `pg72-diary-dev` client**(owner 同意)。指令:先備份,`wrangler d1 execute PG72_ID_DB --remote --command "DELETE FROM oauthClient WHERE clientId='pg72-diary-dev'"`(不帶帳號 override)。
+- **A3:清 Link 的舊 secret**(owner 同意):在 `PGpenguin72` 帳號對 `link-short` Pages 刪除 `ALLOWED_EMAIL`、`GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`(Link 已改用 PGID,這三個沒用)。
+- **D-QA:owner 選定四角色**=資安/美術/工程/一般使用者,對 **PGID**(不是個人站)。已跑資安(bug-hunt,無 Critical/High)、美術、工程(QA 工程師);**尚缺「一般使用者」角色**(可對已部署的 live PGID 跑)。
+- **mail:owner 選 Path A**(Dovecot introspection + XOAUTH2 免密碼收發信)。設定已備妥在 `原專案代碼/webmail.pg72.tw/deploy/pgid/mail/`。**PGID 側前置**:`/oauth2/introspect` 需對 access token 回 `active:true` 且回 `email`(RFC 7662 只保證 username)——**尚未實作/驗證**。**套用到 VPS(23.146.248.189)屬高風險跨專案操作,需 3-agent 投票 + 維護窗口 + owner 在場**,不可半夜硬套。
+- **設計統一範圍(owner 確認)**:重塑 `ahsnccu-ann`、`原專案代碼/copy.pg72.tw`、`原專案代碼/link.pg72.tw`、`原專案代碼/upload.pg72.tw`、`~/diary.pg72.tw`(diary 可碰)。**排除**:status/PG-xugou(XUGOU fork)、anzhiyu/fuwari(部落格)、其他 clone、NightStudy、sm(owner 說不用)。主題用 `morden_dark.txt`。**尚未開始**(此 handoff 前正要派 agent)。
+
+**A1(已查明,無需 owner 動作)**:Status 的 Telegram token 是上游 XUGOU 作者 `zaunist` 2025-12-17 commit 的(非 owner),owner 無法也無需撤銷,只需確保不使用(已停用)。
+
+**社群登入真 token**:owner 要申請教學(A4)——見下方各平台開發者後台申請 client id/secret,callback `https://sso.pg72.tw/callback/{provider}`。
+
+## 6. 本 session 產出的重要檔案
+
+- `agentlog.md`:每步操作的詳細記錄(時間/目錄/檔案/結果),owner 授權的運作規則也在頂部。
+- `msg.md`:給 owner 的非同步收件匣(待決/待辦/告知)。
+- `docs/design-system.md`:PGID 設計語言落地指南(權威主題=`morden_dark.txt`,Linear/Modern 深色)。
+- `docs/legal/tos.md`、`docs/legal/privacy.md`:服務條款/隱私權政策草稿(繁中,contact@pg72.tw,待複核)。
+- `docs/api/PGID-integration.md`:串接技術手冊。`wiki/`:GitBook 教學(給 `wiki.sso.pg72.tw`,託管方式待 owner 定)。`docs/about-PGID.md`:介紹。
+- `docs/integration-plans/`:File Browser / Roundcube 整合計畫。
+- 各服務 repo 的 `deploy/pgid/`(file/webmail 設定)與 `docs/pgid-cutover-runbook.md`(link/upload)。
+
+## 7. 私有備份位置(0600,勿入版控)
+
+- `~/pg72-private-backups/2026-07-15-sso-cutover/`、`2026-07-15-copy-cutover/`、`2026-07-16-link-cutover/`、`2026-07-16-sso-features/`、`2026-07-16-sso-social/`(含各次部署前的 D1 匯出與 Time Travel bookmark)。
+
+## 8. 運作規則(owner 2026-07-16 授權,詳見 agentlog 頂部與記憶 `operating-rules-2026-07-16`)
+
+- 可自由下載/clone、用指令(禁損害性如 `rm -rf /`)。
+- 每階段本地 commit(可回退)。每步寫 `agentlog.md`。
+- **本專案自身的 production 部署=例行、不投票**;**高風險(跨專案/其他帳號/難回復/損害性,如動 VPS mail server)需開 3-agent 投票(審查員/owner視角/claude),3/3 全票才執行**。
+- subagent 一律用 claude-fable-5,不降級。實作丟 subagent,只有「教 owner/溝通」由 main 直接做。
+
+## 9. 立即接手該做的事(順序建議)
+
+1. 確認 production `4d0c701a` 健康(`curl https://sso.pg72.tw/health`)。
+2. 執行 A2(移除 diary-dev client)、A3(清 Link 舊 secret)——owner 已同意。
+3. 派 subagent 做設計統一(5 repos)、一般使用者 QA、mail PGID-introspection 前置。
+4. mail VPS 套用等維護窗口 + 投票。
+5. 教 owner 申請社群登入 client（A4)。
+
+---
+
+> 以下為 2026-07-15 的原始 snapshot(部分已被上方更新取代,保留供歷史參照)。
+
+---
+
 > Snapshot: 2026-07-15 21:17 CST (Asia/Taipei, UTC+08:00)  
 > Production issuer: `https://sso.pg72.tw`  
 > Production Worker: `pg72-id`  

@@ -61,3 +61,6 @@
 | 2026-07-16 (醒) | owner 決策 | sso.pg72.tw | msg.md | Owner 回覆:1)部署上線+教設secret 2)QA只要資安/美術/工程/一般使用者四角色(對PGID) 3)mail用PathA 4)重塑範圍=ahsnccu-ann/copy/link/upload/diary(NightStudy/sm不做,status/blog/clone排除) 5)主題確定 morden_dark(D-新作廢) | 記錄 |
 | 2026-07-16 (醒) | 部署 | sso.pg72.tw | pg72-id Worker | 部署合併批次到 production(版本 4d0c701a):套 migration 0011/0012 + 新 Worker(含 morden_dark 重塑);煙霧測試:新端點 401、social/telegram config 正確、robots/llms/favicon/Inter woff2 正常、Link RP 正常 | 完成 |
 | 2026-07-16 (醒) | A1 調查 | 原專案代碼/status.pg72.tw | git history | Telegram token 首次 commit=19351b0(2025-12-17, author zaunist@foxmail 上游XUGOU作者,非owner);屬上游硬編碼洩漏,非owner的bot,owner無需撤銷,只需確保不使用(已停用) | 完成 |
+| 2026-07-16 (醒) | A2 檢查 | prod SSO D1 | oauthClient | 查 pg72-diary-dev:production 已無此 client(僅剩 pg72-diary),應為另一分頁已移除;無需動作 | 已完成(無操作) |
+| 2026-07-16 (醒) | A3 清理 | link-short Pages (PGpenguin72帳號) | secrets | 刪除 Link 舊 secret ALLOWED_EMAIL/GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET;剩 PG72_ID_CLIENT_SECRET;Link 仍正常 | 完成 |
+| 2026-07-16 (醒) | 交接模式 | sso.pg72.tw | handoff/agentlog/msg | Owner:上游 token 可能將盡,CODEX 可能隨時接手;維持每步 commit+log,subagent 各自寫日誌後合併,handoff 保持最新 | 進行中 |

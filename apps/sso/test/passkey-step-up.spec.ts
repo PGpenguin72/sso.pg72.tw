@@ -6,7 +6,12 @@ import {
 import { isoBase64URL, isoCBOR } from "@simplewebauthn/server/helpers";
 import { describe, expect, it } from "vitest";
 
-import { createAuthenticatedUser, createSessionFor } from "./helpers";
+import { readRuntimeConfig } from "../worker/config";
+import {
+  createAuthenticatedUser,
+  createBootstrapAdmin,
+  createSessionFor,
+} from "./helpers";
 
 const BASE_URL = "http://localhost:5173";
 const CHALLENGE_URL = `${BASE_URL}/api/account/passkey-step-up/challenge`;
@@ -120,10 +125,17 @@ async function createAuthenticator(userId: string): Promise<TestAuthenticator> {
 async function createAssertion(
   authenticator: TestAuthenticator,
   challenge: string,
-  options: { origin?: string; userVerified?: boolean } = {},
+  options: {
+    credentialId?: string;
+    origin?: string;
+    rpId?: string;
+    userVerified?: boolean;
+  } = {},
 ): Promise<AuthenticationResponseJSON> {
   const origin = options.origin ?? BASE_URL;
+  const rpId = options.rpId ?? "localhost";
   const userVerified = options.userVerified ?? true;
+  const credentialId = options.credentialId ?? authenticator.credentialId;
   authenticator.counter += 1;
 
   const clientDataJSON = new TextEncoder().encode(
@@ -135,7 +147,7 @@ async function createAssertion(
     }),
   );
   const rpIdHash = new Uint8Array(
-    await crypto.subtle.digest("SHA-256", new TextEncoder().encode("localhost")),
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rpId)),
   );
   const authenticatorData = new Uint8Array(new ArrayBuffer(37));
   authenticatorData.set(rpIdHash, 0);
@@ -158,8 +170,8 @@ async function createAssertion(
   );
 
   return {
-    id: authenticator.credentialId,
-    rawId: authenticator.credentialId,
+    id: credentialId,
+    rawId: credentialId,
     response: {
       authenticatorData: isoBase64URL.fromBuffer(authenticatorData),
       clientDataJSON: isoBase64URL.fromBuffer(clientDataJSON),
@@ -211,6 +223,25 @@ function createClient(session: SessionFixture, clientId: string): Promise<Respon
   );
 }
 
+async function expectNoSuccessfulStepUp(
+  session: SessionFixture,
+): Promise<void> {
+  const state = await env.PG72_ID_DB.prepare(
+    "SELECT passkeyStepUpAt FROM session WHERE id = ? AND userId = ?",
+  )
+    .bind(session.sessionId, session.userId)
+    .first<{ passkeyStepUpAt: string | null }>();
+  expect(state?.passkeyStepUpAt).toBeNull();
+
+  const audit = await env.PG72_ID_DB.prepare(
+    `SELECT COUNT(*) AS count FROM audit_event
+      WHERE event_type = 'passkey.step_up_succeeded' AND subject_id = ?`,
+  )
+    .bind(session.userId)
+    .first<{ count: number }>();
+  expect(audit?.count).toBe(0);
+}
+
 async function stepUp(
   session: SessionFixture,
   authenticator: TestAuthenticator,
@@ -240,10 +271,10 @@ async function stepUp(
 
 describe("Passkey step-up", () => {
   it("requires enrollment and never grants bootadmin a bypass", async () => {
-    const admin = await createAuthenticatedUser(
-      `${crypto.randomUUID()}@example.com`,
-      "admin",
-    );
+    const admin = await createBootstrapAdmin();
+    await env.PG72_ID_DB.prepare("DELETE FROM passkey WHERE userId = ?")
+      .bind(admin.userId)
+      .run();
 
     const mutation = await createClient(
       admin,
@@ -263,22 +294,122 @@ describe("Passkey step-up", () => {
     });
   });
 
-  it("rejects high-risk mutations until the current session steps up", async () => {
+  it("gates all six high-risk client mutations on the current session", async () => {
     const admin = await createAuthenticatedUser(
       `${crypto.randomUUID()}@example.com`,
       "admin",
     );
     await createAuthenticator(admin.userId);
+    const clientId = `no-step-up-${crypto.randomUUID()}`;
+    const mutations = [
+      {
+        body: {
+          clientId,
+          developerName: "Step-up Test Team",
+          name: "Step-up Test Client",
+          redirectUris: [`https://${clientId}.example/callback`],
+        },
+        method: "POST",
+        name: "create",
+        url: CLIENTS_URL,
+      },
+      {
+        body: { developerName: "Updated Step-up Test Team" },
+        method: "PATCH",
+        name: "trust",
+        url: `${CLIENTS_URL}/${clientId}`,
+      },
+      {
+        method: "POST",
+        name: "rotate",
+        url: `${CLIENTS_URL}/${clientId}/rotate-secret`,
+      },
+      {
+        body: { disabled: true },
+        method: "POST",
+        name: "status",
+        url: `${CLIENTS_URL}/${clientId}/status`,
+      },
+      {
+        method: "DELETE",
+        name: "delete",
+        url: `${CLIENTS_URL}/${clientId}`,
+      },
+      {
+        method: "POST",
+        name: "provision",
+        url: `${CLIENTS_URL}/provision-mail-introspector`,
+      },
+    ] as const;
 
-    const response = await createClient(
-      admin,
-      `no-step-up-${crypto.randomUUID()}`,
+    for (const mutation of mutations) {
+      const response = await exports.default.fetch(
+        new Request(mutation.url, {
+          method: mutation.method,
+          headers: admin.headers,
+          ...("body" in mutation
+            ? { body: JSON.stringify(mutation.body) }
+            : {}),
+        }),
+      );
+      expect(response.status, mutation.name).toBe(403);
+      expect(await response.json(), mutation.name).toEqual({
+        code: "PASSKEY_STEP_UP_REQUIRED",
+        error: "passkey_step_up_required",
+      });
+    }
+  });
+
+  it("pins the production origin and RP ID to sso.pg72.tw", () => {
+    const productionEnv = {
+      ...env,
+      AUTH_BASE_URL: "https://sso.pg72.tw",
+      ENVIRONMENT: "production",
+      PASSKEY_ORIGIN: "https://sso.pg72.tw",
+      PASSKEY_RP_ID: "sso.pg72.tw",
+    };
+    const config = readRuntimeConfig(productionEnv);
+    expect(config.authBaseUrl).toBe("https://sso.pg72.tw");
+    expect(config.passkeyOrigin).toBe("https://sso.pg72.tw");
+    expect(config.passkeyRpId).toBe("sso.pg72.tw");
+
+    expect(() =>
+      readRuntimeConfig({
+        ...productionEnv,
+        PASSKEY_ORIGIN: "https://login.pg72.tw",
+      }),
+    ).toThrow("Production Passkey origin/RP ID must be sso.pg72.tw");
+    expect(() =>
+      readRuntimeConfig({ ...productionEnv, PASSKEY_RP_ID: "pg72.tw" }),
+    ).toThrow("Production Passkey origin/RP ID must be sso.pg72.tw");
+  });
+
+  it("enforces exact request Origin and the step-up body limit", async () => {
+    const admin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
     );
-    expect(response.status).toBe(403);
-    expect(await response.json()).toEqual({
-      code: "PASSKEY_STEP_UP_REQUIRED",
-      error: "passkey_step_up_required",
-    });
+
+    for (const origin of [undefined, "https://attacker.example"]) {
+      const headers = new Headers(admin.headers);
+      if (origin) headers.set("Origin", origin);
+      else headers.delete("Origin");
+      const response = await exports.default.fetch(
+        new Request(CHALLENGE_URL, { method: "POST", headers }),
+      );
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({ error: "invalid_origin" });
+    }
+
+    const oversized = await exports.default.fetch(
+      new Request(VERIFY_URL, {
+        method: "POST",
+        headers: admin.headers,
+        body: JSON.stringify({ padding: "x".repeat(17 * 1024) }),
+      }),
+    );
+    expect(oversized.status).toBe(413);
+    expect(await oversized.json()).toEqual({ error: "request_too_large" });
   });
 
   it("records a verified assertion and unlocks client mutations", async () => {
@@ -302,19 +433,167 @@ describe("Passkey step-up", () => {
     expect(state?.verified_at).not.toBeNull();
     expect(state?.counter).toBe(1);
     const audit = await env.PG72_ID_DB.prepare(
-      `SELECT outcome FROM audit_event
+      `SELECT metadata_json, outcome FROM audit_event
         WHERE event_type = 'passkey.step_up_succeeded' AND subject_id = ?
         ORDER BY occurred_at DESC LIMIT 1`,
     )
       .bind(admin.userId)
-      .first<{ outcome: string }>();
-    expect(audit).toEqual({ outcome: "success" });
+      .first<{ metadata_json: string; outcome: string }>();
+    expect(audit).toEqual({
+      metadata_json: JSON.stringify({ method: "passkey" }),
+      outcome: "success",
+    });
+    expect(audit?.metadata_json).not.toContain(
+      verified.challenge.options.challenge,
+    );
+    expect(audit?.metadata_json).not.toContain(authenticator.credentialId);
 
     const mutation = await createClient(
       admin,
       `stepped-up-${crypto.randomUUID()}`,
     );
     expect(mutation.status).toBe(201);
+  });
+
+  it.each([
+    {
+      label: "wrong assertion origin",
+      options: { origin: "https://attacker.example" },
+    },
+    {
+      label: "wrong RP ID hash",
+      options: { rpId: "attacker.example" },
+    },
+  ])("rejects $label without recording a step-up", async ({ options }) => {
+    const admin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
+    );
+    const authenticator = await createAuthenticator(admin.userId);
+    const generated = await requestChallenge(admin);
+    expect(generated.response.status).toBe(200);
+    const assertion = await createAssertion(
+      authenticator,
+      generated.payload.options.challenge,
+      options,
+    );
+
+    const response = await verifyStepUp(
+      admin,
+      generated.payload.challengeId,
+      assertion,
+    );
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "passkey_step_up_failed" });
+    await expectNoSuccessfulStepUp(admin);
+
+    const deniedAudit = await env.PG72_ID_DB.prepare(
+      `SELECT metadata_json FROM audit_event
+        WHERE event_type = 'passkey.step_up_failed' AND subject_id = ?
+        ORDER BY occurred_at DESC LIMIT 1`,
+    )
+      .bind(admin.userId)
+      .first<{ metadata_json: string }>();
+    expect(deniedAudit?.metadata_json).toBe(
+      JSON.stringify({ reason: "assertion_invalid" }),
+    );
+    expect(deniedAudit?.metadata_json).not.toContain(
+      generated.payload.options.challenge,
+    );
+    expect(deniedAudit?.metadata_json).not.toContain(
+      authenticator.credentialId,
+    );
+  });
+
+  it("rejects an expired challenge without verifying the session", async () => {
+    const admin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
+    );
+    const authenticator = await createAuthenticator(admin.userId);
+    const generated = await requestChallenge(admin);
+    expect(generated.response.status).toBe(200);
+    const assertion = await createAssertion(
+      authenticator,
+      generated.payload.options.challenge,
+    );
+    const createdAt = new Date(Date.now() - 2 * 60 * 1000);
+    const expiresAt = new Date(Date.now() - 60 * 1000);
+    await env.PG72_ID_DB.prepare(
+      `UPDATE passkey_step_up_challenge
+          SET created_at = ?, expires_at = ?
+        WHERE id = ?`,
+    )
+      .bind(
+        createdAt.toISOString(),
+        expiresAt.toISOString(),
+        generated.payload.challengeId,
+      )
+      .run();
+
+    const response = await verifyStepUp(
+      admin,
+      generated.payload.challengeId,
+      assertion,
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: "passkey_step_up_challenge_invalid",
+    });
+    await expectNoSuccessfulStepUp(admin);
+  });
+
+  it("returns the same error for unknown and another user's credential", async () => {
+    const admin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
+    );
+    await createAuthenticator(admin.userId);
+    const other = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "user",
+    );
+    const otherAuthenticator = await createAuthenticator(other.userId);
+    const payloads: unknown[] = [];
+
+    for (const credentialId of [
+      isoBase64URL.fromBuffer(crypto.getRandomValues(new Uint8Array(32))),
+      otherAuthenticator.credentialId,
+    ]) {
+      const generated = await requestChallenge(admin);
+      expect(generated.response.status).toBe(200);
+      const assertion = await createAssertion(
+        otherAuthenticator,
+        generated.payload.options.challenge,
+        { credentialId },
+      );
+      const response = await verifyStepUp(
+        admin,
+        generated.payload.challengeId,
+        assertion,
+      );
+      expect(response.status).toBe(401);
+      payloads.push(await response.json());
+    }
+
+    expect(payloads).toEqual([
+      { error: "passkey_step_up_failed" },
+      { error: "passkey_step_up_failed" },
+    ]);
+    await expectNoSuccessfulStepUp(admin);
+    const deniedAudits = await env.PG72_ID_DB.prepare(
+      `SELECT metadata_json FROM audit_event
+        WHERE event_type = 'passkey.step_up_failed' AND subject_id = ?`,
+    )
+      .bind(admin.userId)
+      .all<{ metadata_json: string }>();
+    expect(deniedAudits.results).toHaveLength(2);
+    for (const audit of deniedAudits.results) {
+      expect(audit.metadata_json).toBe(
+        JSON.stringify({ reason: "credential_invalid" }),
+      );
+      expect(audit.metadata_json).not.toContain(otherAuthenticator.credentialId);
+    }
   });
 
   it("consumes each challenge exactly once", async () => {
@@ -373,6 +652,187 @@ describe("Passkey step-up", () => {
       assertion,
     );
     expect(original.status).toBe(200);
+  });
+
+  it("fails closed when the guarded authenticator counter conflicts", async () => {
+    const admin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
+    );
+    const authenticator = await createAuthenticator(admin.userId);
+    const generated = await requestChallenge(admin);
+    const assertion = await createAssertion(
+      authenticator,
+      generated.payload.options.challenge,
+    );
+    await env.PG72_ID_DB.prepare(
+      `CREATE TRIGGER ignore_step_up_counter
+       BEFORE UPDATE OF counter ON passkey
+       BEGIN
+         SELECT RAISE(IGNORE);
+       END`,
+    ).run();
+    let response: Response;
+    try {
+      response = await verifyStepUp(
+        admin,
+        generated.payload.challengeId,
+        assertion,
+      );
+    } finally {
+      await env.PG72_ID_DB.prepare(
+        "DROP TRIGGER ignore_step_up_counter",
+      ).run();
+    }
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "passkey_step_up_failed" });
+    const counter = await env.PG72_ID_DB.prepare(
+      "SELECT counter FROM passkey WHERE id = ?",
+    )
+      .bind(authenticator.passkeyId)
+      .first<{ counter: number }>();
+    expect(counter?.counter).toBe(0);
+    await expectNoSuccessfulStepUp(admin);
+  });
+
+  it("does not leave a valid step-up when the session disappears mid-batch", async () => {
+    const admin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
+    );
+    const authenticator = await createAuthenticator(admin.userId);
+    const generated = await requestChallenge(admin);
+    const assertion = await createAssertion(
+      authenticator,
+      generated.payload.options.challenge,
+    );
+    await env.PG72_ID_DB.prepare(
+      `CREATE TRIGGER delete_step_up_session
+       BEFORE INSERT ON audit_event
+       WHEN NEW.event_type = 'passkey.step_up_succeeded'
+       BEGIN
+         DELETE FROM session WHERE userId = NEW.actor_user_id;
+       END`,
+    ).run();
+    let response: Response;
+    try {
+      response = await verifyStepUp(
+        admin,
+        generated.payload.challengeId,
+        assertion,
+      );
+    } finally {
+      await env.PG72_ID_DB.prepare(
+        "DROP TRIGGER delete_step_up_session",
+      ).run();
+    }
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "unauthorized" });
+    const session = await env.PG72_ID_DB.prepare(
+      "SELECT passkeyStepUpAt FROM session WHERE id = ?",
+    )
+      .bind(admin.sessionId)
+      .first();
+    expect(session).toBeNull();
+    const successAudit = await env.PG72_ID_DB.prepare(
+      `SELECT id FROM audit_event
+        WHERE event_type = 'passkey.step_up_succeeded' AND subject_id = ?`,
+    )
+      .bind(admin.userId)
+      .first();
+    expect(successAudit).toBeNull();
+  });
+
+  it("rolls back the audit batch without writing a timestamp", async () => {
+    const admin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
+    );
+    const authenticator = await createAuthenticator(admin.userId);
+    const generated = await requestChallenge(admin);
+    const assertion = await createAssertion(
+      authenticator,
+      generated.payload.options.challenge,
+    );
+    await env.PG72_ID_DB.prepare(
+      `CREATE TRIGGER abort_step_up_audit
+       BEFORE INSERT ON audit_event
+       WHEN NEW.event_type = 'passkey.step_up_succeeded'
+       BEGIN
+         SELECT RAISE(ABORT, 'forced step-up audit failure');
+       END`,
+    ).run();
+    let response: Response;
+    try {
+      response = await verifyStepUp(
+        admin,
+        generated.payload.challengeId,
+        assertion,
+      );
+    } finally {
+      await env.PG72_ID_DB.prepare("DROP TRIGGER abort_step_up_audit").run();
+    }
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "internal_server_error" });
+    const state = await env.PG72_ID_DB.prepare(
+      `SELECT s.passkeyStepUpAt AS verified_at, p.counter
+         FROM session s JOIN passkey p ON p.id = ?
+        WHERE s.id = ?`,
+    )
+      .bind(authenticator.passkeyId, admin.sessionId)
+      .first<{ counter: number; verified_at: string | null }>();
+    expect(state).toEqual({ counter: 1, verified_at: null });
+    const challenge = await env.PG72_ID_DB.prepare(
+      "SELECT id FROM passkey_step_up_challenge WHERE id = ?",
+    )
+      .bind(generated.payload.challengeId)
+      .first();
+    expect(challenge).toBeNull();
+    await expectNoSuccessfulStepUp(admin);
+  });
+
+  it("clears a timestamp when an audit insert is ignored", async () => {
+    const admin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
+    );
+    const authenticator = await createAuthenticator(admin.userId);
+    const generated = await requestChallenge(admin);
+    const assertion = await createAssertion(
+      authenticator,
+      generated.payload.options.challenge,
+    );
+    await env.PG72_ID_DB.prepare(
+      `CREATE TRIGGER ignore_step_up_audit
+       BEFORE INSERT ON audit_event
+       WHEN NEW.event_type = 'passkey.step_up_succeeded'
+       BEGIN
+         SELECT RAISE(IGNORE);
+       END`,
+    ).run();
+    let response: Response;
+    try {
+      response = await verifyStepUp(
+        admin,
+        generated.payload.challengeId,
+        assertion,
+      );
+    } finally {
+      await env.PG72_ID_DB.prepare("DROP TRIGGER ignore_step_up_audit").run();
+    }
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "internal_server_error" });
+    const counter = await env.PG72_ID_DB.prepare(
+      "SELECT counter FROM passkey WHERE id = ?",
+    )
+      .bind(authenticator.passkeyId)
+      .first<{ counter: number }>();
+    expect(counter?.counter).toBe(1);
+    await expectNoSuccessfulStepUp(admin);
   });
 
   it("rejects an expired step-up timestamp", async () => {

@@ -188,12 +188,13 @@ async function recordDeniedStepUp(
   );
 }
 
-function auditInsertForSteppedUpSession(
+function auditInsertForCounterVerifiedSession(
   env: Env,
   event: SecurityEvent,
   sessionId: string,
   userId: string,
-  verifiedAt: string,
+  passkeyId: string,
+  counter: number,
 ): D1PreparedStatement {
   return env.PG72_ID_DB.prepare(
     `INSERT INTO audit_event
@@ -202,7 +203,10 @@ function auditInsertForSteppedUpSession(
      SELECT ?, ?, ?, ?, ?, ?, ?, ?
       WHERE EXISTS (
         SELECT 1 FROM session
-         WHERE id = ? AND userId = ? AND passkeyStepUpAt = ?
+         WHERE id = ? AND userId = ?
+      ) AND EXISTS (
+        SELECT 1 FROM passkey
+         WHERE id = ? AND userId = ? AND counter = ?
       )`,
   ).bind(
     event.eventId,
@@ -215,8 +219,22 @@ function auditInsertForSteppedUpSession(
     event.occurredAt,
     sessionId,
     userId,
-    verifiedAt,
+    passkeyId,
+    userId,
+    counter,
   );
+}
+
+async function deleteOrphanedStepUpAudit(
+  env: Env,
+  auditEventId: string,
+): Promise<void> {
+  await env.PG72_ID_DB.prepare(
+    `DELETE FROM audit_event
+      WHERE id = ? AND event_type = 'passkey.step_up_succeeded'`,
+  )
+    .bind(auditEventId)
+    .run();
 }
 
 export const passkeyStepUpRoutes = new Hono<AppEnv>();
@@ -443,16 +461,12 @@ passkeyStepUpRoutes.post("/api/account/passkey-step-up/verify", async (c) => {
     return c.json({ error: "passkey_step_up_failed" }, 401);
   }
 
+  const newCounter = verification.authenticationInfo.newCounter;
   const counterUpdate = await c.env.PG72_ID_DB.prepare(
     `UPDATE passkey SET counter = ?
       WHERE id = ? AND userId = ? AND counter = ?`,
   )
-    .bind(
-      verification.authenticationInfo.newCounter,
-      passkey.id,
-      session.user.id,
-      passkey.counter,
-    )
+    .bind(newCounter, passkey.id, session.user.id, passkey.counter)
     .run();
   if (counterUpdate.meta.changes !== 1) {
     await recordDeniedStepUp(
@@ -473,32 +487,72 @@ passkeyStepUpRoutes.post("/api/account/passkey-step-up/verify", async (c) => {
     metadata: { method: "passkey" },
   });
   const results = await c.env.PG72_ID_DB.batch([
-    c.env.PG72_ID_DB.prepare(
-      `UPDATE session SET passkeyStepUpAt = ?
-        WHERE id = ? AND userId = ?`,
-    ).bind(verifiedAt, session.session.id, session.user.id),
-    auditInsertForSteppedUpSession(
+    auditInsertForCounterVerifiedSession(
       c.env,
       auditEvent,
       session.session.id,
       session.user.id,
+      passkey.id,
+      newCounter,
+    ),
+    c.env.PG72_ID_DB.prepare(
+      `UPDATE session SET passkeyStepUpAt = ?
+        WHERE id = ? AND userId = ?
+          AND EXISTS (
+            SELECT 1 FROM audit_event
+             WHERE id = ?
+               AND event_type = 'passkey.step_up_succeeded'
+               AND actor_user_id = ?
+               AND subject_id = ?
+               AND outcome = 'success'
+          )`,
+    ).bind(
       verifiedAt,
+      session.session.id,
+      session.user.id,
+      auditEvent.eventId,
+      session.user.id,
+      session.user.id,
     ),
   ]);
-  if (
-    results[0]?.meta.changes !== 1 ||
-    results[1]?.meta.changes !== 1
-  ) {
-    return c.json({ error: "unauthorized" }, 401);
+  if (results.every((result) => result.meta.changes === 1)) {
+    await enqueueSecurityEvent(c.env, auditEvent, c.executionCtx);
+
+    return c.json({
+      expiresAt: new Date(
+        new Date(verifiedAt).getTime() + config.passkeyStepUpMaxAgeMs,
+      ).toISOString(),
+      verified: true,
+      verifiedAt,
+    });
   }
 
-  await enqueueSecurityEvent(c.env, auditEvent, c.executionCtx);
-
-  return c.json({
-    expiresAt: new Date(
-      new Date(verifiedAt).getTime() + config.passkeyStepUpMaxAgeMs,
-    ).toISOString(),
-    verified: true,
-    verifiedAt,
-  });
+  // A zero-change audit cannot unlock the session because the timestamp write
+  // depends on that exact event. If the timestamp guard fails after the audit
+  // insert, remove the harmless orphan; neither path exposes a valid step-up.
+  await deleteOrphanedStepUpAudit(c.env, auditEvent.eventId);
+  if (results[0]?.meta.changes !== 1) {
+    const currentSession = await c.env.PG72_ID_DB.prepare(
+      "SELECT 1 AS present FROM session WHERE id = ? AND userId = ?",
+    )
+      .bind(session.session.id, session.user.id)
+      .first();
+    if (currentSession) {
+      throw new Error("Passkey step-up success audit was not persisted");
+    }
+    await recordDeniedStepUp(
+      c.env,
+      session.user.id,
+      "session_invalidated",
+      c.executionCtx,
+    );
+    return c.json({ error: "unauthorized" }, 401);
+  }
+  await recordDeniedStepUp(
+    c.env,
+    session.user.id,
+    "session_invalidated",
+    c.executionCtx,
+  );
+  return c.json({ error: "unauthorized" }, 401);
 });

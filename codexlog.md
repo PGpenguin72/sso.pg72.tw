@@ -90,3 +90,27 @@
 - Verification: `pnpm --filter @pg72/id typecheck` passed; the complete
   workerd run passed 173/173 tests in 14 files. This also validates D1 support
   for the atomic `DELETE ... RETURNING` challenge-consumption statement.
+
+## 2026-07-16 17:17 CST - Passkey negative and consistency gates complete
+
+- Corrected the enrollment regression to exercise the effective bootstrap
+  administrator and explicitly proved there is no bootadmin bypass.
+- Expanded the real P-256 ceremony suite to 17 tests. It now covers wrong
+  assertion origin, wrong RP ID hash, expired challenge, unknown versus
+  another user's credential, exact request Origin, the 16 KiB body limit,
+  every one of the six client mutation routes, and redacted audit metadata.
+- Hardened finalization against concurrent observation: the credential counter
+  is first advanced with a guarded CAS. A transactional D1 batch then inserts
+  a success audit guarded by the live session and new counter before updating
+  the session timestamp; the timestamp statement requires that exact audit
+  event. Zero-change guards therefore never expose a valid timestamp.
+- SQLite trigger fault injection fixes D1 behavior in regression coverage:
+  counter conflicts write no timestamp, session disappearance leaves no
+  timestamp or success audit, a thrown audit insert rolls back its batch, and
+  an ignored audit insert cannot unlock the session. The one-time challenge
+  remains consumed and an advanced authenticator counter is retained on later
+  failure as the fail-closed anti-replay tradeoff.
+- Verification with explicit non-secret local placeholders:
+  `pnpm --filter @pg72/id typecheck` passed and the complete workerd suite
+  passed 183/183 tests in 14 files. Documentation, standalone migration replay,
+  and the final required `check`/RP gates remain pending.

@@ -7,10 +7,11 @@
   },
   "scripts": {
     "build": "pnpm -r --if-present build",
-    "check": "pnpm -r --if-present check",
+    "check": "pnpm test:clean-dist && pnpm -r --if-present check",
     "dev": "pnpm --filter @pg72/id dev",
     "dev:rp": "pnpm --filter @pg72/test-rp dev",
     "test": "pnpm -r --if-present test",
+    "test:clean-dist": "node --test scripts/clean-package-dist.test.mjs",
     "typecheck": "pnpm -r --if-present typecheck"
   }
 }

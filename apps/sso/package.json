@@ -4,16 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vite build && node scripts/remove-built-dev-vars.mjs",
+    "build": "node ../../scripts/clean-package-dist.mjs && vite build && node scripts/remove-built-dev-vars.mjs",
     "cf-typegen": "wrangler types --strict-vars false",
-    "check": "pnpm cf-typegen && pnpm typecheck && pnpm test && pnpm build",
+    "check": "pnpm typecheck && pnpm test && pnpm build",
     "db:migrate:local": "wrangler d1 migrations apply PG72_ID_DB --local",
     "db:migrate:remote": "wrangler d1 migrations apply PG72_ID_DB --remote",
     "db:seed-diary:local": "wrangler d1 execute PG72_ID_DB --local --file seed/diary-clients.sql",
     "db:seed-test-rp:local": "wrangler d1 execute PG72_ID_DB --local --file seed/test-rp-client.sql",
     "dev": "vite",
     "test": "vitest run",
-    "typecheck": "tsc --build --pretty false"
+    "typecheck": "pnpm cf-typegen && pnpm typecheck:raw",
+    "typecheck:raw": "tsc --build --pretty false"
   },
   "dependencies": {
     "@better-auth/oauth-provider": "1.6.23",

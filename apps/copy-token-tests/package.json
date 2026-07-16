@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "check": "node ../../scripts/check-copy-token-prerequisites.mjs && pnpm typecheck && pnpm test",
     "test": "vitest run",
     "typecheck": "tsc --noEmit --pretty false"
   },

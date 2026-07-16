@@ -5,6 +5,7 @@ import {
   FRESH_SESSION_MAX_AGE_MS,
   readRuntimeConfig,
 } from "./config";
+import { readPasskeyStepUpState } from "./passkey-step-up";
 import {
   effectivePlatformRole,
   hasPermission,
@@ -31,7 +32,7 @@ export type AdminGate =
 export async function requireAdminPermission(
   c: Context<AppEnv>,
   permission: AdminPermission,
-  options: { fresh?: boolean } = {},
+  options: { fresh?: boolean; passkeyStepUp?: boolean } = {},
 ): Promise<AdminGate> {
   const auth = createAuth(c.env, c.executionCtx);
   const session = await auth.api.getSession({ headers: c.req.raw.headers });
@@ -62,6 +63,41 @@ export async function requireAdminPermission(
           {
             code: "SESSION_NOT_FRESH",
             error: "fresh_session_required",
+          },
+          403,
+        ),
+      };
+    }
+  }
+  if (options.passkeyStepUp) {
+    const stepUp = await readPasskeyStepUpState(
+      c.env,
+      session.session.id,
+      session.user.id,
+      config.passkeyStepUpMaxAgeMs,
+    );
+    if (!stepUp) {
+      return { ok: false, response: c.json({ error: "unauthorized" }, 401) };
+    }
+    if (!stepUp.hasPasskey) {
+      return {
+        ok: false,
+        response: c.json(
+          {
+            code: "PASSKEY_ENROLLMENT_REQUIRED",
+            error: "passkey_enrollment_required",
+          },
+          403,
+        ),
+      };
+    }
+    if (!stepUp.verified) {
+      return {
+        ok: false,
+        response: c.json(
+          {
+            code: "PASSKEY_STEP_UP_REQUIRED",
+            error: "passkey_step_up_required",
           },
           403,
         ),

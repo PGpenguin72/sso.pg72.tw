@@ -21,6 +21,8 @@ export const SELF_ACTIVITY_SUMMARIES: Readonly<Record<string, string>> = {
   "passkey.renamed": "重新命名 Passkey",
   "passkey.deleted": "移除 Passkey",
   "passkey.delete_blocked": "拒絕移除最後的登入方式",
+  "passkey.step_up_succeeded": "Passkey 驗證成功",
+  "passkey.step_up_failed": "Passkey 驗證失敗",
   "session.revoked": "登出單一裝置",
   "session.revoked_others": "登出其他裝置",
   "session.revoked_all": "登出所有裝置",

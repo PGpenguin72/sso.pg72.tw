@@ -379,6 +379,7 @@ adminClientRoutes.get("/", async (c) => {
 adminClientRoutes.post("/provision-mail-introspector", async (c) => {
   const gate = await requireAdminPermission(c, "clients.manage_all", {
     fresh: true,
+    passkeyStepUp: true,
   });
   if (!gate.ok) return gate.response;
 
@@ -466,7 +467,10 @@ adminClientRoutes.post("/provision-mail-introspector", async (c) => {
 });
 
 adminClientRoutes.post("/", async (c) => {
-  const gate = await requireAdminPermission(c, "clients.manage", { fresh: true });
+  const gate = await requireAdminPermission(c, "clients.manage", {
+    fresh: true,
+    passkeyStepUp: true,
+  });
   if (!gate.ok) return gate.response;
 
   const config = readRuntimeConfig(c.env);
@@ -713,7 +717,10 @@ adminClientRoutes.post("/", async (c) => {
 });
 
 adminClientRoutes.patch("/:clientId", async (c) => {
-  const gate = await requireAdminPermission(c, "clients.manage", { fresh: true });
+  const gate = await requireAdminPermission(c, "clients.manage", {
+    fresh: true,
+    passkeyStepUp: true,
+  });
   if (!gate.ok) return gate.response;
 
   const clientId = c.req.param("clientId");
@@ -812,7 +819,10 @@ adminClientRoutes.patch("/:clientId", async (c) => {
 });
 
 adminClientRoutes.post("/:clientId/rotate-secret", async (c) => {
-  const gate = await requireAdminPermission(c, "clients.manage", { fresh: true });
+  const gate = await requireAdminPermission(c, "clients.manage", {
+    fresh: true,
+    passkeyStepUp: true,
+  });
   if (!gate.ok) return gate.response;
 
   const clientId = c.req.param("clientId");
@@ -866,7 +876,10 @@ adminClientRoutes.post("/:clientId/rotate-secret", async (c) => {
 });
 
 adminClientRoutes.post("/:clientId/status", async (c) => {
-  const gate = await requireAdminPermission(c, "clients.manage", { fresh: true });
+  const gate = await requireAdminPermission(c, "clients.manage", {
+    fresh: true,
+    passkeyStepUp: true,
+  });
   if (!gate.ok) return gate.response;
 
   const clientId = c.req.param("clientId");
@@ -947,7 +960,10 @@ adminClientRoutes.post("/:clientId/status", async (c) => {
 });
 
 adminClientRoutes.delete("/:clientId", async (c) => {
-  const gate = await requireAdminPermission(c, "clients.manage", { fresh: true });
+  const gate = await requireAdminPermission(c, "clients.manage", {
+    fresh: true,
+    passkeyStepUp: true,
+  });
   if (!gate.ok) return gate.response;
 
   const clientId = c.req.param("clientId");

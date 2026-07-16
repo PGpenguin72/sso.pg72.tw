@@ -18,6 +18,8 @@
   "dependencies": {
     "@better-auth/oauth-provider": "1.6.23",
     "@better-auth/passkey": "1.6.23",
+    "@simplewebauthn/browser": "13.3.0",
+    "@simplewebauthn/server": "13.3.2",
     "better-auth": "1.6.23",
     "hono": "4.12.30",
     "lucide-react": "1.24.0",

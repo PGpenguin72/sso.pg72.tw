@@ -33,6 +33,7 @@ import {
   adminOauthReportRoutes,
   oauthReportRoutes,
 } from "./oauth-reports";
+import { passkeyStepUpRoutes } from "./passkey-step-up";
 import { ASSIGNABLE_ROLES, isPlatformRole } from "./roles";
 import {
   ACTIVITY_AUDIT_PATHS,
@@ -569,9 +570,26 @@ app.use("/api/admin/*", async (c, next) => {
   await next();
 });
 
+app.use(
+  "/api/account/passkey-step-up/*",
+  bodyLimit({
+    maxSize: 16 * 1024,
+    onError: (c) => c.json({ error: "request_too_large" }, 413),
+  }),
+);
+
+app.use("/api/account/passkey-step-up/*", async (c, next) => {
+  const config = readRuntimeConfig(c.env);
+  if (c.req.header("origin") !== config.authBaseUrl) {
+    return c.json({ error: "invalid_origin" }, 403);
+  }
+  await next();
+});
+
 app.route("/api/admin/clients", adminClientRoutes);
 app.route("/api/admin/oauth-reports", adminOauthReportRoutes);
 app.route("/api/admin/users", adminUserRoutes);
+app.route("/", passkeyStepUpRoutes);
 app.route("/", accountRoutes);
 app.route("/", oauthReportRoutes);
 app.route("/", telegramRoutes);

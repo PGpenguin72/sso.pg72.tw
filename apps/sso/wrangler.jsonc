@@ -70,6 +70,7 @@
     "AUTH_BASE_URL": "https://sso.pg72.tw",
     "PASSKEY_RP_ID": "sso.pg72.tw",
     "PASSKEY_ORIGIN": "https://sso.pg72.tw",
+    "PASSKEY_STEP_UP_MAX_AGE_SECONDS": "600",
     "REGISTRATION_MODE": "invite",
     "ENVIRONMENT": "production"
   },

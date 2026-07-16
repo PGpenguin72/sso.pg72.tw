@@ -27,3 +27,28 @@
   uses the existing Google sign-in to obtain a fresh session, enrolls a
   Passkey through the normal account center, then performs step-up. This keeps
   bootstrap usable without weakening the high-risk gate.
+
+## 2026-07-16 16:43 CST - Worker and D1 implementation
+
+- Added migration `0014_passkey_step_up.sql`: a nullable D1-backed timestamp on
+  each Better Auth session plus a short-lived challenge table with session and
+  user foreign keys, one outstanding challenge per session, and expiry index.
+- Added PGID-owned challenge and verification endpoints. Assertions use
+  SimpleWebAuthn 13.3.x with required user verification, exact configured
+  origin/RP ID, the current user's credential allowlist, bounded request data,
+  atomic `DELETE ... RETURNING` challenge consumption, and guarded authenticator
+  counter updates.
+- Successful verification writes the session timestamp and success audit in
+  one D1 batch before responding. Failed/replayed/cross-session assertions are
+  denied with redacted errors and audit reason enums; no challenge, credential
+  public key, assertion, token, session token, or secret is logged.
+- Added a bounded runtime setting `PASSKEY_STEP_UP_MAX_AGE_SECONDS` (60-600,
+  configured to 600) and regenerated local Wrangler binding types. All six
+  existing fresh-gated client mutation routes now require both freshness and
+  the D1 step-up state.
+- Declared the already-locked SimpleWebAuthn browser/server versions as exact
+  direct dependencies. Better Auth packages remain exact and unchanged at
+  1.6.23; no package patch was added.
+- Verification so far: production build and Wrangler type generation passed;
+  `pnpm --filter @pg72/id typecheck` passed. Behavior tests are intentionally
+  the next stage and have not yet been claimed as passing.

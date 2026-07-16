@@ -9,6 +9,7 @@ const cliEnv = {
   AUTH_BASE_URL: "http://localhost:5173",
   PASSKEY_RP_ID: "localhost",
   PASSKEY_ORIGIN: "http://localhost:5173",
+  PASSKEY_STEP_UP_MAX_AGE_SECONDS: "600",
   REGISTRATION_MODE: "invite",
   ENVIRONMENT: "development",
   BETTER_AUTH_SECRET: "cli-only-placeholder-secret-at-least-32-characters",

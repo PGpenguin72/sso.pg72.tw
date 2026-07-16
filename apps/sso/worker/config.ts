@@ -7,6 +7,10 @@ export type RegistrationMode = "invite" | "public";
  */
 export const CLIENT_SECRET_PREFIX = "pg72_cs_";
 export const FRESH_SESSION_MAX_AGE_MS = 10 * 60 * 1000;
+export const PASSKEY_STEP_UP_CHALLENGE_TTL_MS = 2 * 60 * 1000;
+
+const PASSKEY_STEP_UP_MIN_AGE_SECONDS = 60;
+const PASSKEY_STEP_UP_MAX_AGE_SECONDS = 10 * 60;
 
 /** Fixed clients for the Mail Path A token-introspection trust relationship. */
 export const MAIL_INTROSPECTION_CLIENT_ID = "pgid-mail-introspect";
@@ -30,6 +34,7 @@ export interface RuntimeConfig {
   environment: "development" | "preview" | "production";
   passkeyOrigin: string;
   passkeyRpId: string;
+  passkeyStepUpMaxAgeMs: number;
   registrationMode: RegistrationMode;
 }
 
@@ -47,6 +52,19 @@ function exactOrigin(value: string, name: string): string {
     throw new Error(`${name} must be an exact origin without a path`);
   }
   return url.origin;
+}
+
+function boundedInteger(
+  value: string | undefined,
+  name: string,
+  minimum: number,
+  maximum: number,
+): number {
+  const parsed = Number(required(value, name));
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`${name} must be an integer from ${minimum} to ${maximum}`);
+  }
+  return parsed;
 }
 
 export function readRuntimeConfig(env: Env): RuntimeConfig {
@@ -76,6 +94,12 @@ export function readRuntimeConfig(env: Env): RuntimeConfig {
     "PASSKEY_ORIGIN",
   );
   const passkeyRpId = required(env.PASSKEY_RP_ID, "PASSKEY_RP_ID");
+  const passkeyStepUpMaxAgeSeconds = boundedInteger(
+    env.PASSKEY_STEP_UP_MAX_AGE_SECONDS,
+    "PASSKEY_STEP_UP_MAX_AGE_SECONDS",
+    PASSKEY_STEP_UP_MIN_AGE_SECONDS,
+    PASSKEY_STEP_UP_MAX_AGE_SECONDS,
+  );
   const bootstrapAdminEmail = required(
     env.BOOTSTRAP_ADMIN_EMAIL,
     "BOOTSTRAP_ADMIN_EMAIL",
@@ -96,6 +120,7 @@ export function readRuntimeConfig(env: Env): RuntimeConfig {
     environment,
     passkeyOrigin,
     passkeyRpId,
+    passkeyStepUpMaxAgeMs: passkeyStepUpMaxAgeSeconds * 1000,
     registrationMode,
   };
 }

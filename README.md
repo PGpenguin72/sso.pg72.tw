@@ -47,7 +47,22 @@ Known-incomplete gates that block opening registration (tracked in `codex.md` §
 ```text
 apps/sso       PGID Worker, React account center, D1 migrations
 apps/test-rp   Independent OIDC protocol relying party
+wiki           PGID Wiki source and VitePress static site
 ```
+
+The Wiki keeps `wiki/README.md`, `wiki/SUMMARY.md`, and `.gitbook.yaml` as its
+GitBook-compatible content source. Run it locally with `pnpm dev:wiki`.
+
+Cloudflare Pages settings:
+
+| Setting | Value |
+| --- | --- |
+| Root directory | `/` (repository root) |
+| Build command | `pnpm --filter @pg72/wiki check` |
+| Build output directory | `wiki/.vitepress/dist` |
+| Environment variable | `NODE_VERSION=24` (also pinned by `.node-version`) |
+| Environment variable | `PNPM_VERSION=11.5.0` |
+| Functions and bindings | None; deploy the static output only. |
 
 ## Relying Parties
 
@@ -119,10 +134,10 @@ The local test RP is a public client. It has no client secret; its transaction s
 pnpm typecheck
 pnpm test
 pnpm build
-pnpm audit --prod --audit-level high
+pnpm audit --audit-level high
 ```
 
-The audit currently reports the accepted Moderate `GHSA-p2fr-6hmx-4528`. Its constrained exposure and temporary controls are documented in [`SECURITY.md`](./SECURITY.md). A High or Critical advisory fails the release gate.
+The audit currently reports the accepted Moderate `GHSA-p2fr-6hmx-4528`. Its constrained exposure and temporary controls are documented in [`SECURITY.md`](./SECURITY.md). The full audit includes build tooling; a High or Critical advisory fails the release gate.
 
 These commands verify local source only. They do not deploy, migrate remote D1,
 provision clients, or provide a production smoke-test record.

@@ -275,7 +275,9 @@
   - `f5ea1870fda374f93ca5a1720a375c717876118f`（branch
     `codex/completion-hermetic-gates`）使 SSO/test-RP checks 自行產生 binding
     types、使用 deterministic test-only bindings，並讓 test-RP `check` 包含
-    protocol tests；整合前仍需 review 與 combined gate。
+    protocol tests；該 branch 回報 root `pnpm check`、SSO 198/198 tests、test-RP
+    11/11、兩個 package 的 typecheck 與 production/dry-run build均通過。整合前
+    仍需 review 與 combined gate。
   - `dba865dce1f54b72a7fc3ff106ad05dc9fb21799`（branch
     `codex/test-rp-negative-coverage`）加入真實 WebCrypto Ed25519/JWKS fixture、
     wrong-audience fail-closed、caller-controlled `resource` 不傳播與
@@ -283,7 +285,11 @@
     typecheck與Wrangler dry-run通過。
   - `5ad9798efc0212219cd2ba26c345011dd0fab601`（branch
     `codex/completion-public-copy`）修正 public PGID product copy並加入對應
-    regression；它也尚未整合，不得把 UI copy 寫成已部署。
+    regression；該 branch 回報 SSO 200/200 tests、typecheck、production build
+    與 desktop/mobile browser smoke均通過。它也尚未整合，不得把 UI copy
+    寫成已部署。
+- 上述平行交付與本段的唯讀 docs review/follow-up 都未讀取、建置或修改
+  `原專案代碼/`，也沒有操作其他 external project checkout。
 - 獨立唯讀 docs/security review 以 `af73ce41` 為review target，完整核對
   AGENTS/codex/CLAUDE authority、main/delivery/production truth、Roundcube
   opaque token/JWKS、invite-only、Passkey/recovery/global logout、log授權與
@@ -299,8 +305,29 @@
   `SECURITY.md`、`codex.md`、Roundcube/design docs與兩個wiki頁面，沒有碰
   runtime、package、tests、dirty main通訊檔或未追蹤`0016`。
 - Content verification：`git diff --check` pass；新增relative links存在；
-  headings inventory正常；known PII/secret-value patterns無命中；舊的
-  ID/access-JWKS、0013/0014-only、all-services與closed-`msg.md`指令掃描無命中。
-  純文件變更依AGENTS不執行runtime tests。
+  headings inventory正常；known PII/secret-value patterns無命中。舊的
+  ID/access-JWKS、0013/0014-only與closed-`msg.md`指令在content commit的變更
+  範圍內無命中；當時的all-services檢查只覆蓋該變更範圍，不能視為repo-wide
+  current-public-doc scan。純文件變更依AGENTS不執行runtime tests。
 - 未執行push、deploy、remote D1、Cloudflare/VPS/secret-store/production
   mutation或main integration；本筆將以獨立log-only commit提交。
+
+## 2026-07-16 20:51 CST — Public participation wording and log evidence correction
+
+- Review follow-up在`/private/tmp/codex-completion-doc-truth-final`、branch
+  `codex/completion-doc-truth-final`，從`892230e`建立；沒有在dirty local `main`
+  checkout編輯或整合。
+- Content commit:`b38b77c505c810a6c29b05878cbc28f14bb2a8bd`
+  (`Scope PGID participation claims`)。它將`docs/about-PGID.md`、Wiki首頁、
+  consent/sub說明與帳號管理頁的current product copy限定為已接入／參與PGID的
+  服務；介紹文中描述SSO導入前登出問題的「所有服務」語境保留，未改historical
+  record或canonical全體RP規範。
+- 本筆同時補正19:57紀錄：明列`f5ea187`與`5ad9798`原branch回報的驗證結果，
+  並將先前all-services scan敘述限定在當時實際檢查的content-diff範圍。
+- Validation:`git diff --check`、relative links、heading/code-fence inventory、
+  current-public stale wording與known PII/secret-value scans均pass；純docs/log
+  變更未執行runtime tests。
+- 本任務未讀取、建置或修改`原專案代碼/`或其他external project checkout；
+  未修改runtime/package/tests、dirty main通訊檔或未追蹤`0016`，也未執行push、
+  deploy、remote D1、Cloudflare/VPS/secret-store/production mutation或main
+  integration。本筆以獨立log-only commit提交。

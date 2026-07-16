@@ -1,0 +1,28 @@
+{
+  "name": "@pg72/test-rp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ../../scripts/clean-package-dist.mjs && wrangler deploy --dry-run --outdir dist",
+    "cf-typegen": "wrangler types --strict-vars false",
+    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "db:migrate:local": "wrangler d1 migrations apply TEST_RP_DB --local",
+    "dev": "wrangler dev --port 5174",
+    "test": "vitest run",
+    "typecheck": "pnpm cf-typegen && pnpm typecheck:raw",
+    "typecheck:raw": "tsc --noEmit --pretty false"
+  },
+  "dependencies": {
+    "hono": "4.12.30",
+    "oauth4webapi": "3.8.6"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.18.4",
+    "@cloudflare/workers-types": "5.20260714.1",
+    "@types/node": "26.1.1",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10",
+    "wrangler": "4.110.0"
+  }
+}

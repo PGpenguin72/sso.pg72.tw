@@ -1,0 +1,269 @@
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 847085c481843ce6852a5db9006a2e79b7f77b15..f51dfe032f258aa81310a15ad2e4a32a04c06111 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -13,7 +13,7 @@ import { parseSetCookieHeader } from "better-auth/cookies";
+ import { mergeSchema } from "better-auth/db";
+ import * as z from "zod";
+ import { signJWT, toExpJWT } from "better-auth/plugins";
+-import { SignJWT, compactVerify, createLocalJWKSet, decodeJwt } from "jose";
++import { SignJWT, compactVerify, createLocalJWKSet, decodeJwt, decodeProtectedHeader, errors } from "jose";
+ import { SafeUrlSchema } from "@better-auth/core/utils/redirect-uri";
+ //#region src/consent.ts
+ async function consentEndpoint(ctx, opts, authorize) {
+@@ -340,7 +340,7 @@ async function createIdToken(ctx, opts, user, client, scopes, nonce, sessionId,
+ 		nonce,
+ 		iat,
+ 		exp,
+-		sid: client.enableEndSession ? sessionId : void 0
++		sid: sessionId
+ 	};
+ 	if (opts.disableJwtPlugin && !client.clientSecret) return;
+ 	return opts.disableJwtPlugin ? new SignJWT(payload).setProtectedHeader({ alg: "HS256" }).sign(new TextEncoder().encode(await decryptStoredClientSecret(ctx, opts.storeClientSecret, client.clientSecret))) : signJWT(ctx, {
+@@ -509,6 +509,10 @@ async function createUserTokens(ctx, opts, params) {
+ 	const isRefreshToken = user && clientAllowsGrant(client, "refresh_token") && (existingRefreshToken?.scopes?.includes("offline_access") || scopes.includes("offline_access"));
+ 	const isJwtAccessToken = audience && !opts.disableJwtPlugin;
+ 	const isIdToken = user && scopes.includes("openid");
++	if (isIdToken && (typeof sessionId !== "string" || sessionId.length === 0)) throw new APIError("BAD_REQUEST", {
++		error_description: "invalid session",
++		error: "invalid_grant"
++	});
+ 	const customFields = opts.customTokenResponseFields ? await opts.customTokenResponseFields({
+ 		grantType,
+ 		user,
+@@ -665,7 +669,7 @@ async function handleAuthorizationCodeGrant(ctx, opts) {
+ 			value: verificationValue.sessionId
+ 		}]
+ 	});
+-	if (!session || session.expiresAt < /* @__PURE__ */ new Date()) throw new APIError("BAD_REQUEST", {
++	if (!session || session.expiresAt < /* @__PURE__ */ new Date() || session.userId !== user.id) throw new APIError("BAD_REQUEST", {
+ 		error_description: "session no longer exists",
+ 		error: "invalid_request"
+ 	});
+@@ -793,6 +797,18 @@ async function handleRefreshTokenGrant(ctx, opts) {
+ 		error_description: "user not found",
+ 		error: "invalid_request"
+ 	});
++	const sessionId = refreshToken.sessionId;
++	const session = typeof sessionId === "string" && sessionId.length > 0 ? await ctx.context.adapter.findOne({
++		model: "session",
++		where: [{
++			field: "id",
++			value: sessionId
++		}]
++	}) : null;
++	if (!session || session.expiresAt < /* @__PURE__ */ new Date() || session.userId !== refreshToken.userId) throw new APIError("BAD_REQUEST", {
++		error_description: "invalid refresh token",
++		error: "invalid_grant"
++	});
+ 	const authTime = refreshToken.authTime != null ? normalizeTimestampValue(refreshToken.authTime) : void 0;
+ 	return createUserTokens(ctx, opts, {
+ 		client,
+@@ -800,7 +816,7 @@ async function handleRefreshTokenGrant(ctx, opts) {
+ 		user,
+ 		grantType: "refresh_token",
+ 		referenceId: refreshToken.referenceId,
+-		sessionId: refreshToken.sessionId,
++		sessionId: session.id,
+ 		refreshToken,
+ 		authTime
+ 	});
+@@ -814,6 +830,19 @@ async function handleRefreshTokenGrant(ctx, opts) {
+ * - APIError: Continue catches (returnable to client)
+ * - Error: Should immediately stop catches (internal error)
+ */
++const introspectionJoseTokenErrorCodes = new Set([
++	errors.JOSEAlgNotAllowed.code,
++	errors.JOSENotSupported.code,
++	errors.JWSInvalid.code,
++	errors.JWSSignatureVerificationFailed.code,
++	errors.JWTClaimValidationFailed.code,
++	errors.JWTExpired.code,
++	errors.JWTInvalid.code,
++	errors.JWKSNoMatchingKey.code
++]);
++function isIntrospectionJoseTokenError(error) {
++	return introspectionJoseTokenErrorCodes.has(error.code);
++}
+ /**
+ * Validates a JWT access token against the configured JWKs.
+ *
+@@ -823,6 +852,16 @@ async function validateJwtAccessToken(ctx, opts, token, clientId) {
+ 	const jwtPlugin = opts.disableJwtPlugin ? void 0 : getJwtPlugin(ctx.context);
+ 	const jwtPluginOptions = jwtPlugin?.options;
+ 	let jwtPayload;
++	let jwtHeader;
++	try {
++		jwtHeader = decodeProtectedHeader(token);
++	} catch {
++		throw new APIError$1("BAD_REQUEST", {
++			error_description: "invalid JWT formatting",
++			error: "invalid_request"
++		});
++	}
++	if (typeof jwtHeader.kid !== "string" || jwtHeader.kid.length === 0) return { active: false };
+ 	try {
+ 		jwtPayload = await verifyJwsAccessToken(token, {
+ 			jwksFetch: jwtPluginOptions?.jwks?.remoteUrl ? jwtPluginOptions.jwks.remoteUrl : async () => {
+@@ -835,15 +874,11 @@ async function validateJwtAccessToken(ctx, opts, token, clientId) {
+ 			}
+ 		});
+ 	} catch (error) {
+-		if (error instanceof Error) {
+-			if (error.name === "TypeError" || error.name === "JWSInvalid") throw new APIError$1("BAD_REQUEST", {
+-				error_description: "invalid JWT signature",
+-				error: "invalid_request"
+-			});
+-			else if (error.name === "JWTExpired") return { active: false };
+-			else if (error.name === "JWTInvalid") return { active: false };
++		if (error instanceof errors.JOSEError) {
++			if (isIntrospectionJoseTokenError(error)) return { active: false };
+ 			throw error;
+ 		}
++		if (error instanceof Error) throw error;
+ 		throw new Error(error);
+ 	}
+ 	if (!jwtPayload.azp) return { active: false };
+@@ -890,10 +925,11 @@ async function validateOpaqueAccessToken(ctx, opts, token, clientId) {
+ 	});
+ 	if (!accessToken.expiresAt || accessToken.expiresAt < /* @__PURE__ */ new Date()) return { active: false };
+ 	let client;
++	let user;
+ 	if (accessToken.clientId) {
+ 		client = await getClient(ctx, opts, accessToken.clientId);
+ 		if (!client || client?.disabled) return { active: false };
+-		if (clientId && accessToken.clientId !== clientId) return { active: false };
++		if (accessToken.userId) user = await ctx.context.internalAdapter.findUserById(accessToken.userId);
+ 	}
+ 	let sessionId = accessToken.sessionId ?? void 0;
+ 	if (sessionId) {
+@@ -906,8 +942,17 @@ async function validateOpaqueAccessToken(ctx, opts, token, clientId) {
+ 		});
+ 		if (!session || session.expiresAt < /* @__PURE__ */ new Date()) sessionId = void 0;
+ 	}
+-	let user;
+-	if (accessToken.userId) user = await ctx.context.internalAdapter.findUserById(accessToken?.userId);
++	if (clientId && accessToken.clientId !== clientId) {
++		const authorized = opts.authorizeOpaqueAccessTokenIntrospection ? await opts.authorizeOpaqueAccessTokenIntrospection({
++			introspectionClientId: clientId,
++			tokenClientId: accessToken.clientId,
++			scopes: accessToken.scopes,
++			sessionId,
++			user
++		}) : false;
++		if (authorized !== true) return { active: false };
++	}
++	if (!user && accessToken.userId) user = await ctx.context.internalAdapter.findUserById(accessToken.userId);
+ 	const customClaims = opts.customAccessTokenClaims ? await opts.customAccessTokenClaims({
+ 		user,
+ 		scopes: accessToken.scopes,
+@@ -947,17 +992,16 @@ async function validateRefreshToken(ctx, opts, token, clientId) {
+ 	if (!refreshToken.clientId || refreshToken.clientId !== clientId) return { active: false };
+ 	if (!refreshToken.expiresAt || refreshToken.expiresAt < /* @__PURE__ */ new Date()) return { active: false };
+ 	if (refreshToken.revoked) return { active: false };
+-	let sessionId = refreshToken.sessionId ?? void 0;
+-	if (sessionId) {
+-		const session = await ctx.context.adapter.findOne({
+-			model: "session",
+-			where: [{
+-				field: "id",
+-				value: sessionId
+-			}]
+-		});
+-		if (!session || session.expiresAt < /* @__PURE__ */ new Date()) sessionId = void 0;
+-	}
++	const sessionId = refreshToken.sessionId ?? void 0;
++	if (!sessionId) return { active: false };
++	const session = await ctx.context.adapter.findOne({
++		model: "session",
++		where: [{
++			field: "id",
++			value: sessionId
++		}]
++	});
++	if (!session || session.expiresAt < /* @__PURE__ */ new Date() || session.userId !== refreshToken.userId) return { active: false };
+ 	let user = void 0;
+ 	if (refreshToken.userId) user = await ctx.context.internalAdapter.findUserById(refreshToken?.userId) ?? void 0;
+ 	return {
+@@ -1002,9 +1046,14 @@ async function validateAccessToken(ctx, opts, token, clientId) {
+ * Applied at the presentation layer so internal validation functions
+ * keep real user.id (needed for user lookup in /userinfo).
+ */
+-async function resolveIntrospectionSub(opts, payload, client) {
++async function resolveIntrospectionSub(ctx, opts, payload, client) {
+ 	if (payload.active && payload.sub) {
+-		const resolvedSub = await resolveSubjectIdentifier(payload.sub, client, opts);
++		let subjectClient = client;
++		if (payload.client_id && payload.client_id !== client.clientId) {
++			subjectClient = await getClient(ctx, opts, payload.client_id);
++			if (!subjectClient || subjectClient.disabled) return { active: false };
++		}
++		const resolvedSub = await resolveSubjectIdentifier(payload.sub, subjectClient, opts);
+ 		return {
+ 			...payload,
+ 			sub: resolvedSub
+@@ -1031,21 +1080,16 @@ async function introspectEndpoint(ctx, opts) {
+ 	});
+ 	const client = await validateClientCredentials(ctx, opts, client_id, client_secret);
+ 	try {
+-		if (token_type_hint === void 0 || token_type_hint === "access_token") try {
+-			return resolveIntrospectionSub(opts, await validateAccessToken(ctx, opts, token, client.clientId), client);
+-		} catch (error) {
+-			if (error instanceof APIError$1) {
+-				if (token_type_hint === "access_token") throw error;
+-			} else if (error instanceof Error) throw error;
+-			else throw new Error(error);
+-		}
+-		if (token_type_hint === void 0 || token_type_hint === "refresh_token") try {
+-			return resolveIntrospectionSub(opts, await validateRefreshToken(ctx, opts, (await decodeRefreshToken(opts, token)).token, client.clientId), client);
++		const tokenTypes = token_type_hint === "refresh_token" ? ["refresh_token", "access_token"] : ["access_token", "refresh_token"];
++		for (const tokenType of tokenTypes) try {
++			if (tokenType === "access_token") return resolveIntrospectionSub(ctx, opts, await validateAccessToken(ctx, opts, token, client.clientId), client);
++			return resolveIntrospectionSub(ctx, opts, await validateRefreshToken(ctx, opts, (await decodeRefreshToken(opts, token)).token, client.clientId), client);
+ 		} catch (error) {
+-			if (error instanceof APIError$1) {
+-				if (token_type_hint === "refresh_token") throw error;
+-			} else if (error instanceof Error) throw error;
+-			else throw new Error(error);
++			if (!(error instanceof APIError$1)) {
++				if (error instanceof Error) throw error;
++				throw new Error(error);
++			}
++			if (error.status !== "BAD_REQUEST" && error.status !== 400) throw error;
+ 		}
+ 		throw new APIError$1("BAD_REQUEST", {
+ 			error_description: "token not found",
+@@ -1053,7 +1097,7 @@ async function introspectEndpoint(ctx, opts) {
+ 		});
+ 	} catch (error) {
+ 		if (error instanceof APIError$1) {
+-			if (error.name === "BAD_REQUEST") return { active: false };
++			if (error.status === "BAD_REQUEST" || error.status === 400) return { active: false };
+ 			throw error;
+ 		} else if (error instanceof Error) {
+ 			logger.error("Introspection error:", error.message, error.stack);
+diff --git a/dist/oauth-D74mBkw6.d.mts b/dist/oauth-D74mBkw6.d.mts
+index 5531f010da1b43580be514022df818bb1f835323..7a191a4d1c9c7b157f23bc90023395b95059f193 100644
+--- a/dist/oauth-D74mBkw6.d.mts
++++ b/dist/oauth-D74mBkw6.d.mts
+@@ -763,6 +763,20 @@ interface OAuthOptions<Scopes extends readonly Scope[] = InternallySupportedScop
+     resource?: string; /** oAuthClient metadata */
+     metadata?: Record<string, any>;
+   }) => Awaitable<Record<string, any>>;
++  /**
++   * Authorizes a confidential client to introspect an opaque access token
++   * issued to a different client. Cross-client introspection is denied unless
++   * this hook is configured and returns exactly `true`.
++   *
++   * JWT access tokens and refresh tokens are not delegated through this hook.
++   */
++  authorizeOpaqueAccessTokenIntrospection?: (info: {
++    /** Client authenticating to the introspection endpoint. */introspectionClientId: string;
++    /** Client to which the opaque access token was issued. */tokenClientId: string;
++    /** Scopes granted to the opaque access token. */scopes: Scopes;
++    /** Live central session ID associated with the token, when present. */sessionId?: string;
++    /** User associated with the token, when present. */user?: (User & Record<string, unknown>) | null;
++  }) => Awaitable<boolean>;
+   /**
+    * Custom fields to include in the token response body.
+    *

@@ -44,8 +44,8 @@ export interface ExistingClientAuditGuard {
   expectedOwnerUserId?: string;
 }
 
-export interface ExistingInvitationAuditGuard {
-  actor: AdminActorCommitGuard;
+export interface InvitationMutationAuditGuard {
+  actorUserId: string;
   email: string;
   invitationId: string;
   role: string;
@@ -64,10 +64,16 @@ export interface ExistingUserAuditGuard {
   userId: string;
 }
 
-export function auditInsertForExistingInvitationStatement(
+/**
+ * Writes the success audit only for the exact invitation row produced by the
+ * preceding statement in the same D1 batch. Eligibility belongs to that
+ * mutation statement; this dependency makes an audit error roll the mutation
+ * back while an eligibility no-op leaves neither row behind.
+ */
+export function auditInsertForInvitationMutationStatement(
   env: Env,
   event: SecurityEvent,
-  guard: ExistingInvitationAuditGuard,
+  guard: InvitationMutationAuditGuard,
 ): D1PreparedStatement {
   return env.PG72_ID_DB.prepare(
     `INSERT INTO audit_event
@@ -81,8 +87,7 @@ export function auditInsertForExistingInvitationStatement(
            AND email_normalized = ?
            AND role = ?
            AND created_by_user_id = ?
-      )
-        AND ${ADMIN_ACTOR_COMMIT_PREDICATE}`,
+      )`,
   ).bind(
     event.eventId,
     event.eventType,
@@ -95,8 +100,7 @@ export function auditInsertForExistingInvitationStatement(
     guard.invitationId,
     guard.email,
     guard.role,
-    guard.actor.userId,
-    ...adminActorCommitBindings(guard.actor),
+    guard.actorUserId,
   );
 }
 

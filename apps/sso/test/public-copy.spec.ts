@@ -10,6 +10,7 @@ import llmsText from "../public/llms.txt?raw";
 
 interface PublicViews {
   AboutPage: ComponentType;
+  adminUserErrorMessage: (code: unknown, fallback: string) => string;
   DeletePasskeyDialog: ComponentType<{
     busy: boolean;
     error: string | null;
@@ -84,6 +85,17 @@ async function metaContent(
 }
 
 describe("rendered public product copy", () => {
+  it("gives invitation lifecycle conflicts refresh and retry guidance", () => {
+    const message = publicViews.adminUserErrorMessage(
+      "management_state_changed",
+      "fallback",
+    );
+
+    expect(message).not.toBe("fallback");
+    expect(message).toContain("重新整理");
+    expect(message).toContain("再試");
+  });
+
   it("renders the invite and Passkey boundaries on login, Terms, and About", () => {
     const signIn = renderToStaticMarkup(
       createElement(publicViews.SignInView, { pending: false }),

@@ -347,6 +347,7 @@ const ADMIN_USER_ERROR_MESSAGES: Record<string, string> = {
   cannot_modify_self: "不能對自己的帳號執行這個操作。",
   cannot_suspend_self: "不能停權自己的帳號。",
   invalid_role: "角色無效。",
+  management_state_changed: "管理或邀請目標狀態已變更，請重新整理後再試。",
   rate_limited: "操作太頻繁，請稍後再試。",
   restricted_account: "受限帳號必須先提升為標準帳號，才能變更角色。",
   role_not_assignable: "你的角色無法執行這個角色變更。",
@@ -355,7 +356,7 @@ const ADMIN_USER_ERROR_MESSAGES: Record<string, string> = {
   user_state_unchanged: "使用者已處於要求的狀態。",
 };
 
-function adminUserErrorMessage(code: unknown, fallback: string): string {
+export function adminUserErrorMessage(code: unknown, fallback: string): string {
   return typeof code === "string"
     ? (ADMIN_USER_ERROR_MESSAGES[code] ?? fallback)
     : fallback;

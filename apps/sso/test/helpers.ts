@@ -4,6 +4,7 @@ import { makeSignature } from "better-auth/crypto";
 export function interposeAfterD1First(
   queryFragment: string,
   afterLoad: () => Promise<void>,
+  options: { interceptNull?: boolean } = {},
 ): { database: D1Database; wasIntercepted: () => boolean } {
   const realDatabase = env.PG72_ID_DB;
   let intercepted = false;
@@ -22,7 +23,7 @@ export function interposeAfterD1First(
               columnName === undefined
                 ? await target.first()
                 : await target.first(columnName);
-            if (!intercepted && result !== null) {
+            if (!intercepted && (result !== null || options.interceptNull)) {
               intercepted = true;
               await afterLoad();
             }

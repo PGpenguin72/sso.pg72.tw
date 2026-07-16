@@ -812,6 +812,54 @@ describe("restricted account administration", () => {
     expect(audit?.count).toBe(0);
   });
 
+  it("rejects an invitation when its normalized target enrolls after lookup", async () => {
+    const admin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
+    );
+    const normalizedEmail = `case-${crypto.randomUUID()}@example.com`;
+    const requestedEmail = `  ${normalizedEmail.toUpperCase()}  `;
+    const interposed = interposeAfterD1First(
+      "SELECT id, email, role, status FROM user WHERE lower(trim(email)) = ?",
+      async () => {
+        await createAuthenticatedUser(normalizedEmail.toUpperCase());
+      },
+      { interceptNull: true },
+    );
+    const ctx = createExecutionContext();
+    const response = await app.fetch(
+      new Request(`${BASE_URL}/api/admin/invitations`, {
+        method: "POST",
+        headers: admin.headers,
+        body: JSON.stringify({ email: requestedEmail, role: "developer" }),
+      }),
+      { ...env, PG72_ID_DB: interposed.database } as Env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(interposed.wasIntercepted()).toBe(true);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "management_state_changed",
+    });
+    expect(
+      await env.PG72_ID_DB.prepare(
+        "SELECT id FROM invitation WHERE email_normalized = ?",
+      )
+        .bind(normalizedEmail)
+        .first(),
+    ).toBeNull();
+    const audit = await env.PG72_ID_DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_event
+        WHERE event_type = 'invitation.created'
+          AND actor_user_id = ? AND outcome = 'success'`,
+    )
+      .bind(admin.userId)
+      .first<{ count: number }>();
+    expect(audit?.count).toBe(0);
+  });
+
   it("keeps revoke and delete batches unchanged when the actor state changes", async () => {
     const revokeAdmin = await createAuthenticatedUser(
       `${crypto.randomUUID()}@example.com`,

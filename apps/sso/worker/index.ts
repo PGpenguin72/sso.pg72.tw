@@ -19,7 +19,7 @@ import {
   fetchTarget,
 } from "./admin-users";
 import {
-  auditInsertForExistingInvitationStatement,
+  auditInsertForInvitationMutationStatement,
   consumeSecurityEvents,
   createAuditEvent,
   enqueueSecurityEvent,
@@ -1264,12 +1264,24 @@ app.post("/api/admin/invitations", async (c) => {
     subjectId: id,
     metadata: { role },
   });
+
+  // D1 executes this batch as one transaction. The invitation statement is
+  // the single commit-time eligibility decision: both the actor/session
+  // snapshot and the normalized target's continued absence must hold. The
+  // audit statement then depends on the exact new invitation row, so a
+  // successful mutation cannot commit without its success audit. Result
+  // counts below only distinguish the paired no-op from the paired write.
   const results = await c.env.PG72_ID_DB.batch([
     c.env.PG72_ID_DB.prepare(
       `INSERT INTO invitation
         (id, email_normalized, role, created_by_user_id, expires_at, created_at)
        SELECT ?, ?, ?, ?, ?, ?
         WHERE ${ADMIN_ACTOR_COMMIT_PREDICATE}
+          AND NOT EXISTS (
+            SELECT 1
+              FROM user AS invitation_target
+             WHERE lower(trim(invitation_target.email)) = ?
+          )
        ON CONFLICT(email_normalized) DO UPDATE SET
          id = excluded.id,
          role = excluded.role,
@@ -1286,9 +1298,10 @@ app.post("/api/admin/invitations", async (c) => {
       expiresAt.toISOString(),
       now.toISOString(),
       ...adminActorCommitBindings(gate.actor.commitGuard),
+      email,
     ),
-    auditInsertForExistingInvitationStatement(c.env, event, {
-      actor: gate.actor.commitGuard,
+    auditInsertForInvitationMutationStatement(c.env, event, {
+      actorUserId: gate.actor.userId,
       email,
       invitationId: id,
       role,

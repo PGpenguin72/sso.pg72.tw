@@ -172,3 +172,30 @@
   `0014` rollout, deployment/review gates, provisioning, and rollback.
 - `git diff --check`, changed-document relative-link validation, wiki SUMMARY
   target validation, heading review, and stale-current-language searches pass.
+
+## 2026-07-16 17:46 CST - Final Task A verification
+
+- `pnpm install --offline --frozen-lockfile` passed with the workspace already
+  up to date.
+- `pnpm --filter @pg72/id check` passed: strict TypeScript, 183/183 workerd
+  tests in 14 files, and the production Worker/client build all completed.
+- `pnpm --filter @pg72/test-rp test` passed 4/4. After generated Wrangler types,
+  the additional test-RP typecheck and dry-run Worker build also passed.
+- A second newly isolated local D1 applied all 14 migrations from `0001` through
+  `0014` in order. No remote flag or production database was used.
+- Final artifact scan found no `.dev.vars*` and no test/dev placeholder values
+  in `apps/sso/dist`. Repository secret-pattern scan, `git diff --check`, and
+  tracked-file/status checks passed.
+- Dependency audit has zero High/Critical findings. Its only finding is the
+  already documented moderate `GHSA-p2fr-6hmx-4528` on the exact-pinned OAuth
+  provider; PGID rejects RFC 8707 `resource` at both authorize/token boundaries
+  as the accepted compensating control.
+- Local UI smoke returned 200 for `/` and `/health`, and an unauthenticated
+  same-origin step-up challenge returned the expected 401. Desktop 1440x900 and
+  CDP-emulated mobile 390x844 screenshots rendered; mobile `innerWidth` and
+  `scrollWidth` were both 390, with shell/actions/buttons inside x=16..374.
+  The screenshot server used a fresh, unmigrated Vite D1, so its background
+  `/get-session` probe produced a redacted 500; migrated Worker behavior is
+  covered by the full workerd suite and isolated migration replay above.
+- The local Vite server and Chrome CDP process were stopped. No push, deploy,
+  remote D1, Cloudflare/VPS, secret-store, or production mutation was run.

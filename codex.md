@@ -310,7 +310,7 @@ invited -> active -> suspended -> deleted
 - 前端把登入既有帳號與建立新帳號分開；只有新帳號路徑顯示目前 Terms/Privacy 的明確勾選與 Turnstile。Passkey 與 Telegram 不作 public 建帳入口。
 - `POST /api/registration/intent` 只接受 exact same-origin JSON，要求 client 回傳 Worker 公布的目前 Terms/Privacy version 並皆明確同意，再以 Turnstile Siteverify 驗證 `success`、exact issuer hostname 與固定 action `pgid_public_registration`；challenge 服務不可用時 fail closed。
 - 驗證成功後只核發 10 分鐘、Web Crypto 產生、D1 一次性消耗的 opaque intent ID。瀏覽器僅透過 Better Auth 保護的 OAuth state 帶入 ID，不保存或傳送 Turnstile secret；callback 建立 user 前必須原子消耗 intent，過期、重放、版本不符或缺少皆回泛化拒絕。
-- `0016` 將 server-side intent issuance time、Terms version 與 Privacy version 隨 user 建立寫入；D1 trigger 強制三欄全有或全無、禁止變更初次同意，並在同一 transaction 建立 `legal_acceptance` history。Invite-mode user 的三欄保持 `NULL`。
+- `0016` 將 server-side intent issuance time、Terms version 與 Privacy version 隨 user 建立寫入；D1 trigger 強制三欄全有或全無、禁止變更初次同意，並在同一 transaction 建立 `legal_acceptance` history。帳號存在期間直接 UPDATE/DELETE history 會被拒絕；依 Privacy Policy 刪除 parent account 時則由 FK cascade 一併移除其 account-scoped history。Invite-mode user 的三欄保持 `NULL`。
 - 新帳號建立有獨立、比登入更嚴的 per-IP rate limit（Workers Rate Limiting binding `REGISTRATION_RATE_LIMITER`，5 次/60 秒；登入面為 `AUTH_RATE_LIMITER` 30 次/60 秒）。限流檢查在任何 denial audit 寫入與邀請查詢之前消耗額度，避免被濫刷。
 - 觸發限流寫入 `registration.rate_limited` audit；所有 registration 拒絕訊息不洩漏帳號是否存在。
 - `suspended` 使用者不因公開模式繞過管制：session 建立前一律檢查中央 `user.status`，非 `active`（含已刪除、user row 不存在）一律拒絕。

@@ -3,6 +3,8 @@
 -- Invite-mode users keep all three user fields NULL. A public registration can
 -- set them only during user creation, after a one-time Turnstile-backed intent
 -- has been consumed. The acceptance history trigger commits with the user row.
+-- History is immutable while its parent user exists; deleting the user still
+-- removes the account-scoped history through the declared FK cascade.
 
 ALTER TABLE "user" ADD COLUMN "termsAcceptedVersion" text;
 ALTER TABLE "user" ADD COLUMN "privacyAcceptedVersion" text;
@@ -21,6 +23,21 @@ CREATE TABLE "legal_acceptance" (
 
 CREATE INDEX "legal_acceptance_time_idx"
   ON "legal_acceptance" ("accepted_at" DESC);
+
+CREATE TRIGGER "legal_acceptance_update_guard"
+BEFORE UPDATE ON "legal_acceptance"
+BEGIN
+  SELECT RAISE(ABORT, 'legal acceptance history is immutable');
+END;
+
+CREATE TRIGGER "legal_acceptance_delete_guard"
+BEFORE DELETE ON "legal_acceptance"
+WHEN EXISTS (
+  SELECT 1 FROM "user" WHERE "id" = OLD."user_id"
+)
+BEGIN
+  SELECT RAISE(ABORT, 'legal acceptance history is immutable');
+END;
 
 CREATE TABLE "public_registration_intent" (
   "id" text NOT NULL PRIMARY KEY,

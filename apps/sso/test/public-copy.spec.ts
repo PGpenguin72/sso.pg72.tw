@@ -30,6 +30,11 @@ interface PublicViews {
     termsAccepted: boolean;
     termsVersion: string;
   }>;
+  runSocialAuthenticationStart: (
+    start: () => Promise<{ error?: unknown } | null | undefined>,
+    fallback: string,
+    onFailure: (message: string) => void,
+  ) => Promise<boolean>;
   SignInView: ComponentType<{ pending: boolean }>;
 }
 
@@ -148,6 +153,42 @@ describe("rendered public product copy", () => {
     expect(prerequisites).toContain('class="turnstile-slot"');
     expect(prerequisites).toContain("2026-07-17.terms");
     expect(prerequisites).toContain("2026-07-17.privacy");
+  });
+
+  it("resets registration state for returned and thrown social-start errors only", async () => {
+    const returnedFailure = vi.fn();
+    await expect(
+      publicViews.runSocialAuthenticationStart(
+        async () => ({ error: { message: "provider rejected" } }),
+        "fallback",
+        returnedFailure,
+      ),
+    ).resolves.toBe(false);
+    expect(returnedFailure).toHaveBeenCalledOnce();
+    expect(returnedFailure).toHaveBeenCalledWith("provider rejected");
+
+    const thrownFailure = vi.fn();
+    await expect(
+      publicViews.runSocialAuthenticationStart(
+        async () => {
+          throw new Error("network failed");
+        },
+        "fallback",
+        thrownFailure,
+      ),
+    ).resolves.toBe(false);
+    expect(thrownFailure).toHaveBeenCalledOnce();
+    expect(thrownFailure).toHaveBeenCalledWith("network failed");
+
+    const successfulFailure = vi.fn();
+    await expect(
+      publicViews.runSocialAuthenticationStart(
+        async () => ({ error: undefined }),
+        "fallback",
+        successfulFailure,
+      ),
+    ).resolves.toBe(true);
+    expect(successfulFailure).not.toHaveBeenCalled();
   });
 });
 

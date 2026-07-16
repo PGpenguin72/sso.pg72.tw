@@ -547,6 +547,24 @@ function messageFrom(error: unknown, fallback: string): string {
   return fallback;
 }
 
+export async function runSocialAuthenticationStart(
+  start: () => Promise<{ error?: unknown } | null | undefined>,
+  fallback: string,
+  onFailure: (message: string) => void,
+): Promise<boolean> {
+  try {
+    const result = await start();
+    if (result?.error) {
+      onFailure(messageFrom(result.error, fallback));
+      return false;
+    }
+    return true;
+  } catch (error) {
+    onFailure(messageFrom(error, fallback));
+    return false;
+  }
+}
+
 function formatDate(value: string | Date): string {
   return new Intl.DateTimeFormat("zh-TW", {
     dateStyle: "medium",
@@ -871,22 +889,27 @@ export function SignInView({ pending }: { pending: boolean }) {
         return;
       }
     }
-    const result = await authClient.signIn.social({
-      provider: provider as SocialProviderId,
-      callbackURL: window.location.href,
-      ...(registrationIntentId
-        ? {
-            additionalData: {
-              pgidRegistrationIntent: registrationIntentId,
-            },
-            requestSignUp: true,
-          }
-        : {}),
-    });
-    if (result?.error) {
-      setError(messageFrom(result.error, `${label} 登入失敗，請稍後再試。`));
-      setBusy(null);
-    }
+    await runSocialAuthenticationStart(
+      () =>
+        authClient.signIn.social({
+          provider: provider as SocialProviderId,
+          callbackURL: window.location.href,
+          ...(registrationIntentId
+            ? {
+                additionalData: {
+                  pgidRegistrationIntent: registrationIntentId,
+                },
+                requestSignUp: true,
+              }
+            : {}),
+        }),
+      `${label} 登入失敗，請稍後再試。`,
+      (message) => {
+        setError(message);
+        resetRegistrationChallenge();
+        setBusy(null);
+      },
+    );
   };
 
   const googleSignIn = () => void socialSignIn("google", "Google");
@@ -2107,7 +2130,7 @@ function PrivacyContent() {
         <ul className="public-list">
           <li>帳號資料於帳號存續期間保留。</li>
           <li>
-            你可於帳號中心<strong>自助刪除帳號</strong>（需近期重新驗證）；刪除後，你的帳號記錄與其連結身分會被移除，已授權應用程式將無法再以你的身分取得資料。
+            你可於帳號中心<strong>自助刪除帳號</strong>（需近期重新驗證）；刪除後，你的帳號記錄、其連結身分與帳號所附的初次同意紀錄會被移除，已授權應用程式將無法再以你的身分取得資料。
           </li>
           <li>為安全與防濫用目的，部分稽核／安全事件可能在去識別化或遮蔽後保留一段合理期間。</li>
         </ul>

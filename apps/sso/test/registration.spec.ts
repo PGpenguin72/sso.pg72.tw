@@ -424,6 +424,35 @@ describe("registration policy", () => {
     });
   });
 
+  it("allows exactly one concurrent claim of a public registration intent", async () => {
+    const intent = await createPublicRegistrationIntent();
+    const claims = await Promise.allSettled([
+      authorizeRegistration(publicEnv, publicConfig, {
+        email: randomEmail(),
+        emailVerified: true,
+        clientIp: uniqueIp(),
+        registrationIntentId: intent.intentId,
+      }),
+      authorizeRegistration(publicEnv, publicConfig, {
+        email: randomEmail(),
+        emailVerified: true,
+        clientIp: uniqueIp(),
+        registrationIntentId: intent.intentId,
+      }),
+    ]);
+
+    const winners = claims.filter((claim) => claim.status === "fulfilled");
+    const losers = claims.filter((claim) => claim.status === "rejected");
+    expect(winners).toHaveLength(1);
+    expect(losers).toHaveLength(1);
+    expect(losers[0]).toMatchObject({
+      reason: {
+        body: { code: "REGISTRATION_PREREQUISITE_REQUIRED" },
+        statusCode: 403,
+      },
+    });
+  });
+
   it("rejects an expired public registration intent", async () => {
     const intent = await createPublicRegistrationIntent();
     await env.PG72_ID_DB.prepare(
@@ -634,7 +663,7 @@ describe("registration policy", () => {
     ).resolves.toEqual({ status: "unavailable" });
   });
 
-  it("persists immutable public-registration legal acceptance history", async () => {
+  it("guards legal history while the account exists and cascades on account deletion", async () => {
     const intent = await createPublicRegistrationIntent();
     const grant = await authorizeRegistration(publicEnv, publicConfig, {
       email: randomEmail(),
@@ -687,6 +716,32 @@ describe("registration policy", () => {
         .bind(userId)
         .run(),
     ).rejects.toThrow();
+
+    await expect(
+      env.PG72_ID_DB.prepare(
+        "UPDATE legal_acceptance SET terms_version = 'changed' WHERE user_id = ?",
+      )
+        .bind(userId)
+        .run(),
+    ).rejects.toThrow();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        "DELETE FROM legal_acceptance WHERE user_id = ?",
+      )
+        .bind(userId)
+        .run(),
+    ).rejects.toThrow();
+
+    await env.PG72_ID_DB.prepare("DELETE FROM user WHERE id = ?")
+      .bind(userId)
+      .run();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        "SELECT COUNT(*) AS count FROM legal_acceptance WHERE user_id = ?",
+      )
+        .bind(userId)
+        .first<number>("count"),
+    ).resolves.toBe(0);
   });
 
   it("blocks deleted (missing) users from creating a session", async () => {

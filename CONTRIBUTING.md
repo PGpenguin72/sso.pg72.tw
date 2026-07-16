@@ -1,0 +1,29 @@
+# Contributing
+
+Keep changes focused and treat PGID as security-sensitive authentication code.
+
+## Set Up and Verify
+
+Follow the [local setup instructions](./README.md#local-setup), then run the
+canonical repository gate before opening a pull request:
+
+```bash
+pnpm check
+pnpm audit --prod --audit-level high
+```
+
+If a change affects protocol behavior, endpoints, claims, or parameters, update
+[`docs/api/PGID-integration.md`](./docs/api/PGID-integration.md) and the relevant
+`wiki/` pages in the same pull request. Keep user documentation in sync with
+workflow changes. Architecture and security decisions remain canonical in
+[`codex.md`](./codex.md).
+
+## Protect Sensitive Systems and Data
+
+- Never commit secrets, credentials, tokens, authorization codes, session IDs,
+  personal data, production database exports, private keys, or `.dev.vars`.
+- Do not deploy, run remote D1 commands, or otherwise change production or
+  remote Cloudflare state as part of a contribution. Pull requests must be
+  verifiable against local source.
+- Do not disclose a live vulnerability in a public issue or pull request.
+  Follow [`SECURITY.md`](./SECURITY.md) for private reporting instructions.

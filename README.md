@@ -131,13 +131,16 @@ The local test RP is a public client. It has no client secret; its transaction s
 ## Verification
 
 ```bash
-pnpm typecheck
-pnpm test
-pnpm build
-pnpm audit --audit-level high
+pnpm check
+pnpm audit --prod --audit-level high
 ```
 
-The audit currently reports the accepted Moderate `GHSA-p2fr-6hmx-4528`. Its constrained exposure and temporary controls are documented in [`SECURITY.md`](./SECURITY.md). The full audit includes build tooling; a High or Critical advisory fails the release gate.
+`pnpm check` is the canonical repository gate. It runs the clean-build-output
+regression and workspace package checks, covering type checks, workerd and
+relying-party protocol tests, Wiki route/link/header validation, and production
+and static builds.
+
+The audit currently reports the accepted Moderate `GHSA-p2fr-6hmx-4528`. Its constrained exposure and temporary controls are documented in [`SECURITY.md`](./SECURITY.md). A High or Critical advisory fails the release gate.
 
 These commands verify local source only. They do not deploy, migrate remote D1,
 provision clients, or provide a production smoke-test record.

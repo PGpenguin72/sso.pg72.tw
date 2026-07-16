@@ -331,3 +331,26 @@
   未修改runtime/package/tests、dirty main通訊檔或未追蹤`0016`，也未執行push、
   deploy、remote D1、Cloudflare/VPS/secret-store/production mutation或main
   integration。本筆以獨立log-only commit提交。
+
+## 2026-07-16 21:34 CST — Wiki publish-readiness verification
+
+- 工作位置：`/private/tmp/codex-wiki-publish-ready`，branch
+  `codex/wiki-publish-ready`，由reviewed docs stage
+  `14f1feb6661a7f76aaefc5c9e09139320b425aff`建立。
+- Content commit：`0dde04f62e6afc1f86755d9e78cd87fe6c409340`
+  (`Make Wiki links GitBook-root safe`)。初始任務估計13個跨出GitBook project
+  directory的Markdown links；root-aware inventory確認實際為14個，全部修正，
+  共只修改8個必要的Wiki檔案，未改runtime、package或Wiki以外的content。
+- GitBook驗證：`.gitbook.yaml`維持`root: ./`與`README.md`/`SUMMARY.md`結構；
+  13個publishable pages全部收錄於SUMMARY。全14個Markdown檔共有59個relative
+  links，全部解析後仍位於`wiki/`且target存在，包含3個合法parent links；escape、
+  missing、absolute與resolver issues均為0。YAML、frontmatter、91個heading anchors、
+  heading hierarchy與code fences均通過，沒有待驗anchor reference。
+- Truth與安全檢查保留invite-only、opaque access token、Telegram provider identity
+  明確連結／同一`sub`／不自動合併，以及已接入／參與PGID的範圍文案；canonical
+  `codex.md`與`handoff.md`的`0015` truth未改。PII/secret掃描只命中公開聯絡信箱與
+  `.invalid`範例，沒有敏感值。獨立AK review確認content通過，唯一follow-up是要求
+  補上本AI log紀錄。
+- Dirty local `main`的owner state保持`M to_claude.md`、`M to_codex.md`、
+  `?? morden_dark.txt`，本branch未修改三者。本任務未push、publish、操作DNS、
+  deploy、remote/production資源、main或任何external repository/checkout。

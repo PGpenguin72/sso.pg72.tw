@@ -126,3 +126,19 @@
   file was not read or copied.
 - Changed the checked-in local test-RP setting to `development`, matching the
   runtime contract. `pnpm --filter @pg72/test-rp test` then passed 4/4 tests.
+
+## 2026-07-16 17:28 CST - Transactional orphan-audit cleanup
+
+- Applied the independent review follow-up to the finalization batch. The
+  timestamp statement now rechecks the same passkey id, user, and advanced
+  counter in addition to requiring the exact success audit event.
+- Added a third statement to that same D1 transaction: it deletes the exact
+  success audit whenever the corresponding session/user timestamp was not
+  written. Normal success is audit/timestamp/cleanup changes `[1,1,0]`; an
+  ignored audit is `[0,0,0]`; a failed timestamp removes its audit before the
+  transaction commits. No post-commit cleanup is required for correctness.
+- Strengthened counter-conflict, session-disappearance, audit-abort, and
+  audit-ignore tests to attempt a client creation afterward. Every path proves
+  there is no valid timestamp, no success audit, and no mutation unlock.
+- The focused real-assertion Passkey suite passed 17/17 after this change. The
+  full final gate is still pending.

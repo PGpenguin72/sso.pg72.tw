@@ -242,6 +242,25 @@ async function expectNoSuccessfulStepUp(
   expect(audit?.count).toBe(0);
 }
 
+async function expectClientMutationLocked(
+  session: SessionFixture,
+  expectedStatus = 403,
+): Promise<void> {
+  const response = await createClient(
+    session,
+    `still-locked-${crypto.randomUUID()}`,
+  );
+  expect(response.status).toBe(expectedStatus);
+  expect(await response.json()).toEqual(
+    expectedStatus === 401
+      ? { error: "unauthorized" }
+      : {
+          code: "PASSKEY_STEP_UP_REQUIRED",
+          error: "passkey_step_up_required",
+        },
+  );
+}
+
 async function stepUp(
   session: SessionFixture,
   authenticator: TestAuthenticator,
@@ -694,6 +713,7 @@ describe("Passkey step-up", () => {
       .first<{ counter: number }>();
     expect(counter?.counter).toBe(0);
     await expectNoSuccessfulStepUp(admin);
+    await expectClientMutationLocked(admin);
   });
 
   it("does not leave a valid step-up when the session disappears mid-batch", async () => {
@@ -728,8 +748,8 @@ describe("Passkey step-up", () => {
       ).run();
     }
 
-    expect(response.status).toBe(401);
-    expect(await response.json()).toEqual({ error: "unauthorized" });
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "internal_server_error" });
     const session = await env.PG72_ID_DB.prepare(
       "SELECT passkeyStepUpAt FROM session WHERE id = ?",
     )
@@ -743,6 +763,7 @@ describe("Passkey step-up", () => {
       .bind(admin.userId)
       .first();
     expect(successAudit).toBeNull();
+    await expectClientMutationLocked(admin, 401);
   });
 
   it("rolls back the audit batch without writing a timestamp", async () => {
@@ -792,6 +813,7 @@ describe("Passkey step-up", () => {
       .first();
     expect(challenge).toBeNull();
     await expectNoSuccessfulStepUp(admin);
+    await expectClientMutationLocked(admin);
   });
 
   it("clears a timestamp when an audit insert is ignored", async () => {
@@ -833,6 +855,7 @@ describe("Passkey step-up", () => {
       .first<{ counter: number }>();
     expect(counter?.counter).toBe(1);
     await expectNoSuccessfulStepUp(admin);
+    await expectClientMutationLocked(admin);
   });
 
   it("rejects an expired step-up timestamp", async () => {

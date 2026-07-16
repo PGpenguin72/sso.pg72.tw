@@ -225,18 +225,6 @@ function auditInsertForCounterVerifiedSession(
   );
 }
 
-async function deleteOrphanedStepUpAudit(
-  env: Env,
-  auditEventId: string,
-): Promise<void> {
-  await env.PG72_ID_DB.prepare(
-    `DELETE FROM audit_event
-      WHERE id = ? AND event_type = 'passkey.step_up_succeeded'`,
-  )
-    .bind(auditEventId)
-    .run();
-}
-
 export const passkeyStepUpRoutes = new Hono<AppEnv>();
 
 passkeyStepUpRoutes.post(
@@ -505,6 +493,10 @@ passkeyStepUpRoutes.post("/api/account/passkey-step-up/verify", async (c) => {
                AND actor_user_id = ?
                AND subject_id = ?
                AND outcome = 'success'
+          )
+          AND EXISTS (
+            SELECT 1 FROM passkey
+             WHERE id = ? AND userId = ? AND counter = ?
           )`,
     ).bind(
       verifiedAt,
@@ -513,9 +505,30 @@ passkeyStepUpRoutes.post("/api/account/passkey-step-up/verify", async (c) => {
       auditEvent.eventId,
       session.user.id,
       session.user.id,
+      passkey.id,
+      session.user.id,
+      newCounter,
+    ),
+    c.env.PG72_ID_DB.prepare(
+      `DELETE FROM audit_event
+        WHERE id = ?
+          AND event_type = 'passkey.step_up_succeeded'
+          AND NOT EXISTS (
+            SELECT 1 FROM session
+             WHERE id = ? AND userId = ? AND passkeyStepUpAt = ?
+          )`,
+    ).bind(
+      auditEvent.eventId,
+      session.session.id,
+      session.user.id,
+      verifiedAt,
     ),
   ]);
-  if (results.every((result) => result.meta.changes === 1)) {
+  if (
+    results[0]?.meta.changes === 1 &&
+    results[1]?.meta.changes === 1 &&
+    results[2]?.meta.changes === 0
+  ) {
     await enqueueSecurityEvent(c.env, auditEvent, c.executionCtx);
 
     return c.json({
@@ -527,11 +540,16 @@ passkeyStepUpRoutes.post("/api/account/passkey-step-up/verify", async (c) => {
     });
   }
 
-  // A zero-change audit cannot unlock the session because the timestamp write
-  // depends on that exact event. If the timestamp guard fails after the audit
-  // insert, remove the harmless orphan; neither path exposes a valid step-up.
-  await deleteOrphanedStepUpAudit(c.env, auditEvent.eventId);
+  // The timestamp depends on the exact success audit and credential counter.
+  // The final statement removes that audit in the same transaction whenever
+  // the timestamp guard fails, so no response can expose a partial success.
   if (results[0]?.meta.changes !== 1) {
+    if (
+      results[1]?.meta.changes !== 0 ||
+      results[2]?.meta.changes !== 0
+    ) {
+      throw new Error("Passkey step-up finalization invariant failed");
+    }
     const currentSession = await c.env.PG72_ID_DB.prepare(
       "SELECT 1 AS present FROM session WHERE id = ? AND userId = ?",
     )
@@ -547,6 +565,12 @@ passkeyStepUpRoutes.post("/api/account/passkey-step-up/verify", async (c) => {
       c.executionCtx,
     );
     return c.json({ error: "unauthorized" }, 401);
+  }
+  if (
+    results[1]?.meta.changes !== 0 ||
+    results[2]?.meta.changes !== 1
+  ) {
+    throw new Error("Passkey step-up finalization invariant failed");
   }
   await recordDeniedStepUp(
     c.env,

@@ -1199,6 +1199,11 @@ describe("Admin OAuth client management", () => {
       ["privacyPolicyUrl", "javascript:alert(1)", "invalid_privacy_policy_url"],
       ["termsOfServiceUrl", "http://copy.pg72.tw/terms", "invalid_terms_of_service_url"],
       ["termsOfServiceUrl", "not-a-url", "invalid_terms_of_service_url"],
+      ["backchannelLogoutUri", "http://copy.pg72.tw/backchannel", "invalid_backchannel_logout_uri"],
+      ["backchannelLogoutUri", "http://localhost/backchannel", "invalid_backchannel_logout_uri"],
+      ["backchannelLogoutUri", "https://*.pg72.tw/backchannel", "invalid_backchannel_logout_uri"],
+      ["backchannelLogoutUri", "https://user:secret@copy.pg72.tw/backchannel", "invalid_backchannel_logout_uri"],
+      ["backchannelLogoutUri", "https://copy.pg72.tw/@logout", "invalid_backchannel_logout_uri"],
     ];
     for (const [field, value, error] of cases) {
       const clientId = `bad-trust-url-${crypto.randomUUID()}`;
@@ -1221,24 +1226,34 @@ describe("Admin OAuth client management", () => {
       developerName: "  PG72 Lab  ",
       privacyPolicyUrl: "https://apps.pg72.tw/privacy",
       termsOfServiceUrl: "https://apps.pg72.tw/terms",
+      backchannelLogoutUri: "https://apps.pg72.tw/backchannel-logout",
     });
     expect(status).toBe(201);
     expect(payload.client).toMatchObject({
       developerName: "PG72 Lab",
       privacyPolicyUrl: "https://apps.pg72.tw/privacy",
       termsOfServiceUrl: "https://apps.pg72.tw/terms",
+      backchannelLogoutUri: "https://apps.pg72.tw/backchannel-logout",
     });
 
     const row = await env.PG72_ID_DB.prepare(
-      "SELECT tos, policy, metadata FROM oauthClient WHERE clientId = ?",
+      `SELECT tos, policy, metadata, backchannelLogoutUri
+         FROM oauthClient WHERE clientId = ?`,
     )
       .bind(clientId)
-      .first<{ tos: string; policy: string; metadata: string }>();
+      .first<{
+        backchannelLogoutUri: string;
+        metadata: string;
+        policy: string;
+        tos: string;
+      }>();
     expect(row).toMatchObject({
       tos: "https://apps.pg72.tw/terms",
       policy: "https://apps.pg72.tw/privacy",
+      backchannelLogoutUri: "https://apps.pg72.tw/backchannel-logout",
     });
     expect(JSON.parse(row?.metadata ?? "{}")).toEqual({
+      backchannel_logout_uri: "https://apps.pg72.tw/backchannel-logout",
       developer_name: "PG72 Lab",
     });
 
@@ -1251,12 +1266,14 @@ describe("Admin OAuth client management", () => {
         developerName: string | null;
         privacyPolicyUrl: string | null;
         termsOfServiceUrl: string | null;
+        backchannelLogoutUri: string | null;
       }>;
     }).clients.find((client) => client.clientId === clientId);
     expect(listed).toMatchObject({
       developerName: "PG72 Lab",
       privacyPolicyUrl: "https://apps.pg72.tw/privacy",
       termsOfServiceUrl: "https://apps.pg72.tw/terms",
+      backchannelLogoutUri: "https://apps.pg72.tw/backchannel-logout",
     });
   });
 
@@ -1267,12 +1284,10 @@ describe("Admin OAuth client management", () => {
     const created = await createClient(headers, confidentialClientBody(clientId));
     expect(created.status).toBe(201);
 
-    // Simulate a client that also stores provider-level metadata, like the
-    // diary client's back-channel logout URI.
+    // Simulate unrelated provider-level metadata that this endpoint must keep.
     await env.PG72_ID_DB.prepare(
       `UPDATE oauthClient
-          SET metadata = json_set(metadata, '$.backchannel_logout_uri',
-                                  'https://diary.pg72.tw/api/auth/backchannel-logout')
+          SET metadata = json_set(metadata, '$.purpose', 'diary-integration')
         WHERE clientId = ?`,
     )
       .bind(clientId)
@@ -1286,6 +1301,8 @@ describe("Admin OAuth client management", () => {
           developerName: "PG72 Diary Team",
           privacyPolicyUrl: "https://diary.pg72.tw/privacy",
           termsOfServiceUrl: null,
+          backchannelLogoutUri:
+            "https://diary.pg72.tw/api/auth/backchannel-logout",
         }),
       }),
     );
@@ -1295,18 +1312,31 @@ describe("Admin OAuth client management", () => {
       developerName: "PG72 Diary Team",
       privacyPolicyUrl: "https://diary.pg72.tw/privacy",
       termsOfServiceUrl: null,
+      backchannelLogoutUri:
+        "https://diary.pg72.tw/api/auth/backchannel-logout",
     });
 
     const row = await env.PG72_ID_DB.prepare(
-      "SELECT tos, policy, metadata FROM oauthClient WHERE clientId = ?",
+      `SELECT tos, policy, metadata, backchannelLogoutUri
+         FROM oauthClient WHERE clientId = ?`,
     )
       .bind(clientId)
-      .first<{ tos: string | null; policy: string | null; metadata: string }>();
+      .first<{
+        backchannelLogoutUri: string | null;
+        metadata: string;
+        policy: string | null;
+        tos: string | null;
+      }>();
     expect(row?.tos).toBeNull();
     expect(row?.policy).toBe("https://diary.pg72.tw/privacy");
+    expect(row?.backchannelLogoutUri).toBe(
+      "https://diary.pg72.tw/api/auth/backchannel-logout",
+    );
     expect(JSON.parse(row?.metadata ?? "{}")).toEqual({
+      backchannel_logout_uri:
+        "https://diary.pg72.tw/api/auth/backchannel-logout",
       developer_name: "PG72 Diary Team",
-      backchannel_logout_uri: "https://diary.pg72.tw/api/auth/backchannel-logout",
+      purpose: "diary-integration",
     });
 
     const invalidUpdate = await exports.default.fetch(

@@ -278,6 +278,7 @@ interface AuthorizationsResponse {
 }
 
 interface AdminOAuthClient {
+  backchannelLogoutUri: string | null;
   clientId: string;
   name: string;
   developerName: string | null;
@@ -2491,11 +2492,13 @@ export function App() {
   const [clientDeveloperDraft, setClientDeveloperDraft] = useState("");
   const [clientPrivacyUrlDraft, setClientPrivacyUrlDraft] = useState("");
   const [clientTermsUrlDraft, setClientTermsUrlDraft] = useState("");
+  const [clientBackchannelUrlDraft, setClientBackchannelUrlDraft] = useState("");
   const [clientRedirectUrisDraft, setClientRedirectUrisDraft] = useState("");
   const [editingClientId, setEditingClientId] = useState<string | null>(null);
   const [editDeveloperDraft, setEditDeveloperDraft] = useState("");
   const [editPrivacyUrlDraft, setEditPrivacyUrlDraft] = useState("");
   const [editTermsUrlDraft, setEditTermsUrlDraft] = useState("");
+  const [editBackchannelUrlDraft, setEditBackchannelUrlDraft] = useState("");
   const [clientTypeDraft, setClientTypeDraft] = useState<
     "confidential" | "public"
   >("confidential");
@@ -3503,6 +3506,8 @@ export function App() {
       if (privacyPolicyUrl) body.privacyPolicyUrl = privacyPolicyUrl;
       const termsOfServiceUrl = clientTermsUrlDraft.trim();
       if (termsOfServiceUrl) body.termsOfServiceUrl = termsOfServiceUrl;
+      const backchannelLogoutUri = clientBackchannelUrlDraft.trim();
+      if (backchannelLogoutUri) body.backchannelLogoutUri = backchannelLogoutUri;
 
       const response = await fetch("/api/admin/clients", {
         method: "POST",
@@ -3530,6 +3535,7 @@ export function App() {
       setClientDeveloperDraft("");
       setClientPrivacyUrlDraft("");
       setClientTermsUrlDraft("");
+      setClientBackchannelUrlDraft("");
       setClientRedirectUrisDraft("");
       setClientOfflineDraft(false);
       setClientTypeDraft("confidential");
@@ -3548,6 +3554,7 @@ export function App() {
     setEditDeveloperDraft(client.developerName ?? "");
     setEditPrivacyUrlDraft(client.privacyPolicyUrl ?? "");
     setEditTermsUrlDraft(client.termsOfServiceUrl ?? "");
+    setEditBackchannelUrlDraft(client.backchannelLogoutUri ?? "");
   };
 
   const updateAdminClientTrust = async (client: AdminOAuthClient) => {
@@ -3565,6 +3572,7 @@ export function App() {
             developerName: editDeveloperDraft.trim(),
             privacyPolicyUrl: editPrivacyUrlDraft.trim() || null,
             termsOfServiceUrl: editTermsUrlDraft.trim() || null,
+            backchannelLogoutUri: editBackchannelUrlDraft.trim() || null,
           }),
         },
       );
@@ -4734,6 +4742,20 @@ export function App() {
                       />
                     </label>
                     <label className="client-form-full">
+                      <span>Back-channel logout URI（選填，production 僅接受 HTTPS）</span>
+                      <input
+                        type="url"
+                        maxLength={512}
+                        value={clientBackchannelUrlDraft}
+                        onChange={(event) =>
+                          setClientBackchannelUrlDraft(event.target.value)
+                        }
+                        autoComplete="off"
+                        placeholder="https://copy.pg72.tw/api/auth/backchannel-logout"
+                        spellCheck={false}
+                      />
+                    </label>
+                    <label className="client-form-full">
                       <span>Redirect URIs（每行一個，production 僅接受 HTTPS）</span>
                       <textarea
                         rows={3}
@@ -4832,6 +4854,11 @@ export function App() {
                                 <span className="mono">
                                   {client.redirectUris.join(" ")}
                                 </span>
+                                {client.backchannelLogoutUri ? (
+                                  <span className="mono">
+                                    Logout: {client.backchannelLogoutUri}
+                                  </span>
+                                ) : null}
                                 {editingClient ? (
                                   <form
                                     className="client-trust-form"
@@ -4878,6 +4905,22 @@ export function App() {
                                         disabled={clientBusy}
                                         onChange={(event) =>
                                           setEditPrivacyUrlDraft(event.target.value)
+                                        }
+                                        autoComplete="off"
+                                        spellCheck={false}
+                                      />
+                                    </label>
+                                    <label>
+                                      <span>Back-channel logout URI（選填，HTTPS）</span>
+                                      <input
+                                        type="url"
+                                        maxLength={512}
+                                        value={editBackchannelUrlDraft}
+                                        disabled={clientBusy}
+                                        onChange={(event) =>
+                                          setEditBackchannelUrlDraft(
+                                            event.target.value,
+                                          )
                                         }
                                         autoComplete="off"
                                         spellCheck={false}

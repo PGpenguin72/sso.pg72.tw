@@ -14,6 +14,10 @@ import {
 import { ownedClientShutdownStatements } from "./client-ownership";
 import { readRuntimeConfig } from "./config";
 import {
+  globalLogoutForUserStatements,
+  scheduleLogoutDeliveryDispatch,
+} from "./global-logout";
+import {
   denyRoleChange,
   denyUserManagement,
   effectivePlatformRole,
@@ -460,23 +464,16 @@ adminUserRoutes.post("/:userId/status", async (c) => {
 
   if (input.suspended) {
     statements.push(
+      ...globalLogoutForUserStatements(c.env, {
+        eventId: event.eventId,
+        now,
+        reason: "suspend",
+        userId,
+      }),
       guardedUserStatement(
         c,
         event.eventId,
         "DELETE FROM session WHERE userId = ?",
-        userId,
-      ),
-      guardedUserStatement(
-        c,
-        event.eventId,
-        "UPDATE oauthRefreshToken SET revoked = ? WHERE userId = ? AND revoked IS NULL",
-        now,
-        userId,
-      ),
-      guardedUserStatement(
-        c,
-        event.eventId,
-        "DELETE FROM oauthAccessToken WHERE userId = ?",
         userId,
       ),
     );
@@ -487,6 +484,9 @@ adminUserRoutes.post("/:userId/status", async (c) => {
     return c.json({ error: "user_state_changed" }, 409);
   }
   await enqueueSecurityEvent(c.env, event, c.executionCtx);
+  if (input.suspended) {
+    await scheduleLogoutDeliveryDispatch(c.env, c.executionCtx);
+  }
 
   return c.json({
     userId,
@@ -571,23 +571,16 @@ adminUserRoutes.post("/:userId/access", async (c) => {
   ];
   if (input.restricted) {
     statements.push(
+      ...globalLogoutForUserStatements(c.env, {
+        eventId: event.eventId,
+        now,
+        reason: "restrict",
+        userId,
+      }),
       guardedUserStatement(
         c,
         event.eventId,
         "DELETE FROM session WHERE userId = ?",
-        userId,
-      ),
-      guardedUserStatement(
-        c,
-        event.eventId,
-        "UPDATE oauthRefreshToken SET revoked = ? WHERE userId = ? AND revoked IS NULL",
-        now,
-        userId,
-      ),
-      guardedUserStatement(
-        c,
-        event.eventId,
-        "DELETE FROM oauthAccessToken WHERE userId = ?",
         userId,
       ),
     );
@@ -598,6 +591,9 @@ adminUserRoutes.post("/:userId/access", async (c) => {
     return c.json({ error: "user_state_changed" }, 409);
   }
   await enqueueSecurityEvent(c.env, event, c.executionCtx);
+  if (input.restricted) {
+    await scheduleLogoutDeliveryDispatch(c.env, c.executionCtx);
+  }
 
   return c.json({
     userId,
@@ -643,25 +639,33 @@ adminUserRoutes.post("/:userId/revoke-sessions", async (c) => {
     actorUserId: gate.actor.userId,
     subjectId: userId,
   });
+  const now = new Date().toISOString();
   const results = await c.env.PG72_ID_DB.batch([
     auditInsertForExistingUserStatement(
       c.env,
       event,
       transitionGuard(target, gate.actor),
     ),
-    guardedUserStatement(
-      c,
-      event.eventId,
-      "DELETE FROM session WHERE userId = ?",
+    ...globalLogoutForUserStatements(c.env, {
+      eventId: event.eventId,
+      now,
+      reason: "admin_revoke",
       userId,
-    ),
+    }),
+    c.env.PG72_ID_DB.prepare(
+      `DELETE FROM session
+        WHERE userId = ?
+          AND EXISTS (SELECT 1 FROM audit_event WHERE id = ?)
+        RETURNING id`,
+    ).bind(userId, event.eventId),
   ]);
   if (results[0]?.meta.changes !== 1) {
     return c.json({ error: "user_state_changed" }, 409);
   }
   await enqueueSecurityEvent(c.env, event, c.executionCtx);
+  await scheduleLogoutDeliveryDispatch(c.env, c.executionCtx);
 
-  return c.json({ userId, revokedSessions: results[1]?.meta.changes ?? 0 });
+  return c.json({ userId, revokedSessions: results[4]?.results.length ?? 0 });
 });
 
 adminUserRoutes.delete("/:userId", async (c) => {
@@ -711,6 +715,12 @@ adminUserRoutes.delete("/:userId", async (c) => {
       event,
       transitionGuard(target, gate.actor),
     ),
+    ...globalLogoutForUserStatements(c.env, {
+      eventId: event.eventId,
+      now,
+      reason: "account_delete",
+      userId,
+    }),
     ...ownedClientShutdownStatements(c.env, userId, now, event.eventId),
     guardedUserStatement(
       c,
@@ -738,6 +748,7 @@ adminUserRoutes.delete("/:userId", async (c) => {
   }
 
   await enqueueSecurityEvent(c.env, event, c.executionCtx);
+  await scheduleLogoutDeliveryDispatch(c.env, c.executionCtx);
 
   return c.json({ deleted: true, userId });
 });

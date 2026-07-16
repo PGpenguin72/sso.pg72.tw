@@ -18,7 +18,8 @@ INSERT INTO oauthClient (
   public,
   type,
   requirePKCE,
-  metadata
+  metadata,
+  backchannelLogoutUri
 ) VALUES (
   '00000000-0000-4000-8000-000000000072',
   'pg72-test-rp',
@@ -39,7 +40,8 @@ INSERT INTO oauthClient (
   1,
   'web',
   1,
-  '{"developer_name":"PG72 官方"}'
+  '{"developer_name":"PG72 官方","backchannel_logout_uri":"http://localhost:5174/backchannel-logout"}',
+  'http://localhost:5174/backchannel-logout'
 )
 ON CONFLICT(clientId) DO UPDATE SET
   disabled = 0,
@@ -56,4 +58,5 @@ ON CONFLICT(clientId) DO UPDATE SET
   type = excluded.type,
   requirePKCE = excluded.requirePKCE,
   metadata = excluded.metadata,
+  backchannelLogoutUri = excluded.backchannelLogoutUri,
   updatedAt = datetime('now');

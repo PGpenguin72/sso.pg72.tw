@@ -1,5 +1,5 @@
 diff --git a/dist/index.mjs b/dist/index.mjs
-index 847085c481843ce6852a5db9006a2e79b7f77b15..f51dfe032f258aa81310a15ad2e4a32a04c06111 100644
+index 847085c481843ce6852a5db9006a2e79b7f77b15..7921011094ccf61fb9dbd2643be656ad9bce21a3 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
 @@ -13,7 +13,7 @@ import { parseSetCookieHeader } from "better-auth/cookies";
@@ -242,11 +242,33 @@ index 847085c481843ce6852a5db9006a2e79b7f77b15..f51dfe032f258aa81310a15ad2e4a32a
  			throw error;
  		} else if (error instanceof Error) {
  			logger.error("Introspection error:", error.message, error.stack);
+@@ -1145,7 +1189,20 @@ async function rpInitiatedLogoutEndpoint(ctx, opts) {
+ 		error_description: "id token missing session",
+ 		error: "invalid_request"
+ 	});
+-	try {
++	if (opts.revokeSessionForLogout) {
++		const session = await ctx.context.adapter.findOne({
++			model: "session",
++			where: [{
++				field: "id",
++				value: sessionId
++			}]
++		});
++		await opts.revokeSessionForLogout({
++			clientId: client.clientId,
++			sessionId,
++			userId: session?.userId
++		});
++	} else try {
+ 		const session = await ctx.context.adapter.findOne({
+ 			model: "session",
+ 			where: [{
 diff --git a/dist/oauth-D74mBkw6.d.mts b/dist/oauth-D74mBkw6.d.mts
-index 5531f010da1b43580be514022df818bb1f835323..7a191a4d1c9c7b157f23bc90023395b95059f193 100644
+index 5531f010da1b43580be514022df818bb1f835323..e87793fceb784deb3482e4b1dc8a92253409d2ef 100644
 --- a/dist/oauth-D74mBkw6.d.mts
 +++ b/dist/oauth-D74mBkw6.d.mts
-@@ -763,6 +763,20 @@ interface OAuthOptions<Scopes extends readonly Scope[] = InternallySupportedScop
+@@ -763,6 +763,31 @@ interface OAuthOptions<Scopes extends readonly Scope[] = InternallySupportedScop
      resource?: string; /** oAuthClient metadata */
      metadata?: Record<string, any>;
    }) => Awaitable<Record<string, any>>;
@@ -264,6 +286,17 @@ index 5531f010da1b43580be514022df818bb1f835323..7a191a4d1c9c7b157f23bc90023395b9
 +    /** Live central session ID associated with the token, when present. */sessionId?: string;
 +    /** User associated with the token, when present. */user?: (User & Record<string, unknown>) | null;
 +  }) => Awaitable<boolean>;
++  /**
++   * Replaces the provider's central-session deletion after an RP-initiated
++   * logout token has passed signature, issuer, audience, client, and sid
++   * validation. The hook must commit revocation before it resolves; thrown
++   * errors fail the logout request closed.
++   */
++  revokeSessionForLogout?: (info: {
++    /** Registered client that initiated the logout. */clientId: string;
++    /** Validated central sid from the signed ID token. */sessionId: string;
++    /** Current session owner, when the session still exists. */userId?: string;
++  }) => Awaitable<void>;
    /**
     * Custom fields to include in the token response body.
     *

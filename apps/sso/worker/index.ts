@@ -12,6 +12,7 @@ import {
 } from "./admin-commit";
 import { adminClientRoutes } from "./admin-clients";
 import { requireAdminPermission } from "./admin-gate";
+import { adminLogoutDeliveryRoutes } from "./admin-logout-deliveries";
 import {
   adminUserRoutes,
   applyRoleChange,
@@ -20,9 +21,10 @@ import {
 } from "./admin-users";
 import {
   auditInsertForInvitationMutationStatement,
-  consumeSecurityEvents,
+  consumeSecurityEventMessage,
   createAuditEvent,
   enqueueSecurityEvent,
+  isSecurityEvent,
   recordAudit,
   type SecurityEvent,
 } from "./audit";
@@ -40,6 +42,13 @@ import {
   normalizeEmail,
   readRuntimeConfig,
 } from "./config";
+import {
+  isLogoutDeliveryQueueMessage,
+  revokeCentralSessions,
+  scheduleLogoutDeliveryDispatch,
+  type LogoutDeliveryQueueMessage,
+} from "./global-logout";
+import { consumeLogoutDeliveryMessage } from "./logout-delivery";
 import {
   adminOauthReportRoutes,
   oauthReportRoutes,
@@ -114,6 +123,8 @@ interface RegistrationSocialStartInput {
 }
 
 interface OAuthMetadata {
+  backchannel_logout_session_supported?: unknown;
+  backchannel_logout_supported?: unknown;
   token_endpoint_auth_methods_supported?: unknown;
   introspection_endpoint_auth_methods_supported?: unknown;
   revocation_endpoint_auth_methods_supported?: unknown;
@@ -407,6 +418,7 @@ async function normalizeOAuthNavigationRedirect(
 
 async function advertiseManagedClientAuthMethods(
   response: Response,
+  pathname: string,
 ): Promise<Response> {
   if (
     !response.ok ||
@@ -435,6 +447,10 @@ async function advertiseManagedClientAuthMethods(
     "none",
     "client_secret_post",
   ];
+  if (pathname === "/.well-known/openid-configuration") {
+    metadata.backchannel_logout_supported = true;
+    metadata.backchannel_logout_session_supported = true;
+  }
 
   const headers = new Headers(response.headers);
   headers.delete("Content-Length");
@@ -485,7 +501,9 @@ function parseScopes(value: string): string[] {
   }
 }
 
-async function readJson<T>(request: Request): Promise<T | null> {
+async function readJson<T>(
+  request: { headers: Headers; json(): Promise<unknown> },
+): Promise<T | null> {
   const contentType = request.headers.get("content-type") ?? "";
   if (!contentType.toLowerCase().startsWith("application/json")) {
     return null;
@@ -619,6 +637,7 @@ app.use("/api/account/passkey-step-up/*", async (c, next) => {
 });
 
 app.route("/api/admin/clients", adminClientRoutes);
+app.route("/api/admin/logout-deliveries", adminLogoutDeliveryRoutes);
 app.route("/api/admin/oauth-reports", adminOauthReportRoutes);
 app.route("/api/admin/users", adminUserRoutes);
 app.route("/", passkeyStepUpRoutes);
@@ -767,6 +786,21 @@ for (const path of ["/passkey/update-passkey", "/passkey/delete-passkey"]) {
     }
     await next();
   });
+}
+
+for (const path of [
+  "/revoke-session",
+  "/revoke-sessions",
+  "/revoke-other-sessions",
+  "/sign-out",
+]) {
+  app.use(
+    path,
+    bodyLimit({
+      maxSize: 4 * 1024,
+      onError: (c) => c.json({ error: "request_too_large" }, 413),
+    }),
+  );
 }
 
 app.get("/health", (c) =>
@@ -1349,6 +1383,106 @@ app.all("*", async (c) => {
 
     const auth = createAuth(c.env, c.executionCtx);
 
+    if (
+      c.req.method === "POST" &&
+      [
+        "/revoke-session",
+        "/revoke-sessions",
+        "/revoke-other-sessions",
+        "/sign-out",
+      ].includes(pathname)
+    ) {
+      const config = readRuntimeConfig(c.env);
+      if (c.req.header("origin") !== config.authBaseUrl) {
+        return c.json({ error: "invalid_origin" }, 403);
+      }
+      const current = await auth.api.getSession({
+        headers: c.req.raw.headers,
+      });
+      if (!current) return auth.handler(c.req.raw);
+
+      const isSignOut = pathname === "/sign-out";
+      const freshAfter = new Date(
+        Date.now() - FRESH_SESSION_MAX_AGE_MS,
+      ).toISOString();
+      const currentCreatedAt = new Date(current.session.createdAt).getTime();
+      if (
+        !isSignOut &&
+        (!Number.isFinite(currentCreatedAt) ||
+          currentCreatedAt <= new Date(freshAfter).getTime())
+      ) {
+        return auth.handler(c.req.raw);
+      }
+
+      let selector:
+        | {
+            kind: "session";
+            sessionId: string;
+            token?: string;
+            userId: string;
+          }
+        | { kind: "user_all"; userId: string }
+        | {
+            kind: "user_others";
+            exceptSessionId: string;
+            userId: string;
+          };
+      let eventType: string;
+      if (pathname === "/revoke-session") {
+        const input = await readJson<{ token?: unknown }>(c.req.raw.clone());
+        if (typeof input?.token !== "string" || input.token.length === 0) {
+          return auth.handler(c.req.raw);
+        }
+        const target = await c.env.PG72_ID_DB.prepare(
+          "SELECT id FROM session WHERE token = ? AND userId = ? LIMIT 1",
+        )
+          .bind(input.token, current.user.id)
+          .first<{ id: string }>();
+        selector = {
+          kind: "session",
+          sessionId: target?.id ?? crypto.randomUUID(),
+          token: input.token,
+          userId: current.user.id,
+        };
+        eventType = "session.revoked";
+      } else if (pathname === "/revoke-other-sessions") {
+        selector = {
+          kind: "user_others",
+          exceptSessionId: current.session.id,
+          userId: current.user.id,
+        };
+        eventType = "session.revoked_others";
+      } else if (pathname === "/revoke-sessions") {
+        selector = { kind: "user_all", userId: current.user.id };
+        eventType = "session.revoked_all";
+      } else {
+        selector = {
+          kind: "session",
+          sessionId: current.session.id,
+          token: current.session.token,
+          userId: current.user.id,
+        };
+        eventType = "session.revoked";
+      }
+
+      const revoked = await revokeCentralSessions(
+        c.env,
+        {
+          actorSessionId: current.session.id,
+          actorUserId: current.user.id,
+          eventType,
+          ...(!isSignOut ? { freshAfter } : {}),
+          reason: isSignOut ? "sign_out" : "self_revoke",
+          selector,
+          subjectUserId: current.user.id,
+        },
+        c.executionCtx,
+      );
+      if (!revoked.committed) return auth.handler(c.req.raw);
+      if (isSignOut) return auth.handler(c.req.raw);
+      return c.json({ status: true });
+    }
+
     if (pathname === "/link-social") {
       const session = await auth.api.getSession({ headers: c.req.raw.headers });
       if (session) {
@@ -1418,7 +1552,7 @@ app.all("*", async (c) => {
       );
     }
     return OAUTH_METADATA_PATHS.has(pathname)
-      ? advertiseManagedClientAuthMethods(response)
+      ? advertiseManagedClientAuthMethods(response, pathname)
       : response;
   }
 
@@ -1440,8 +1574,31 @@ app.onError((error, c) => {
   return c.json({ error: "internal_server_error" }, 500);
 });
 
+type WorkerQueueMessage = SecurityEvent | LogoutDeliveryQueueMessage;
+
 export default {
   fetch: app.fetch,
-  queue: (batch: MessageBatch<SecurityEvent>, env: Env) =>
-    consumeSecurityEvents(batch, env),
-} satisfies ExportedHandler<Env, SecurityEvent>;
+  queue: async (batch: MessageBatch<WorkerQueueMessage>, env: Env) => {
+    for (const message of batch.messages) {
+      if (isLogoutDeliveryQueueMessage(message.body)) {
+        await consumeLogoutDeliveryMessage(
+          message as Message<LogoutDeliveryQueueMessage>,
+          env,
+        );
+      } else if (isSecurityEvent(message.body)) {
+        await consumeSecurityEventMessage(
+          message as Message<SecurityEvent>,
+          env,
+        );
+      } else {
+        console.error(
+          JSON.stringify({ event: "queue_message_rejected", queue: batch.queue }),
+        );
+        message.ack();
+      }
+    }
+  },
+  scheduled: (_controller: ScheduledController, env: Env, ctx: ExecutionContext) => {
+    ctx.waitUntil(scheduleLogoutDeliveryDispatch(env));
+  },
+} satisfies ExportedHandler<Env, WorkerQueueMessage>;

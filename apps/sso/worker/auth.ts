@@ -19,6 +19,7 @@ import {
   normalizeEmail,
   readRuntimeConfig,
 } from "./config";
+import { revokeCentralSessions } from "./global-logout";
 import {
   assertSessionUserActive,
   authorizeRegistration,
@@ -436,6 +437,20 @@ export function createAuth(
             accountAccessLevel(user.accessLevel),
           ),
         }),
+        revokeSessionForLogout: async ({ clientId, sessionId, userId }) => {
+          if (!userId) return;
+          await revokeCentralSessions(
+            env,
+            {
+              clientId,
+              eventType: "session.revoked",
+              reason: "rp_initiated_logout",
+              selector: { kind: "session", sessionId, userId },
+              subjectUserId: userId,
+            },
+            executionCtx,
+          );
+        },
         authorizeOpaqueAccessTokenIntrospection: ({
           introspectionClientId,
           scopes,

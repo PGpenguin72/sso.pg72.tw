@@ -207,6 +207,57 @@ async function sessionTokenHash(token: string): Promise<string> {
     .replaceAll("=", "");
 }
 
+async function seedRpSession(centralSessionId: string): Promise<string> {
+  const token = crypto.randomUUID();
+  const now = new Date();
+  await env.TEST_RP_DB.prepare(
+    `INSERT INTO rp_session
+      (id, token_hash, subject, central_session_id, display_name, email,
+       expires_at, created_at, last_seen_at)
+     VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?)`,
+  )
+    .bind(
+      crypto.randomUUID(),
+      await sessionTokenHash(token),
+      crypto.randomUUID(),
+      centralSessionId,
+      new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
+      now.toISOString(),
+      now.toISOString(),
+    )
+    .run();
+  return token;
+}
+
+function logoutClaims(
+  sid: string,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    aud: "pg72-test-rp",
+    events: {
+      "http://schemas.openid.net/event/backchannel-logout": {},
+    },
+    exp: now + 120,
+    iat: now,
+    iss: discovery.issuer,
+    jti: crypto.randomUUID(),
+    sid,
+    ...overrides,
+  };
+}
+
+async function postLogoutToken(token: string): Promise<Response> {
+  return exports.default.fetch(
+    new Request("http://localhost:5174/backchannel-logout", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ logout_token: token }),
+    }),
+  );
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -226,34 +277,25 @@ describe("OIDC test relying party", () => {
     expect(requireCentralSessionId({ sid })).toBe(sid);
   });
 
-  it("does not resume a legacy RP session whose central sid is null", async () => {
-    const token = "legacy-null-sid-session-token";
+  it("structurally rejects an RP session whose central sid is null", async () => {
     const now = new Date();
-    await env.TEST_RP_DB.prepare(
-      `INSERT INTO rp_session
-        (id, token_hash, subject, central_session_id, display_name, email,
-         expires_at, created_at, last_seen_at)
-       VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?, ?)`,
-    )
-      .bind(
-        crypto.randomUUID(),
-        await sessionTokenHash(token),
-        crypto.randomUUID(),
-        new Date(now.getTime() + 60_000).toISOString(),
-        now.toISOString(),
-        now.toISOString(),
+    await expect(
+      env.TEST_RP_DB.prepare(
+        `INSERT INTO rp_session
+          (id, token_hash, subject, central_session_id, display_name, email,
+           expires_at, created_at, last_seen_at)
+         VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?, ?)`,
       )
-      .run();
-
-    const response = await exports.default.fetch(
-      new Request("http://localhost:5174/", {
-        headers: { Cookie: `pg72_test_session=${token}` },
-      }),
-    );
-    expect(response.status).toBe(200);
-    const body = await response.text();
-    expect(body).toContain("PGID protocol check");
-    expect(body).not.toContain("OIDC session established");
+        .bind(
+          crypto.randomUUID(),
+          await sessionTokenHash("legacy-null-sid-session-token"),
+          crypto.randomUUID(),
+          new Date(now.getTime() + 60_000).toISOString(),
+          now.toISOString(),
+          now.toISOString(),
+        )
+        .run(),
+    ).rejects.toThrow("NOT NULL constraint failed");
   });
 
   it("serves a hardened unauthenticated harness", async () => {
@@ -489,5 +531,154 @@ describe("OIDC test relying party", () => {
     );
     expect(response.status).toBe(400);
     expect(await response.text()).toContain("Missing OIDC transaction cookie");
+  });
+
+  it("validates a logout token and idempotently removes every local sid session", async () => {
+    const signing = await createSigningFixture();
+    const sid = crypto.randomUUID();
+    const untouchedSid = crypto.randomUUID();
+    await seedRpSession(sid);
+    await seedRpSession(sid);
+    await seedRpSession(untouchedSid);
+    stubSignedOidcServer(signing, {
+      audience: "pg72-test-rp",
+      centralSessionId: sid,
+      subject: crypto.randomUUID(),
+    });
+    const claims = logoutClaims(sid);
+    const token = await signIdToken(signing.privateKey, claims);
+
+    expect((await postLogoutToken(token)).status).toBe(204);
+    const targetCount = () =>
+      env.TEST_RP_DB.prepare(
+        "SELECT COUNT(*) AS count FROM rp_session WHERE central_session_id = ?",
+      )
+        .bind(sid)
+        .first<{ count: number }>();
+    const untouchedCount = () =>
+      env.TEST_RP_DB.prepare(
+        "SELECT COUNT(*) AS count FROM rp_session WHERE central_session_id = ?",
+      )
+        .bind(untouchedSid)
+        .first<{ count: number }>();
+    expect((await targetCount())?.count).toBe(0);
+    expect((await untouchedCount())?.count).toBe(1);
+    expect((await postLogoutToken(token)).status).toBe(204);
+    expect((await targetCount())?.count).toBe(0);
+    expect((await untouchedCount())?.count).toBe(1);
+
+    const receipt = await env.TEST_RP_DB.prepare(
+      `SELECT central_session_id, issuer, COUNT(*) AS count
+         FROM backchannel_logout_receipt
+        WHERE jti = ?
+        GROUP BY central_session_id, issuer`,
+    )
+      .bind(claims.jti)
+      .first<{ central_session_id: string; count: number; issuer: string }>();
+    expect(receipt).toEqual({
+      central_session_id: sid,
+      count: 1,
+      issuer: discovery.issuer,
+    });
+  });
+
+  it.each([
+    ["issuer", { iss: "https://attacker.example" }],
+    ["audience", { aud: "another-client" }],
+    ["events", { events: { "https://attacker.example/event": {} } }],
+    ["nonce", { nonce: "nonce-is-forbidden" }],
+    ["lifetime", { exp: Math.floor(Date.now() / 1000) + 600 }],
+  ])("rejects a logout token with invalid %s", async (_name, overrides) => {
+    const signing = await createSigningFixture();
+    const sid = crypto.randomUUID();
+    await seedRpSession(sid);
+    stubSignedOidcServer(signing, {
+      audience: "pg72-test-rp",
+      centralSessionId: sid,
+      subject: crypto.randomUUID(),
+    });
+    const token = await signIdToken(
+      signing.privateKey,
+      logoutClaims(sid, overrides),
+    );
+
+    expect((await postLogoutToken(token)).status).toBe(400);
+    const remaining = await env.TEST_RP_DB.prepare(
+      "SELECT COUNT(*) AS count FROM rp_session WHERE central_session_id = ?",
+    )
+      .bind(sid)
+      .first<{ count: number }>();
+    expect(remaining?.count).toBe(1);
+  });
+
+  it("rejects a reused jti that names a different sid", async () => {
+    const signing = await createSigningFixture();
+    const firstSid = crypto.randomUUID();
+    const secondSid = crypto.randomUUID();
+    const jti = crypto.randomUUID();
+    await seedRpSession(firstSid);
+    await seedRpSession(secondSid);
+    stubSignedOidcServer(signing, {
+      audience: "pg72-test-rp",
+      centralSessionId: firstSid,
+      subject: crypto.randomUUID(),
+    });
+
+    const first = await signIdToken(
+      signing.privateKey,
+      logoutClaims(firstSid, { jti }),
+    );
+    const conflicting = await signIdToken(
+      signing.privateKey,
+      logoutClaims(secondSid, { jti }),
+    );
+    expect((await postLogoutToken(first)).status).toBe(204);
+    expect((await postLogoutToken(conflicting)).status).toBe(400);
+    const secondRemaining = await env.TEST_RP_DB.prepare(
+      "SELECT COUNT(*) AS count FROM rp_session WHERE central_session_id = ?",
+    )
+      .bind(secondSid)
+      .first<{ count: number }>();
+    expect(secondRemaining?.count).toBe(1);
+  });
+
+  it("rejects a logout token whose signature is not in the issuer JWKS", async () => {
+    const trusted = await createSigningFixture();
+    const attacker = await createSigningFixture();
+    const sid = crypto.randomUUID();
+    await seedRpSession(sid);
+    stubSignedOidcServer(trusted, {
+      audience: "pg72-test-rp",
+      centralSessionId: sid,
+      subject: crypto.randomUUID(),
+    });
+    const token = await signIdToken(attacker.privateKey, logoutClaims(sid));
+    expect((await postLogoutToken(token)).status).toBe(400);
+    const remaining = await env.TEST_RP_DB.prepare(
+      "SELECT COUNT(*) AS count FROM rp_session WHERE central_session_id = ?",
+    )
+      .bind(sid)
+      .first<{ count: number }>();
+    expect(remaining?.count).toBe(1);
+  });
+
+  it("rejects malformed back-channel requests before token validation", async () => {
+    const wrongMediaType = await exports.default.fetch(
+      new Request("http://localhost:5174/backchannel-logout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ logout_token: "not-a-token" }),
+      }),
+    );
+    expect(wrongMediaType.status).toBe(415);
+
+    const duplicated = await exports.default.fetch(
+      new Request("http://localhost:5174/backchannel-logout", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "logout_token=a&logout_token=b",
+      }),
+    );
+    expect(duplicated.status).toBe(400);
   });
 });

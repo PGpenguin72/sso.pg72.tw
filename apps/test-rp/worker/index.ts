@@ -1,6 +1,8 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { html } from "hono/html";
+import { createLocalJWKSet, jwtVerify, type JSONWebKeySet } from "jose";
 import * as oauth from "oauth4webapi";
 
 import { requireCentralSessionId } from "./oidc-claims";
@@ -33,6 +35,17 @@ interface RelyingPartySession {
   email: string | null;
   expires_at: string;
 }
+
+interface ValidatedLogoutToken {
+  issuer: string;
+  jti: string;
+  sid: string;
+}
+
+const BACKCHANNEL_LOGOUT_EVENT =
+  "http://schemas.openid.net/event/backchannel-logout";
+const LOGOUT_TOKEN_MAX_LENGTH = 16 * 1024;
+const JWKS_MAX_LENGTH = 64 * 1024;
 
 function exactOrigin(value: string, name: string): string {
   const url = new URL(value);
@@ -94,6 +107,85 @@ async function discover(config: RuntimeConfig): Promise<oauth.AuthorizationServe
     ...requestOptions(config),
   });
   return oauth.processDiscoveryResponse(config.issuer, response);
+}
+
+async function validateLogoutToken(
+  config: RuntimeConfig,
+  token: string,
+): Promise<ValidatedLogoutToken> {
+  if (token.length === 0 || token.length > LOGOUT_TOKEN_MAX_LENGTH) {
+    throw new Error("Invalid logout token length");
+  }
+  const as = await discover(config);
+  if (!as.jwks_uri) throw new Error("Discovery did not return a JWKS URI");
+
+  const jwksResponse = await fetch(as.jwks_uri, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(8_000),
+  });
+  if (!jwksResponse.ok) throw new Error("JWKS request failed");
+  const declaredLength = Number(jwksResponse.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > JWKS_MAX_LENGTH) {
+    await jwksResponse.body?.cancel();
+    throw new Error("JWKS response was too large");
+  }
+  const rawJwks = await jwksResponse.text();
+  if (rawJwks.length > JWKS_MAX_LENGTH) {
+    throw new Error("JWKS response was too large");
+  }
+  const jwks = JSON.parse(rawJwks) as JSONWebKeySet;
+  if (!Array.isArray(jwks.keys)) throw new Error("JWKS response was invalid");
+
+  const { payload, protectedHeader } = await jwtVerify(
+    token,
+    createLocalJWKSet(jwks),
+    {
+      algorithms: ["EdDSA"],
+      audience: config.clientId,
+      clockTolerance: 5,
+      issuer: config.issuer.href.replace(/\/$/, ""),
+      maxTokenAge: "5m",
+      requiredClaims: ["events", "exp", "iat", "jti", "sid"],
+    },
+  );
+  if (
+    typeof protectedHeader.kid !== "string" ||
+    protectedHeader.kid.length === 0
+  ) {
+    throw new Error("Logout token did not identify a signing key");
+  }
+  if (Object.hasOwn(payload, "nonce")) {
+    throw new Error("Logout token must not contain nonce");
+  }
+  if (
+    typeof payload.iat !== "number" ||
+    typeof payload.exp !== "number" ||
+    payload.exp <= payload.iat ||
+    payload.exp - payload.iat > 5 * 60
+  ) {
+    throw new Error("Logout token lifetime was invalid");
+  }
+  if (
+    !payload.events ||
+    typeof payload.events !== "object" ||
+    Array.isArray(payload.events) ||
+    !(BACKCHANNEL_LOGOUT_EVENT in payload.events) ||
+    typeof payload.events[BACKCHANNEL_LOGOUT_EVENT] !== "object" ||
+    payload.events[BACKCHANNEL_LOGOUT_EVENT] === null ||
+    Array.isArray(payload.events[BACKCHANNEL_LOGOUT_EVENT])
+  ) {
+    throw new Error("Logout token events claim was invalid");
+  }
+  if (typeof payload.sid !== "string" || payload.sid.length === 0) {
+    throw new Error("Logout token sid was invalid");
+  }
+  if (typeof payload.jti !== "string" || payload.jti.length === 0) {
+    throw new Error("Logout token jti was invalid");
+  }
+  if (typeof payload.iss !== "string") {
+    throw new Error("Logout token issuer was invalid");
+  }
+  return { issuer: payload.iss, jti: payload.jti, sid: payload.sid };
 }
 
 async function sha256(value: string): Promise<string> {
@@ -202,6 +294,14 @@ function page(
 
 const app = new Hono<AppEnv>();
 
+app.use(
+  "/backchannel-logout",
+  bodyLimit({
+    maxSize: LOGOUT_TOKEN_MAX_LENGTH,
+    onError: (c) => c.json({ error: "invalid_logout_token" }, 400),
+  }),
+);
+
 app.use("*", async (c, next) => {
   await next();
   c.header("Cache-Control", "no-store");
@@ -215,6 +315,74 @@ app.use("*", async (c, next) => {
 });
 
 app.get("/health", (c) => c.json({ status: "ok", service: "pg72-test-rp" }));
+
+app.post("/backchannel-logout", async (c) => {
+  const mediaType =
+    c.req.header("content-type")?.toLowerCase().split(";", 1)[0]?.trim() ?? "";
+  if (mediaType !== "application/x-www-form-urlencoded") {
+    return c.json({ error: "invalid_request" }, 415);
+  }
+  let form: FormData;
+  try {
+    form = await c.req.raw.formData();
+  } catch {
+    return c.json({ error: "invalid_request" }, 400);
+  }
+  const tokens = form.getAll("logout_token");
+  if (tokens.length !== 1 || typeof tokens[0] !== "string") {
+    return c.json({ error: "invalid_request" }, 400);
+  }
+
+  let logout: ValidatedLogoutToken;
+  try {
+    logout = await validateLogoutToken(readConfig(c.env), tokens[0]);
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "backchannel_logout_rejected",
+        error: error instanceof Error ? error.name : "UnknownError",
+      }),
+    );
+    return c.json({ error: "invalid_logout_token" }, 400);
+  }
+
+  const now = new Date().toISOString();
+  await c.env.TEST_RP_DB.batch([
+    c.env.TEST_RP_DB.prepare(
+      `DELETE FROM backchannel_logout_receipt
+        WHERE received_at < ?`,
+    ).bind(new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString()),
+    c.env.TEST_RP_DB.prepare(
+      `INSERT OR IGNORE INTO backchannel_logout_receipt
+        (jti, central_session_id, issuer, received_at)
+       VALUES (?, ?, ?, ?)`,
+    ).bind(logout.jti, logout.sid, logout.issuer, now),
+    c.env.TEST_RP_DB.prepare(
+      `DELETE FROM rp_session
+        WHERE central_session_id = ?
+          AND EXISTS (
+            SELECT 1
+              FROM backchannel_logout_receipt
+             WHERE jti = ? AND central_session_id = ? AND issuer = ?
+          )`,
+    ).bind(logout.sid, logout.jti, logout.sid, logout.issuer),
+  ]);
+  const receipt = await c.env.TEST_RP_DB.prepare(
+    `SELECT central_session_id, issuer
+       FROM backchannel_logout_receipt
+      WHERE jti = ?
+      LIMIT 1`,
+  )
+    .bind(logout.jti)
+    .first<{ central_session_id: string; issuer: string }>();
+  if (
+    receipt?.central_session_id !== logout.sid ||
+    receipt.issuer !== logout.issuer
+  ) {
+    return c.json({ error: "invalid_logout_token" }, 400);
+  }
+  return c.body(null, 204);
+});
 
 app.get("/", async (c) => {
   const config = readConfig(c.env);

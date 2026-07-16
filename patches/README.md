@@ -14,9 +14,20 @@ portion:
 - reports refresh tokens with a missing, expired, or user-mismatched session as
   inactive.
 
-No schema migration is required. The existing nullable session foreign key and
-`ON DELETE SET NULL` behavior remain intact; the runtime treats a detached row
-as invalid rather than minting a token without `sid`.
+The RP-initiated logout portion adds one opt-in hook after the provider has
+validated the ID-token signature, issuer, audience, client, and `sid`. PGID
+uses it to replace the provider's direct session delete with one D1 batch that
+snapshots the visited-RP outbox, revokes session-bound tokens, writes audit, and
+deletes the central session. This hook is necessary because the upstream path
+otherwise deletes the session first (cascading the visit ledger) and swallows
+delete errors; a Worker response wrapper cannot reconstruct the lost visits or
+make those source writes atomic. When the hook is absent, upstream behavior is
+unchanged.
+
+The central-session patch itself requires no Better Auth schema change. PGID's
+separate `0018_global_logout.sql` application migration adds the visit ledger
+and durable outbox; the existing token/session foreign-key behavior remains
+intact.
 
 The introspection portion retains these deliberately narrow changes:
 
@@ -63,7 +74,17 @@ supplies all of the following behavior without local modification:
   internal errors;
 - an incorrect `token_type_hint` falls back to the other supported token type,
   inactive provider errors are recognized by status, and pairwise `sub` uses
-  the token-owning client.
+  the token-owning client;
+- RP-initiated logout exposes a post-validation, awaited revocation hook (or an
+  equivalent transaction contract) whose failures are not swallowed.
+
+The lockfile records patch content hash
+`98ee2635aa622b1dd846c50a6cc414e81b3fa976aeb6499e9dc9581b4faae5bb`.
+`apps/sso/test/sid.spec.ts` is the exact end-session hook regression: a valid signed
+hint commits token revoke plus durable outbox before session deletion, while a
+tampered hint creates neither. `apps/sso/test/global-logout.spec.ts` covers rollback on
+outbox failure. Any upstream drift or patch-content drift must fail the frozen
+install rather than silently bypass these tests.
 
 After removing the patch registration and lockfile entry, a clean frozen
 install must succeed and both repository gates must pass:

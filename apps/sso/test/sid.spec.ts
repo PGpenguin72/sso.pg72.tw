@@ -327,6 +327,17 @@ describe("central sid contract", () => {
       sub: user.userId,
     });
     expect(disabledClaims.sid).toBe(enabledClaims.sid);
+    const visits = await env.PG72_ID_DB.prepare(
+      `SELECT client_id
+         FROM rp_session_client
+        WHERE session_id = ?
+        ORDER BY client_id`,
+    )
+      .bind(user.sessionId)
+      .all<{ client_id: string }>();
+    expect(visits.results.map((row) => row.client_id)).toEqual(
+      [disabled.client.clientId, enabled.client.clientId].sort(),
+    );
 
     // This endpoint verifies the signature, issuer, and client audience before
     // it trusts the signed sid and performs the session deletion.
@@ -379,6 +390,11 @@ describe("central sid contract", () => {
       sid: issued.sessionId,
     });
 
+    const outboxBefore = await env.PG72_ID_DB.prepare(
+      "SELECT COUNT(*) AS count FROM logout_delivery WHERE session_id = ?",
+    )
+      .bind(issued.sessionId)
+      .first<{ count: number }>();
     routeJwksFetchThroughWorker();
     const query = new URLSearchParams({
       client_id: issued.client.clientId,
@@ -397,6 +413,12 @@ describe("central sid contract", () => {
       .bind(issued.sessionId)
       .first<{ id: string }>();
     expect(session?.id).toBe(issued.sessionId);
+    const outboxAfter = await env.PG72_ID_DB.prepare(
+      "SELECT COUNT(*) AS count FROM logout_delivery WHERE session_id = ?",
+    )
+      .bind(issued.sessionId)
+      .first<{ count: number }>();
+    expect(outboxAfter?.count).toBe(outboxBefore?.count);
   });
 
   it("deletes the central session through enabled end-session and blocks refresh", async () => {
@@ -427,13 +449,43 @@ describe("central sid contract", () => {
       .first<{ id: string }>();
     expect(session).toBeNull();
     const detached = await env.PG72_ID_DB.prepare(
-      "SELECT sessionId FROM oauthRefreshToken WHERE clientId = ?",
+      "SELECT sessionId, revoked FROM oauthRefreshToken WHERE clientId = ?",
     )
       .bind(issued.client.clientId)
-      .first<{ sessionId: string | null }>();
+      .first<{ revoked: string | null; sessionId: string | null }>();
     expect(detached?.sessionId).toBeNull();
+    expect(detached?.revoked).not.toBeNull();
+    const outbox = await env.PG72_ID_DB.prepare(
+      `SELECT client_id, last_error_code, reason, status
+         FROM logout_delivery
+        WHERE session_id = ? AND client_id = ?
+        LIMIT 1`,
+    )
+      .bind(issued.sessionId, issued.client.clientId)
+      .first<{
+        client_id: string;
+        last_error_code: string | null;
+        reason: string;
+        status: string;
+      }>();
+    expect(outbox).toEqual({
+      client_id: issued.client.clientId,
+      last_error_code: "missing_backchannel_uri",
+      reason: "rp_initiated_logout",
+      status: "dead",
+    });
 
-    await expectRefreshRejectedWithoutWrites(issued);
+    const rejected = await rotateRefreshToken(issued);
+    expect(rejected.response.status).toBe(400);
+    expect(rejected.payload).toMatchObject({ error: "invalid_grant" });
+    expect(rejected.payload).not.toHaveProperty("access_token");
+    // Global logout marks the refresh row revoked in the source transaction.
+    // Presenting that revoked token then triggers the provider's existing
+    // refresh-family teardown, so no stale family row remains.
+    expect(await tokenCounts(issued.client.clientId)).toEqual({
+      access_tokens: 0,
+      refresh_tokens: 0,
+    });
     expect(await introspectRefreshToken(issued)).toEqual({ active: false });
   });
 
@@ -578,8 +630,12 @@ describe("central sid contract", () => {
     );
     expect(response.status).toBe(200);
     const metadata = (await response.json()) as {
+      backchannel_logout_session_supported?: boolean;
+      backchannel_logout_supported?: boolean;
       claims_supported?: string[];
     };
+    expect(metadata.backchannel_logout_supported).toBe(true);
+    expect(metadata.backchannel_logout_session_supported).toBe(true);
     expect(metadata.claims_supported).toEqual(
       expect.arrayContaining([
         "sub",

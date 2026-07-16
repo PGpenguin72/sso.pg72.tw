@@ -13,6 +13,7 @@ import {
   type SecurityEvent,
 } from "./audit";
 import {
+  BACKCHANNEL_LOGOUT_URI_METADATA_KEY,
   DEVELOPER_NAME_METADATA_KEY,
   developerNameFromMetadata,
   parseClientMetadataRecord,
@@ -43,6 +44,7 @@ const CLIENT_SECRET_BYTES = 32;
 const INTROSPECTION_ONLY_GRANT = "urn:pg72:grant-type:introspection-only";
 
 interface CreateClientInput {
+  backchannelLogoutUri?: unknown;
   clientId?: unknown;
   name?: unknown;
   developerName?: unknown;
@@ -64,12 +66,14 @@ interface ClientStatusInput {
 }
 
 interface ClientTrustInput {
+  backchannelLogoutUri?: unknown;
   developerName?: unknown;
   privacyPolicyUrl?: unknown;
   termsOfServiceUrl?: unknown;
 }
 
 interface AdminClientRow {
+  backchannelLogoutUri: string | null;
   clientId: string;
   name: string | null;
   uri: string | null;
@@ -91,6 +95,7 @@ interface AdminClientRow {
 }
 
 interface ManagedClientRow {
+  backchannelLogoutUri: string | null;
   id: string;
   ownerUserId: string | null;
   public: number | null;
@@ -192,6 +197,17 @@ export function validRedirectUri(
   );
 }
 
+function validBackchannelLogoutUri(
+  value: unknown,
+  environment: RuntimeConfig["environment"],
+): value is string {
+  if (!validRedirectUri(value, environment) || value.includes("@")) {
+    return false;
+  }
+  const url = new URL(value);
+  return url.protocol === "https:" || url.port.length > 0;
+}
+
 function validStringArray(
   value: unknown,
   maxCount: number,
@@ -240,6 +256,7 @@ function clientView(row: AdminClientRow) {
     ),
     privacyPolicyUrl: row.policy,
     termsOfServiceUrl: row.tos,
+    backchannelLogoutUri: row.backchannelLogoutUri,
     uri: row.uri,
     disabled: row.disabled === 1,
     public: row.public === 1,
@@ -309,7 +326,8 @@ async function loadManagedClient(
   clientId: string,
 ): Promise<ManagedClientRow | null> {
   const row = await c.env.PG72_ID_DB.prepare(
-    `SELECT id, ownerUserId, public, clientSecret, tos, policy, metadata
+    `SELECT id, ownerUserId, public, clientSecret, tos, policy, metadata,
+            backchannelLogoutUri
        FROM oauthClient
       WHERE clientId = ?
       LIMIT 1`,
@@ -369,7 +387,7 @@ adminClientRoutes.get("/", async (c) => {
   const result = await c.env.PG72_ID_DB.prepare(
     `SELECT clientId, name, uri, disabled, public, scopes, redirectUris,
             postLogoutRedirectUris, grantTypes, tokenEndpointAuthMethod,
-            tos, policy, metadata,
+            tos, policy, metadata, backchannelLogoutUri,
             CASE WHEN clientSecret IS NOT NULL
                   AND length(trim(clientSecret)) > 0
                  THEN 1 ELSE 0 END AS hasSecret,
@@ -465,6 +483,7 @@ adminClientRoutes.post("/provision-mail-introspector", async (c) => {
   return c.json(
     {
       client: {
+        backchannelLogoutUri: null,
         clientId: MAIL_INTROSPECTION_CLIENT_ID,
         name: "PGID Mail Token Introspection",
         disabled: false,
@@ -636,6 +655,23 @@ adminClientRoutes.post("/", async (c) => {
     return c.json({ error: "invalid_request" }, 400);
   }
 
+  let backchannelLogoutUri: string | null = null;
+  if (
+    input.backchannelLogoutUri !== undefined &&
+    input.backchannelLogoutUri !== null &&
+    input.backchannelLogoutUri !== ""
+  ) {
+    if (
+      !validBackchannelLogoutUri(
+        input.backchannelLogoutUri,
+        config.environment,
+      )
+    ) {
+      return c.json({ error: "invalid_backchannel_logout_uri" }, 400);
+    }
+    backchannelLogoutUri = input.backchannelLogoutUri;
+  }
+
   const existing = await c.env.PG72_ID_DB.prepare(
     "SELECT clientId FROM oauthClient WHERE clientId = ? LIMIT 1",
   )
@@ -659,6 +695,12 @@ adminClientRoutes.post("/", async (c) => {
     clientId,
     gate.actor.userId,
   );
+  const metadata = {
+    [DEVELOPER_NAME_METADATA_KEY]: developerName,
+    ...(backchannelLogoutUri
+      ? { [BACKCHANNEL_LOGOUT_URI_METADATA_KEY]: backchannelLogoutUri }
+      : {}),
+  };
 
   try {
     const results = await c.env.PG72_ID_DB.batch([
@@ -668,8 +710,8 @@ adminClientRoutes.post("/", async (c) => {
           subjectType, scopes, createdAt, updatedAt, name, uri, redirectUris,
           postLogoutRedirectUris, tokenEndpointAuthMethod, grantTypes,
           responseTypes, public, type, requirePKCE, ownerUserId, tos, policy,
-          metadata
-        ) SELECT ?, ?, ?, 0, 0, ?, 'public', ?, ?, ?, ?, ?, ?, ?, ?, ?, '["code"]', ?, ?, 1, ?, ?, ?, ?
+          metadata, backchannelLogoutUri
+        ) SELECT ?, ?, ?, 0, 0, ?, 'public', ?, ?, ?, ?, ?, ?, ?, ?, ?, '["code"]', ?, ?, 1, ?, ?, ?, ?, ?
             WHERE ${ADMIN_ACTOR_COMMIT_PREDICATE}`,
       ).bind(
           clientRowId,
@@ -692,7 +734,8 @@ adminClientRoutes.post("/", async (c) => {
           ownerUserId,
           termsOfService.url,
           privacyPolicy.url,
-          JSON.stringify({ [DEVELOPER_NAME_METADATA_KEY]: developerName }),
+          JSON.stringify(metadata),
+          backchannelLogoutUri,
           ...adminActorCommitBindings(gate.actor.commitGuard),
         ),
       auditInsertForExistingClientStatement(c.env, auditEvent, {
@@ -728,6 +771,7 @@ adminClientRoutes.post("/", async (c) => {
         developerName,
         privacyPolicyUrl: privacyPolicy.url,
         termsOfServiceUrl: termsOfService.url,
+        backchannelLogoutUri,
         uri,
         disabled: false,
         public: isPublic,
@@ -778,9 +822,10 @@ adminClientRoutes.patch("/:clientId", async (c) => {
     return c.json({ error: "invalid_request" }, 400);
   }
 
-  // Preserve unrelated metadata keys (e.g. the diary client stores its
-  // backchannel_logout_uri here); only developer_name is managed by this
-  // endpoint.
+  const config = readRuntimeConfig(c.env);
+
+  // Preserve unrelated provider metadata while keeping the interoperable JSON
+  // key in sync with the validated dedicated delivery column.
   const metadata = parseClientMetadataRecord(managedClient.metadata);
   let developerName = developerNameFromMetadata(metadata);
   if (input.developerName !== undefined) {
@@ -795,6 +840,24 @@ adminClientRoutes.patch("/:clientId", async (c) => {
     return c.json({ error: "invalid_developer_name" }, 400);
   }
   metadata[DEVELOPER_NAME_METADATA_KEY] = developerName;
+
+  let backchannelLogoutUri = managedClient.backchannelLogoutUri;
+  if (input.backchannelLogoutUri !== undefined) {
+    if (
+      input.backchannelLogoutUri === null ||
+      input.backchannelLogoutUri === ""
+    ) {
+      backchannelLogoutUri = null;
+      delete metadata[BACKCHANNEL_LOGOUT_URI_METADATA_KEY];
+    } else if (
+      validBackchannelLogoutUri(input.backchannelLogoutUri, config.environment)
+    ) {
+      backchannelLogoutUri = input.backchannelLogoutUri;
+      metadata[BACKCHANNEL_LOGOUT_URI_METADATA_KEY] = backchannelLogoutUri;
+    } else {
+      return c.json({ error: "invalid_backchannel_logout_uri" }, 400);
+    }
+  }
 
   let termsOfServiceUrl = trustUrlOrNull(managedClient.tos);
   if (input.termsOfServiceUrl !== undefined) {
@@ -817,13 +880,15 @@ adminClientRoutes.patch("/:clientId", async (c) => {
   const now = new Date().toISOString();
   const update = c.env.PG72_ID_DB.prepare(
     `UPDATE oauthClient
-        SET metadata = ?, tos = ?, policy = ?, updatedAt = ?
+        SET metadata = ?, tos = ?, policy = ?, backchannelLogoutUri = ?,
+            updatedAt = ?
       WHERE ${MANAGED_CLIENT_PREDICATE}`,
   )
     .bind(
       JSON.stringify(metadata),
       termsOfServiceUrl,
       privacyPolicyUrl,
+      backchannelLogoutUri,
       now,
       ...managedClientGuardBindings(guard),
     );
@@ -849,6 +914,7 @@ adminClientRoutes.patch("/:clientId", async (c) => {
     developerName,
     privacyPolicyUrl,
     termsOfServiceUrl,
+    backchannelLogoutUri,
     updatedAt: now,
   });
 });

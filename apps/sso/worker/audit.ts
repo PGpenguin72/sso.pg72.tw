@@ -23,6 +23,21 @@ export interface SecurityEvent {
   metadata?: AuditMetadata;
 }
 
+export function isSecurityEvent(value: unknown): value is SecurityEvent {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<SecurityEvent>;
+  return (
+    typeof candidate.eventId === "string" &&
+    candidate.eventId.length > 0 &&
+    typeof candidate.eventType === "string" &&
+    candidate.eventType.length > 0 &&
+    typeof candidate.occurredAt === "string" &&
+    (candidate.outcome === "success" ||
+      candidate.outcome === "denied" ||
+      candidate.outcome === "failure")
+  );
+}
+
 export interface WaitUntilContext {
   waitUntil(promise: Promise<unknown>): void;
 }
@@ -294,24 +309,31 @@ export async function consumeSecurityEvents(
   env: Env,
 ): Promise<void> {
   for (const message of batch.messages) {
-    try {
-      await env.PG72_ID_DB.prepare(
-        `INSERT OR IGNORE INTO security_event_delivery
-          (event_id, delivered_at)
-         VALUES (?, ?)`,
-      )
-        .bind(message.body.eventId, new Date().toISOString())
-        .run();
-      message.ack();
-    } catch (error) {
-      console.error(
-        JSON.stringify({
-          event: "security_event_delivery_failed",
-          eventId: message.body.eventId,
-          error: error instanceof Error ? error.name : "UnknownError",
-        }),
-      );
-      message.retry();
-    }
+    await consumeSecurityEventMessage(message, env);
+  }
+}
+
+export async function consumeSecurityEventMessage(
+  message: Message<SecurityEvent>,
+  env: Env,
+): Promise<void> {
+  try {
+    await env.PG72_ID_DB.prepare(
+      `INSERT OR IGNORE INTO security_event_delivery
+        (event_id, delivered_at)
+       VALUES (?, ?)`,
+    )
+      .bind(message.body.eventId, new Date().toISOString())
+      .run();
+    message.ack();
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "security_event_delivery_failed",
+        eventId: message.body.eventId,
+        error: error instanceof Error ? error.name : "UnknownError",
+      }),
+    );
+    message.retry();
   }
 }

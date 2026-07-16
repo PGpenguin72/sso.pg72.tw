@@ -3,15 +3,15 @@
  * screen: developer identity, terms-of-service and privacy-policy links, and
  * the registered redirect hosts.
  *
- * The `oauthClient` table already provides the `tos` and `policy` columns and
- * a free-form `metadata` JSON column (used by e.g. the diary client for
- * `backchannel_logout_uri`), so no schema change is required. The developer
- * name lives in `metadata.developer_name`; helpers here must always preserve
- * unrelated metadata keys.
+ * The `oauthClient` table provides `tos`, `policy`, and the dedicated validated
+ * `backchannelLogoutUri` delivery endpoint. The free-form `metadata` JSON is
+ * retained for provider interoperability. The developer name lives in
+ * `metadata.developer_name`; helpers here must preserve unrelated keys.
  */
 
 export const DEVELOPER_NAME_MAX_LENGTH = 64;
 export const DEVELOPER_NAME_METADATA_KEY = "developer_name";
+export const BACKCHANNEL_LOGOUT_URI_METADATA_KEY = "backchannel_logout_uri";
 const TRUST_URL_MAX_LENGTH = 512;
 
 // eslint-disable-next-line no-control-regex

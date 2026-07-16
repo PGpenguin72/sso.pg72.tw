@@ -7,6 +7,9 @@
   "routes": [
     { "pattern": "sso.pg72.tw", "custom_domain": true }
   ],
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
@@ -54,7 +57,8 @@
   ],
   "queues": {
     "producers": [
-      { "binding": "SECURITY_EVENTS", "queue": "pg72-id-security-events" }
+      { "binding": "SECURITY_EVENTS", "queue": "pg72-id-security-events" },
+      { "binding": "LOGOUT_DELIVERIES", "queue": "pg72-id-logout-deliveries" }
     ],
     "consumers": [
       {
@@ -63,6 +67,13 @@
         "max_batch_timeout": 5,
         "max_retries": 5,
         "dead_letter_queue": "pg72-id-security-events-dlq"
+      },
+      {
+        "queue": "pg72-id-logout-deliveries",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "pg72-id-logout-deliveries-dlq"
       }
     ]
   },

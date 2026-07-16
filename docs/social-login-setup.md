@@ -1,4 +1,4 @@
-# 社群登入申請與設定教學(A4)
+# 社群登入申請與設定教學
 
 PGID 已支援 Discord / GitHub / Facebook / Apple / Telegram 登入,但**目前都沒設定 secret,所以登入頁不會顯示這些按鈕**(自動隱藏,不影響 Google/Passkey)。Secret 值只能由授權 operator 直接寫入 Cloudflare secret store,不得貼到聊天或寫入檔案。Telegram 只可登入已從 authenticated PGID session 明確連結的既有帳號,不能在 invite 或 public mode 直接建立帳號。
 

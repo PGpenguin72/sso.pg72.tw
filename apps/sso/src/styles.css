@@ -37,7 +37,7 @@
     ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
   font-family: var(--font-sans);
 
-  /* --- morden_dark canonical tokens (deep space + indigo accent) --- */
+  /* --- PGID dark-theme tokens (deep space + indigo accent) --- */
   --background-deep: #020203;
   --background-base: #050506;
   --background-elevated: #0a0a0c;
@@ -1646,7 +1646,7 @@ svg {
 }
 
 /*
- * Unified form-control surface (morden_dark inputs). Declared after the
+ * Unified dark-theme form-control surface. Declared after the
  * per-component input rules so it overrides their legacy surface/6px radius
  * without touching layout. Focus is handled by the global :focus-visible ring
  * plus an accent border below for pointer focus.

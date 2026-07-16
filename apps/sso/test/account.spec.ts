@@ -48,14 +48,14 @@ async function latestAuditEvent(
 describe("display name validation", () => {
   it("strips control and format characters and trims whitespace", () => {
     expect(
-      normalizeDisplayName("  Ada\0‮ Lovelace​  "),
+      normalizeDisplayName("  Ada\0\u202e Lovelace\u200b  "),
     ).toBe("Ada Lovelace");
   });
 
   it("rejects names that are empty after normalization", () => {
     expect(normalizeDisplayName("")).toBeNull();
     expect(normalizeDisplayName("   ")).toBeNull();
-    expect(normalizeDisplayName("\0​‮")).toBeNull();
+    expect(normalizeDisplayName("\0\u200b\u202e")).toBeNull();
   });
 
   it("enforces the length boundary after normalization", () => {
@@ -82,7 +82,7 @@ describe("profile updates", () => {
       new Request(`${BASE_URL}/api/account/profile`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ name: "  Ada\0 Lovelace​  " }),
+        body: JSON.stringify({ name: "  Ada\0 Lovelace\u200b  " }),
       }),
     );
 
@@ -105,7 +105,7 @@ describe("profile updates", () => {
       `${crypto.randomUUID()}@example.com`,
     );
 
-    for (const name of ["", "   ", "\0​", "a".repeat(65)]) {
+    for (const name of ["", "   ", "\0\u200b", "a".repeat(65)]) {
       const response = await exports.default.fetch(
         new Request(`${BASE_URL}/api/account/profile`, {
           method: "POST",

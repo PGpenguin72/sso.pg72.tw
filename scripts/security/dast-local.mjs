@@ -6,7 +6,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { authorizeDastTarget, scanLocalRp, scanPgid } from "./dast.mjs";
+import { authorizeDastTarget, fetchOnce, scanLocalRp, scanPgid } from "./dast.mjs";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const ssoOrigin = "http://127.0.0.1:5173";
@@ -76,7 +76,7 @@ async function waitForHealth(origin, processState) {
       );
     }
     try {
-      const response = await fetch(new URL("/health", origin), {
+      const response = await fetchOnce(origin, "/health", {
         signal: AbortSignal.timeout(1_000),
       });
       if (response.ok) return;

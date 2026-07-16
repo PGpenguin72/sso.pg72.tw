@@ -9,6 +9,7 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_BODY_BYTES = 128 * 1024;
 
 function exactOrigin(value, name) {
+  assert.equal(typeof value, "string", `${name} must be a string`);
   const url = new URL(value);
   assert.equal(url.origin, value, `${name} must be an exact origin without a path`);
   assert.equal(url.username, "", `${name} must not include credentials`);
@@ -16,37 +17,104 @@ function exactOrigin(value, name) {
   return url;
 }
 
-export function authorizeDastTarget(rawTarget, environment = process.env) {
-  const target = exactOrigin(rawTarget || policy.local.defaultOrigin, "DAST target");
-  assert.ok(!policy.forbiddenOrigins.includes(target.origin), "production PGID is never a DAST target");
+export function authorizePreviewRun(environment = process.env, activePolicy = policy) {
+  assert.ok(
+    activePolicy.preview.approvedActors.includes(environment.GITHUB_ACTOR),
+    "Preview DAST actor is not approved by repository policy",
+  );
+  assert.ok(
+    activePolicy.preview.approvedActors.includes(environment.GITHUB_TRIGGERING_ACTOR),
+    "Preview DAST triggering actor is not approved by repository policy",
+  );
+  assert.equal(
+    environment.GITHUB_REF,
+    activePolicy.preview.defaultRef,
+    "Preview DAST must run from the repository default branch",
+  );
+}
 
-  if (policy.local.allowedHostnames.includes(target.hostname)) {
-    assert.equal(target.protocol, "http:", "local DAST must use loopback HTTP");
-    return { mode: "local", origin: target.origin };
+export function authorizeDastTarget(
+  rawTarget,
+  environment = process.env,
+  activePolicy = policy,
+) {
+  const value = rawTarget || activePolicy.local.defaultOrigin;
+  const target = exactOrigin(value, "DAST target");
+  assert.ok(
+    !activePolicy.forbiddenOrigins.includes(target.origin),
+    "production PGID is never a DAST target",
+  );
+
+  if (target.protocol === "http:") {
+    const ports = activePolicy.local.allowedPorts.join("|");
+    assert.match(
+      value,
+      new RegExp(`^http://127\\.0\\.0\\.1:(?:${ports})$`),
+      "local DAST requires a canonical literal 127.0.0.1 origin and approved port",
+    );
+    return { mode: "local", origin: value };
   }
 
   assert.equal(target.protocol, "https:", "Preview DAST requires HTTPS");
   assert.equal(target.port, "", "Preview DAST must use the default HTTPS port");
-  assert.match(target.hostname, new RegExp(policy.preview.hostnamePattern), "target is not the isolated Preview Worker");
+  assert.match(
+    target.hostname,
+    new RegExp(activePolicy.preview.hostnamePattern),
+    "target is not the exact isolated Preview Worker project",
+  );
+  assert.ok(
+    target.hostname.startsWith(`${activePolicy.preview.projectPrefix}.`),
+    "target does not use the repository-controlled Preview project prefix",
+  );
+  assert.ok(
+    typeof activePolicy.preview.approvedOrigin === "string",
+    "repository policy has no approved Preview origin; owner update required",
+  );
+  const approved = exactOrigin(activePolicy.preview.approvedOrigin, "approved Preview origin");
+  assert.equal(target.origin, approved.origin, "target is not the exact repository-approved Preview origin");
   assert.equal(
     environment.DAST_ALLOWED_PREVIEW_ORIGIN,
-    target.origin,
+    approved.origin,
     "target is not the protected environment allowlist value",
   );
   assert.equal(
     environment.DAST_PREVIEW_OPT_IN,
-    policy.preview.optInValue,
+    activePolicy.preview.optInValue,
     "owner Preview opt-in is missing",
   );
+  authorizePreviewRun(environment, activePolicy);
   return { mode: "preview", origin: target.origin };
 }
 
 async function readBody(response) {
   const length = Number(response.headers.get("content-length"));
   if (Number.isFinite(length)) assert.ok(length <= MAX_BODY_BYTES, "DAST response is unexpectedly large");
-  const body = await response.text();
-  assert.ok(Buffer.byteLength(body) <= MAX_BODY_BYTES, "DAST response exceeded the body limit");
-  return body;
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_BODY_BYTES) {
+      await reader.cancel();
+      assert.fail("DAST response exceeded the body limit");
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks, total).toString("utf8");
+}
+
+export async function fetchOnce(origin, pathname, init = {}, fetchImplementation = fetch) {
+  const base = exactOrigin(origin, "DAST request origin");
+  const target = new URL(pathname, base);
+  assert.equal(target.origin, base.origin, "DAST request escaped its authorized origin");
+  const headers = new Headers(init.headers);
+  for (const forbidden of ["host", "forwarded", "x-forwarded-host"]) {
+    assert.ok(!headers.has(forbidden), `DAST request must not override ${forbidden}`);
+  }
+  return fetchImplementation(target, { ...init, headers, redirect: "manual" });
 }
 
 function securityHeaders(response) {
@@ -59,14 +127,13 @@ function securityHeaders(response) {
   assert.match(response.headers.get("permissions-policy") ?? "", /publickey-credentials-get=\(self\)/);
 }
 
-async function probe(origin, definition) {
-  const response = await fetch(new URL(definition.path, origin), {
+async function probe(origin, definition, fetchImplementation) {
+  const response = await fetchOnce(origin, definition.path, {
     method: definition.method ?? "GET",
     headers: definition.headers,
     body: definition.body,
-    redirect: "manual",
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
+  }, fetchImplementation);
   const body = await readBody(response);
   securityHeaders(response);
   assert.ok(definition.statuses.includes(response.status), `${definition.name} returned ${response.status}: ${body}`);
@@ -87,7 +154,7 @@ function parseJson(body, name) {
   }
 }
 
-export async function scanPgid(origin) {
+export async function scanPgid(origin, fetchImplementation = fetch) {
   const probes = [
     {
       name: "health",
@@ -240,22 +307,22 @@ export async function scanPgid(origin) {
   ];
 
   const results = [];
-  for (const definition of probes) results.push(await probe(origin, definition));
+  for (const definition of probes) {
+    results.push(await probe(origin, definition, fetchImplementation));
+  }
   return results;
 }
 
-export async function scanLocalRp(origin) {
-  const health = await fetch(new URL("/health", origin), {
-    redirect: "manual",
+export async function scanLocalRp(origin, fetchImplementation = fetch) {
+  const health = await fetchOnce(origin, "/health", {
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
+  }, fetchImplementation);
   assert.equal(health.status, 200);
   assert.equal(parseJson(await readBody(health), "test RP health").service, "pg72-test-rp");
 
-  const callback = await fetch(new URL("/callback", origin), {
-    redirect: "manual",
+  const callback = await fetchOnce(origin, "/callback", {
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
+  }, fetchImplementation);
   assert.equal(callback.status, 400);
   const body = await readBody(callback);
   assert.match(body, /Missing OIDC transaction cookie/);
@@ -273,6 +340,10 @@ function argument(name) {
 async function main() {
   const authorized = authorizeDastTarget(argument("--target") ?? process.env.DAST_TARGET);
   if (process.argv.includes("--preview")) assert.equal(authorized.mode, "preview", "Preview mode requires an allowlisted Preview target");
+  if (process.argv.includes("--authorize-only")) {
+    console.log(`Repository ${authorized.mode} DAST authorization passed; no request sent.`);
+    return;
+  }
   const results = await scanPgid(authorized.origin);
   console.log(`Safe ${authorized.mode} DAST passed (${results.length} PGID probes, no credentials).`);
 }

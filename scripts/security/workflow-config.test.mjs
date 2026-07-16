@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import YAML from "yaml";
 
-import { validateWorkflowDocument } from "./workflow-config.mjs";
+import {
+  dangerousCommandErrors,
+  expectedPreviewJobCondition,
+  loadWorkflowCommandContext,
+  validateWorkflowCommands,
+  validateWorkflowDocument,
+} from "./workflow-config.mjs";
 
 const tools = {
   actions: {
@@ -45,8 +53,98 @@ test("rejects remote or live Wrangler commands", () => {
   const value = workflow();
   value.jobs.verify.steps.push({ run: "pnpm wrangler deploy --remote" });
   const errors = validateWorkflowDocument(value, "ci.yml", tools);
-  assert.ok(errors.some((error) => error.includes("remote Wrangler")));
+  assert.ok(errors.some((error) => error.includes("remote/Preview Wrangler")));
   assert.ok(errors.some((error) => error.includes("non-dry-run")));
+});
+
+test("rejects local actions and reusable workflows instead of trusting hidden commands", () => {
+  const local = workflow();
+  local.jobs.verify.steps.push({ uses: "./.github/actions/unreviewed" });
+  assert.ok(
+    validateWorkflowDocument(local, "ci.yml", tools).some((error) =>
+      error.includes("local actions are forbidden"),
+    ),
+  );
+
+  const reusable = workflow();
+  reusable.jobs.verify = {
+    uses: "./.github/workflows/reusable.yml",
+    "timeout-minutes": 10,
+  };
+  assert.ok(
+    validateWorkflowDocument(reusable, "ci.yml", tools).some((error) =>
+      error.includes("reusable workflows are forbidden"),
+    ),
+  );
+});
+
+test("accepts only the exact recursively reachable package-script graph", () => {
+  const context = loadWorkflowCommandContext();
+  for (const filename of ["ci.yml", "dast-preview.yml"]) {
+    const document = YAML.parse(
+      readFileSync(new URL(`../../.github/workflows/${filename}`, import.meta.url), "utf8"),
+    );
+    assert.deepEqual(validateWorkflowCommands(document, filename, context), []);
+  }
+});
+
+test("enforces exact Preview actor/ref condition and authorization step order", () => {
+  const document = YAML.parse(
+    readFileSync(new URL("../../.github/workflows/dast-preview.yml", import.meta.url), "utf8"),
+  );
+  assert.equal(document.jobs["safe-dast"].if, expectedPreviewJobCondition());
+  assert.deepEqual(validateWorkflowDocument(document, "dast-preview.yml"), []);
+
+  for (const mutate of [
+    (value) => (value.jobs["safe-dast"].if = "${{ github.ref == 'refs/heads/main' }}"),
+    (value) => value.jobs["safe-dast"].steps.splice(1, 1),
+  ]) {
+    const changed = structuredClone(document);
+    mutate(changed);
+    assert.ok(
+      validateWorkflowDocument(changed, "dast-preview.yml").some((error) =>
+        /actor and default-branch|authorization immediately after checkout/.test(error),
+      ),
+    );
+  }
+});
+
+test("rejects indirect deploys even when package and leaf allowlists are changed together", () => {
+  const document = YAML.parse(
+    readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8"),
+  );
+  const context = structuredClone(loadWorkflowCommandContext());
+  context.packagesByRoot["."].scripts["security:check"] = "wrangler deploy";
+  context.policy.approvedPackageScripts["."]["security:check"] = "wrangler deploy";
+  context.policy.allowedLeafCommands.push("wrangler deploy");
+  const errors = validateWorkflowCommands(document, "ci.yml", context);
+  assert.ok(errors.some((error) => error.includes("non-dry-run deployment")));
+});
+
+test("rejects unallowlisted local scripts and nonlocal network commands", () => {
+  const document = YAML.parse(
+    readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8"),
+  );
+  const context = structuredClone(loadWorkflowCommandContext());
+  context.packagesByRoot["."].scripts["security:check"] = "node scripts/unreviewed.mjs";
+  context.policy.approvedPackageScripts["."]["security:check"] = "node scripts/unreviewed.mjs";
+  context.policy.allowedLeafCommands.push("node scripts/unreviewed.mjs");
+  const errors = validateWorkflowCommands(document, "ci.yml", context);
+  assert.ok(errors.some((error) => error.includes("unapproved local script")));
+
+  for (const command of [
+    "curl https://example.invalid",
+    "wget https://example.invalid/payload",
+    "wrangler d1 execute pg72-id --remote",
+    "wrangler kv key put --namespace-id x key value",
+    "wrangler r2 object put bucket/key --file payload",
+    "wrangler queues create events",
+    "wrangler pages deploy dist",
+    "wrangler secret put TOKEN",
+    "wrangler deploy --preview",
+  ]) {
+    assert.notDeepEqual(dangerousCommandErrors(command), [], `${command} was accepted`);
+  }
 });
 
 test("requires protected manual Preview DAST without target input", () => {

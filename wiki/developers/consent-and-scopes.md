@@ -47,7 +47,7 @@ email email_verified name picture
 
 ## 用 sub，不用 email
 
-* `sub` 是不可變的使用者主鍵，跨所有服務一致——用它作帳號對應。
+* `sub` 是不可變的使用者主鍵，跨所有已接入 PGID 的服務一致——用它作帳號對應。
 * email 可被使用者更換，只適合在綁定既有 legacy 帳號時**一次性**使用，且務必檢查 `email_verified === true`。
 * Mail Path A 沒有新增通用 `mail` scope；它只在固定的 mail introspection client 配對中，將 verified `email` 映射到既有 Dovecot mailbox username。這個例外不改變其他服務必須以 `sub` 作主鍵的規則；完整邊界見 [Mail Token Introspection](mail-introspection.md)。
 

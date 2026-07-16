@@ -4,7 +4,7 @@ description: PGID 使用者與開發者教學站，wiki.sso.pg72.tw 的內容源
 
 # 認識 PGID
 
-歡迎使用 **PGID**——PG72 自己掌控的單一登入（SSO）身分系統。用一個帳號登入所有 PG72 服務，日常以 Google 與 Passkey（無密碼）登入，並在一個地方管理你的裝置、授權與安全紀錄。
+歡迎使用 **PGID**——PG72 自己掌控的單一登入（SSO）身分系統。用一個帳號登入已接入 PGID 的服務，日常以 Google 與 Passkey（無密碼）登入，並在一個地方管理你的裝置、授權與安全紀錄。
 
 > Issuer：`https://sso.pg72.tw`
 > 這是**教學站**。若你要找端點與參數的精簡技術參考，請看 [PGID 串接 API 手冊](../docs/api/PGID-integration.md)。
@@ -33,7 +33,7 @@ description: PGID 使用者與開發者教學站，wiki.sso.pg72.tw 的內容源
 
 ## PGID 的核心理念
 
-* **統一身分**：所有服務用同一個不可變帳號 ID（`sub`）認得你。
+* **統一身分**：參與 PGID 的服務用同一個不可變帳號 ID（`sub`）認得你。
 * **無密碼優先**：日常登入用 Google 與 Passkey，沒有密碼可被外洩。
 * **你掌控**：隨時查看與撤銷任一裝置的登入、撤銷已授權的應用程式。
 * **隱私**：Email 不是主鍵、最小授權、由 PG72 自行營運。

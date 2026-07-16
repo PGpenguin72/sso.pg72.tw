@@ -432,7 +432,7 @@ adminClientRoutes.post("/", async (c) => {
   if (input.public !== undefined && typeof input.public !== "boolean") {
     return c.json({ error: "invalid_request" }, 400);
   }
-  const tokenEndpointAuthMethod = isPublic ? "none" : "client_secret_basic";
+  const tokenEndpointAuthMethod = isPublic ? "none" : "client_secret_post";
   if (
     input.tokenEndpointAuthMethod !== undefined &&
     input.tokenEndpointAuthMethod !== tokenEndpointAuthMethod

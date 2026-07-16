@@ -4209,7 +4209,10 @@ export function App() {
                                 <span>
                                   {client.public
                                     ? "Public · PKCE"
-                                    : "Confidential · client_secret_basic"}
+                                    : `Confidential · ${
+                                        client.tokenEndpointAuthMethod ??
+                                        "client_secret_post"
+                                      }`}
                                   {client.grantTypes.includes("refresh_token")
                                     ? " · refresh_token"
                                     : ""}

@@ -11,6 +11,8 @@ import {
 } from "./helpers";
 
 const COPY_REFRESH_MIGRATION = "0005_copy_refresh_grant.sql";
+const CLIENT_SECRET_POST_MIGRATION =
+  "0013_confidential_client_secret_post.sql";
 
 async function applyCopyRefreshGrantMigration(): Promise<void> {
   const migration = env.TEST_MIGRATIONS.find(
@@ -18,6 +20,19 @@ async function applyCopyRefreshGrantMigration(): Promise<void> {
   );
   if (!migration) {
     throw new Error(`Missing test migration: ${COPY_REFRESH_MIGRATION}`);
+  }
+
+  await env.PG72_ID_DB.batch(
+    migration.queries.map((query) => env.PG72_ID_DB.prepare(query)),
+  );
+}
+
+async function applyClientSecretPostMigration(): Promise<void> {
+  const migration = env.TEST_MIGRATIONS.find(
+    ({ name }) => name === CLIENT_SECRET_POST_MIGRATION,
+  );
+  if (!migration) {
+    throw new Error(`Missing test migration: ${CLIENT_SECRET_POST_MIGRATION}`);
   }
 
   await env.PG72_ID_DB.batch(
@@ -144,7 +159,17 @@ describe("PGID Worker", () => {
     );
     expect(metadata.token_endpoint).toBe("http://localhost:5173/oauth2/token");
     expect(metadata.code_challenge_methods_supported).toContain("S256");
-    expect(metadata.token_endpoint_auth_methods_supported).toContain("none");
+    expect(metadata.token_endpoint_auth_methods_supported).toEqual([
+      "none",
+      "client_secret_post",
+    ]);
+    expect(metadata.introspection_endpoint_auth_methods_supported).toEqual([
+      "client_secret_post",
+    ]);
+    expect(metadata.revocation_endpoint_auth_methods_supported).toEqual([
+      "none",
+      "client_secret_post",
+    ]);
     expect(metadata.registration_endpoint).toBeUndefined();
   });
 
@@ -409,6 +434,93 @@ describe("PGID Worker", () => {
     expect(unknownClient).toBeNull();
   });
 
+  it("migrates confidential client metadata to client_secret_post", async () => {
+    const suffix = crypto.randomUUID();
+    const basicClient = `migration-basic-${suffix}`;
+    const missingMethodClient = `migration-missing-${suffix}`;
+    const postClient = `migration-post-${suffix}`;
+    const unexpectedMethodClient = `migration-unexpected-${suffix}`;
+    const publicClient = `migration-public-${suffix}`;
+    const now = new Date().toISOString();
+
+    await env.PG72_ID_DB.batch([
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO oauthClient
+          (id, clientId, clientSecret, public, tokenEndpointAuthMethod,
+           redirectUris, createdAt, updatedAt)
+         VALUES (?, ?, ?, 0, 'client_secret_basic', '[]', ?, ?)`,
+      ).bind(crypto.randomUUID(), basicClient, "hashed-basic", now, now),
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO oauthClient
+          (id, clientId, clientSecret, public, tokenEndpointAuthMethod,
+           redirectUris, createdAt, updatedAt)
+         VALUES (?, ?, ?, 0, NULL, '[]', ?, ?)`,
+      ).bind(
+        crypto.randomUUID(),
+        missingMethodClient,
+        "hashed-missing",
+        now,
+        now,
+      ),
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO oauthClient
+          (id, clientId, clientSecret, public, tokenEndpointAuthMethod,
+           redirectUris, createdAt, updatedAt)
+         VALUES (?, ?, ?, 0, 'client_secret_post', '[]', ?, ?)`,
+      ).bind(crypto.randomUUID(), postClient, "hashed-post", now, now),
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO oauthClient
+          (id, clientId, clientSecret, public, tokenEndpointAuthMethod,
+           redirectUris, createdAt, updatedAt)
+         VALUES (?, ?, ?, 0, 'none', '[]', ?, ?)`,
+      ).bind(
+        crypto.randomUUID(),
+        unexpectedMethodClient,
+        "hashed-unexpected",
+        now,
+        now,
+      ),
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO oauthClient
+          (id, clientId, clientSecret, public, tokenEndpointAuthMethod,
+           redirectUris, createdAt, updatedAt)
+         VALUES (?, ?, NULL, 1, 'none', '[]', ?, ?)`,
+      ).bind(crypto.randomUUID(), publicClient, now, now),
+    ]);
+
+    await applyClientSecretPostMigration();
+
+    const clients = await env.PG72_ID_DB.prepare(
+      `SELECT clientId, tokenEndpointAuthMethod
+         FROM oauthClient
+        WHERE clientId IN (?, ?, ?, ?, ?)
+        ORDER BY clientId`,
+    )
+      .bind(
+        basicClient,
+        missingMethodClient,
+        postClient,
+        unexpectedMethodClient,
+        publicClient,
+      )
+      .all<{ clientId: string; tokenEndpointAuthMethod: string }>();
+
+    expect(
+      Object.fromEntries(
+        clients.results.map((client) => [
+          client.clientId,
+          client.tokenEndpointAuthMethod,
+        ]),
+      ),
+    ).toEqual({
+      [basicClient]: "client_secret_post",
+      [missingMethodClient]: "client_secret_post",
+      [postClient]: "client_secret_post",
+      [unexpectedMethodClient]: "client_secret_post",
+      [publicClient]: "none",
+    });
+  });
+
   it("returns the relying-party callback after consent", async () => {
     const clientId = `consent-redirect-${crypto.randomUUID()}`;
     const callback = "https://client.example/callback";
@@ -485,7 +597,7 @@ describe("PGID Worker", () => {
     expect(redirect.searchParams.get("state")).toBe("B".repeat(43));
   });
 
-  it("exchanges a confidential authorization code using the prefixed client secret", async () => {
+  it("keeps legacy raw Basic working for a post-registered client", async () => {
     const clientId = `confidential-${crypto.randomUUID()}`;
     const clientSecretSuffix = crypto.randomUUID().replaceAll("-", "");
     const clientSecret = `pg72_cs_${clientSecretSuffix}`;
@@ -512,7 +624,7 @@ describe("PGID Worker", () => {
         '["openid","profile","email"]',
         "Confidential Exchange Test",
         JSON.stringify([callback]),
-        "client_secret_basic",
+        "client_secret_post",
         '["authorization_code"]',
         '["code"]',
         0,
@@ -562,6 +674,9 @@ describe("PGID Worker", () => {
     const code = authorizationCallback.searchParams.get("code");
     expect(code).toBeTruthy();
 
+    // The PGID contract uses client_secret_post, but the pinned provider still
+    // accepts raw legacy Basic credentials. Keeping this compatibility test on
+    // a post-registered row proves migration 0013 does not itself break an RP.
     const tokenResponse = await exports.default.fetch(
       new Request("http://localhost:5173/oauth2/token", {
         method: "POST",
@@ -583,6 +698,152 @@ describe("PGID Worker", () => {
     expect(await tokenResponse.json()).toMatchObject({
       token_type: "Bearer",
       scope: "openid profile email",
+    });
+  });
+
+  it("lets a public client revoke its token family without a secret", async () => {
+    const clientId = `public-revoke-${crypto.randomUUID()}`;
+    const callback = "https://public-revoke.example/callback";
+    const codeVerifier = "U".repeat(43);
+    const codeChallenge = await sha256Base64Url(codeVerifier);
+    const { headers } = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+    );
+
+    await env.PG72_ID_DB.prepare(
+      `INSERT INTO oauthClient (
+        id, clientId, clientSecret, disabled, skipConsent, scopes, name,
+        redirectUris, tokenEndpointAuthMethod, grantTypes, responseTypes,
+        public, requirePKCE
+      ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        crypto.randomUUID(),
+        clientId,
+        0,
+        0,
+        '["openid","profile","email","offline_access"]',
+        "Public Revocation Test",
+        JSON.stringify([callback]),
+        "none",
+        '["authorization_code","refresh_token"]',
+        '["code"]',
+        1,
+        1,
+      )
+      .run();
+
+    const query = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: callback,
+      response_type: "code",
+      scope: "openid profile email offline_access",
+      code_challenge: codeChallenge,
+      code_challenge_method: "S256",
+      state: "H".repeat(43),
+      nonce: "J".repeat(43),
+    });
+    const authorizeResponse = await exports.default.fetch(
+      new Request(`http://localhost:5173/oauth2/authorize?${query}`, {
+        headers,
+        redirect: "manual",
+      }),
+    );
+    expect(authorizeResponse.status).toBe(302);
+    const consentLocation = new URL(
+      authorizeResponse.headers.get("location") ?? "",
+      "http://localhost:5173",
+    );
+    expect(consentLocation.pathname).toBe("/consent");
+
+    const consentHeaders = new Headers(headers);
+    consentHeaders.set("Sec-Fetch-Mode", "cors");
+    const consentResponse = await exports.default.fetch(
+      new Request("http://localhost:5173/oauth2/consent", {
+        method: "POST",
+        headers: consentHeaders,
+        body: JSON.stringify({
+          accept: true,
+          oauth_query: consentLocation.search.slice(1),
+        }),
+      }),
+    );
+    expect(consentResponse.status).toBe(200);
+    const consentResult = (await consentResponse.json()) as {
+      url?: string;
+    };
+    const code = new URL(consentResult.url ?? "").searchParams.get("code");
+    expect(code).toBeTruthy();
+
+    const formHeaders = {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded",
+    };
+    const tokenResponse = await exports.default.fetch(
+      new Request("http://localhost:5173/oauth2/token", {
+        method: "POST",
+        headers: formHeaders,
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code: code ?? "",
+          redirect_uri: callback,
+          code_verifier: codeVerifier,
+          client_id: clientId,
+        }),
+      }),
+    );
+    expect(tokenResponse.status).toBe(200);
+    const tokens = (await tokenResponse.json()) as {
+      access_token?: string;
+      refresh_token?: string;
+    };
+    expect(tokens.access_token).toMatch(/^pg72_at_/);
+    expect(tokens.refresh_token).toMatch(/^pg72_rt_/);
+
+    const userInfoBeforeRevoke = await exports.default.fetch(
+      new Request("http://localhost:5173/oauth2/userinfo", {
+        headers: { Authorization: `Bearer ${tokens.access_token ?? ""}` },
+      }),
+    );
+    expect(userInfoBeforeRevoke.status).toBe(200);
+
+    const revocationResponse = await exports.default.fetch(
+      new Request("http://localhost:5173/oauth2/revoke", {
+        method: "POST",
+        headers: formHeaders,
+        body: new URLSearchParams({
+          client_id: clientId,
+          token: tokens.refresh_token ?? "",
+          token_type_hint: "refresh_token",
+        }),
+      }),
+    );
+    expect(revocationResponse.status).toBe(200);
+
+    const userInfoAfterRevoke = await exports.default.fetch(
+      new Request("http://localhost:5173/oauth2/userinfo", {
+        headers: { Authorization: `Bearer ${tokens.access_token ?? ""}` },
+      }),
+    );
+    expect(userInfoAfterRevoke.status).toBe(400);
+    expect(await userInfoAfterRevoke.json()).toMatchObject({
+      error: "invalid_request",
+    });
+
+    const refreshAfterRevoke = await exports.default.fetch(
+      new Request("http://localhost:5173/oauth2/token", {
+        method: "POST",
+        headers: formHeaders,
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: tokens.refresh_token ?? "",
+          client_id: clientId,
+        }),
+      }),
+    );
+    expect(refreshAfterRevoke.status).toBe(400);
+    expect(await refreshAfterRevoke.json()).toMatchObject({
+      error: "invalid_grant",
     });
   });
 
@@ -613,7 +874,7 @@ describe("PGID Worker", () => {
         '["openid","profile","email","offline_access"]',
         "Refresh Rotation Test",
         JSON.stringify([callback]),
-        "client_secret_basic",
+        "client_secret_post",
         '["authorization_code","refresh_token"]',
         '["code"]',
         0,
@@ -666,7 +927,6 @@ describe("PGID Worker", () => {
 
     const tokenHeaders = {
       Accept: "application/json",
-      Authorization: `Basic ${btoa(`${clientId}:${clientSecret}`)}`,
       "Content-Type": "application/x-www-form-urlencoded",
     };
     const initialResponse = await exports.default.fetch(
@@ -678,6 +938,8 @@ describe("PGID Worker", () => {
           code: code ?? "",
           redirect_uri: callback,
           code_verifier: codeVerifier,
+          client_id: clientId,
+          client_secret: clientSecret,
         }),
       }),
     );
@@ -703,6 +965,8 @@ describe("PGID Worker", () => {
           body: new URLSearchParams({
             grant_type: "refresh_token",
             refresh_token: refreshToken,
+            client_id: clientId,
+            client_secret: clientSecret,
           }),
         }),
       );

@@ -40,7 +40,7 @@ Discovery 目前回報的重點欄位（對照 `@better-auth/oauth-provider@1.6.
 | `response_modes_supported` | `["query"]` |
 | `grant_types_supported` | `["authorization_code", "client_credentials", "refresh_token"]` |
 | `code_challenge_methods_supported` | `["S256"]` |
-| `token_endpoint_auth_methods_supported` | `["none", "client_secret_basic", "client_secret_post"]` |
+| `token_endpoint_auth_methods_supported` | `["none", "client_secret_post"]` |
 | `id_token_signing_alg_values_supported` | `["EdDSA"]` |
 | `subject_types_supported` | `["public"]` |
 | `claims_supported` | `["https://pg72.tw/role"]` |
@@ -133,7 +133,7 @@ Client 建立時的實際契約（對照 `apps/sso/worker/admin-clients.ts`）�
 | `scopes` | 預設 `["openid","profile","email"]`；只能是允許集合；必含 `openid`。 |
 | `grantTypes` | 預設 `["authorization_code"]`；必含 `authorization_code`。含 `refresh_token` 時 scopes 必含 `offline_access`（否則 `refresh_token_requires_offline_access`）。 |
 | `public` | `true` = public client（無 secret，`token_endpoint_auth_method: none`）；`false` = confidential（發一次性 secret）。 |
-| `tokenEndpointAuthMethod` | 由 `public` 推導：public → `none`；confidential → `client_secret_basic`（見 5.3 的重要注意事項）。 |
+| `tokenEndpointAuthMethod` | 由 `public` 推導：public → `none`；confidential → `client_secret_post`。 |
 | `enableEndSession` | 是否啟用 `end_session_endpoint`。 |
 | `tos` / `policy` | consent 畫面顯示的服務條款 / 隱私權連結。 |
 | `developerName` | consent 畫面顯示的開發者身分。 |
@@ -153,11 +153,11 @@ Client secret 為 `pg72_cs_<suffix>` 格式，**只在建立時回傳一次**，
 
 **建議一律使用 `client_secret_post`**：把 `client_id` 與 `client_secret` 放進 token 請求的 `application/x-www-form-urlencoded` body。
 
-原因與坑：現行 `@better-auth/oauth-provider@1.6.23` 對 HTTP **Basic** authorization header 的 client credential 會執行 percent-decode，與標準 RFC 6749 client credential 編碼不相容，可能導致 secret 比對失敗或行為不一致。因此：
+原因與坑：現行 `@better-auth/oauth-provider@1.6.23` 對 HTTP **Basic** authorization header 的 client credential 不會執行 RFC 6749 要求的 form URL decode；`oauth4webapi` 等標準 client 會先編碼 `-`、`_` 等字元，因此可能導致 `invalid_client`。所以：
 
 - **要用 `client_secret_post`**（credential 在 form body）。
 - **避免 `client_secret_basic`**（`Authorization: Basic ...`）。若你的 library 預設用 Basic，請顯式切成 post。
-- Discovery 的 `token_endpoint_auth_methods_supported` 同時列出 `client_secret_basic` 與 `client_secret_post`，且 admin API 目前把 confidential client 的 `tokenEndpointAuthMethod` 欄位登記為 `client_secret_basic`（這只是登記值）；**傳輸時仍請用 post body**。整合到 Preview 時請以實際 token 交換驗證此行為。
+- PGID token endpoint discovery 只宣告 `none` 與 `client_secret_post`；introspection 只宣告 `client_secret_post`；revocation 宣告 `none` 與 `client_secret_post`，讓 public client 能以 `client_id` 撤銷自己的 token。Pinned provider runtime 仍接受 legacy raw Basic 請求，但不對外宣告；在上游 percent-decode 問題修正並通過 regression 前，不把它當成 PGID 支援契約。
 
 `oauth4webapi` 對應寫法：confidential 用 `oauth.ClientSecretPost(secret)`，public 用 `oauth.None()`（見第 8 節）。
 

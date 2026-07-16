@@ -19,6 +19,7 @@ PGID **不開放動態自助註冊**。每個 client 由 PGID 管理員或具 `d
 
 * `client_id`
 * confidential client 會拿到**一次性**的 `client_secret`（格式 `pg72_cs_...`）——只顯示一次，資料庫只存 hash。請立刻存進你後端的 secret 儲存（例如 Wrangler secrets），遺失只能重新輪替。
+* confidential client 固定登記為 `client_secret_post`；RP 必須在後端以 form body 傳送 client credentials。
 * public client 沒有 secret。
 
 ## 本機開發

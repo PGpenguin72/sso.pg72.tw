@@ -33,7 +33,7 @@ INSERT INTO oauthClient (
   'PG72 Diary',
   '["https://diary.pg72.tw/api/auth/callback"]',
   '["https://diary.pg72.tw/"]',
-  'client_secret_basic',
+  'client_secret_post',
   '["authorization_code"]',
   '["code"]',
   0,

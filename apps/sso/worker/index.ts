@@ -84,6 +84,8 @@ interface AuthRedirectPayload {
 
 interface OAuthMetadata {
   token_endpoint_auth_methods_supported?: unknown;
+  introspection_endpoint_auth_methods_supported?: unknown;
+  revocation_endpoint_auth_methods_supported?: unknown;
   [key: string]: unknown;
 }
 
@@ -195,7 +197,9 @@ async function normalizeOAuthNavigationRedirect(
   return new Response(null, { status: 302, headers });
 }
 
-async function advertiseManagedPublicClients(response: Response): Promise<Response> {
+async function advertiseManagedClientAuthMethods(
+  response: Response,
+): Promise<Response> {
   if (
     !response.ok ||
     !response.headers.get("content-type")?.toLowerCase().startsWith("application/json")
@@ -209,11 +213,20 @@ async function advertiseManagedPublicClients(response: Response): Promise<Respon
   } catch {
     return response;
   }
-  const methods = metadata.token_endpoint_auth_methods_supported;
-  if (!Array.isArray(methods) || methods.some((method) => typeof method !== "string")) {
-    return response;
-  }
-  if (!methods.includes("none")) methods.unshift("none");
+  // Better Auth 1.6.23 accepts both methods internally, but its Basic parser
+  // does not form-url-decode RFC 6749 credentials. Advertise only the PGID
+  // contract so discovery-driven clients do not select the broken path.
+  metadata.token_endpoint_auth_methods_supported = [
+    "none",
+    "client_secret_post",
+  ];
+  metadata.introspection_endpoint_auth_methods_supported = [
+    "client_secret_post",
+  ];
+  metadata.revocation_endpoint_auth_methods_supported = [
+    "none",
+    "client_secret_post",
+  ];
 
   const headers = new Headers(response.headers);
   headers.delete("Content-Length");
@@ -985,7 +998,7 @@ app.all("*", async (c) => {
       return normalizeOAuthNavigationRedirect(c.req.raw, response);
     }
     return OAUTH_METADATA_PATHS.has(pathname)
-      ? advertiseManagedPublicClients(response)
+      ? advertiseManagedClientAuthMethods(response)
       : response;
   }
 

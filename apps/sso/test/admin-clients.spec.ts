@@ -360,7 +360,7 @@ describe("Admin OAuth client management", () => {
     const inconsistentAuthMethod = await createClient(headers, {
       ...base,
       public: true,
-      tokenEndpointAuthMethod: "client_secret_basic",
+      tokenEndpointAuthMethod: "client_secret_post",
     });
     expect(inconsistentAuthMethod.status).toBe(400);
     expect(inconsistentAuthMethod.payload).toMatchObject({
@@ -384,7 +384,7 @@ describe("Admin OAuth client management", () => {
       hasSecret: true,
       trusted: false,
       developerName: "PG72 Platform Team",
-      tokenEndpointAuthMethod: "client_secret_basic",
+      tokenEndpointAuthMethod: "client_secret_post",
       scopes: ["openid", "profile", "email", "offline_access"],
       grantTypes: ["authorization_code", "refresh_token"],
     });
@@ -398,7 +398,7 @@ describe("Admin OAuth client management", () => {
       skipConsent: 0,
       requirePKCE: 1,
       public: 0,
-      tokenEndpointAuthMethod: "client_secret_basic",
+      tokenEndpointAuthMethod: "client_secret_post",
     });
     // Stored in the oauth-provider "hashed" format: unpadded base64url SHA-256
     // of the secret without its pg72_cs_ prefix.
@@ -452,6 +452,51 @@ describe("Admin OAuth client management", () => {
     const location = new URL(authorizeResponse.headers.get("location") ?? "");
     expect(location.pathname).toBe("/sign-in");
     expect(location.searchParams.get("client_id")).toBe(clientId);
+  });
+
+  it("exchanges a code with client_secret_post for an encoded client id", async () => {
+    const { headers } = await createAdmin();
+    const clientId = `pg72-post_${crypto.randomUUID()}`;
+    const redirectUri = `https://${clientId}.example/callback`;
+    const verifier = "P".repeat(43);
+    const challenge = await sha256Base64Url(verifier);
+
+    const created = await createClient(
+      headers,
+      confidentialClientBody(clientId),
+    );
+    expect(created.status).toBe(201);
+    expect(created.payload.client.tokenEndpointAuthMethod).toBe(
+      "client_secret_post",
+    );
+    const clientSecret = created.payload.clientSecret ?? "";
+    expect(clientSecret).toMatch(/^pg72_cs_/);
+
+    const code = await mintAuthorizationCode(
+      headers,
+      clientId,
+      redirectUri,
+      challenge,
+    );
+    const tokenResponse = await exports.default.fetch(
+      new Request("http://localhost:5173/oauth2/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code,
+          redirect_uri: redirectUri,
+          code_verifier: verifier,
+          client_id: clientId,
+          client_secret: clientSecret,
+        }),
+      }),
+    );
+
+    expect(tokenResponse.status).toBe(200);
+    expect(await tokenResponse.json()).toMatchObject({
+      token_type: "Bearer",
+    });
   });
 
   it("creates a public client without a secret", async () => {
@@ -513,7 +558,6 @@ describe("Admin OAuth client management", () => {
           method: "POST",
           headers: {
             Accept: "application/json",
-            Authorization: `Basic ${btoa(`${clientId}:${secret}`)}`,
             "Content-Type": "application/x-www-form-urlencoded",
           },
           body: new URLSearchParams({
@@ -521,6 +565,8 @@ describe("Admin OAuth client management", () => {
             code,
             redirect_uri: redirectUri,
             code_verifier: codeVerifier,
+            client_id: clientId,
+            client_secret: secret,
           }),
         }),
       );

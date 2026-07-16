@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { scanBufferForSecrets } from "./secret-family.mjs";
+import { validateGeneratedSsoConfig } from "./wrangler-config.mjs";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const policy = JSON.parse(
@@ -88,31 +89,16 @@ export function validateArtifactFiles(directory, filePolicy) {
   return { totalBytes, files: inventory };
 }
 
-function names(values, key) {
-  return (values ?? []).map((value) => value[key]).sort();
-}
-
 export function validateDeploymentConfig(config) {
-  const expected = policy.productionWorker;
-  assert.equal(config.name, expected.name);
-  assert.equal(config.main, policy.artifact.entrypoint);
-  assert.deepEqual(config.routes, [{ pattern: expected.route, custom_domain: true }]);
-  assert.deepEqual(config.compatibility_flags, ["nodejs_compat"]);
-  assert.deepEqual(config.vars, expected.vars);
-  assert.equal(config.assets?.binding, "ASSETS");
-  assert.equal(config.assets?.directory, "../client");
-  assert.equal(config.assets?.run_worker_first, true);
-  assert.deepEqual(names(config.d1_databases, "binding"), [...expected.d1Bindings].sort());
-  assert.deepEqual(names(config.queues?.producers, "binding"), [...expected.queueBindings].sort());
-  assert.deepEqual(names(config.ratelimits, "name"), [...expected.rateLimitBindings].sort());
-  assert.deepEqual([...(config.secrets?.required ?? [])].sort(), [...expected.requiredSecrets].sort());
-  assert.equal(path.basename(config.configPath), "wrangler.jsonc");
-  assert.equal(path.basename(config.userConfigPath), "wrangler.jsonc");
-  assert.equal(config.no_bundle, true);
+  const errors = validateGeneratedSsoConfig(config, repoRoot);
+  assert.deepEqual(errors, [], errors.join("\n"));
 }
 
 function runDryRun(outDirectory) {
-  const config = path.join(repoRoot, "apps", "sso", "dist", "pg72_id", "wrangler.json");
+  const config = path.join(
+    repoRoot,
+    policy.environments.production.generatedConfig,
+  );
   assert.ok(lstatSync(config).isFile(), "production build config is missing; run the SSO build first");
   const result = spawnSync(
     "pnpm",
@@ -161,7 +147,10 @@ function main() {
   runBuild();
   runDryRun(workerDirectory);
 
-  const deploymentConfigPath = path.join(repoRoot, "apps", "sso", "dist", "pg72_id", "wrangler.json");
+  const deploymentConfigPath = path.join(
+    repoRoot,
+    policy.environments.production.generatedConfig,
+  );
   const deploymentConfig = JSON.parse(readFileSync(deploymentConfigPath, "utf8"));
   validateDeploymentConfig(deploymentConfig);
   const worker = validateArtifactFiles(workerDirectory, policy.artifact);
@@ -171,13 +160,15 @@ function main() {
   );
   const inventory = {
     schemaVersion: 1,
-    worker: policy.productionWorker.name,
+    worker: policy.environments.production.worker.name,
     compatibilityDate: deploymentConfig.compatibility_date,
     bindings: {
-      d1: names(deploymentConfig.d1_databases, "binding"),
-      queues: names(deploymentConfig.queues?.producers, "binding"),
-      rateLimits: names(deploymentConfig.ratelimits, "name"),
-      secrets: [...deploymentConfig.secrets.required].sort(),
+      assets: deploymentConfig.assets,
+      d1: deploymentConfig.d1_databases,
+      queueProducers: deploymentConfig.queues.producers,
+      queueConsumers: deploymentConfig.queues.consumers,
+      rateLimits: deploymentConfig.ratelimits,
+      requiredSecrets: [...deploymentConfig.secrets.required],
       vars: Object.keys(deploymentConfig.vars).sort(),
     },
     workerModules: worker,

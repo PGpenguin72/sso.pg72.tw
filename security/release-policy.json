@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "artifact": {
     "entrypoint": "index.js",
     "maxEntrypointBytes": 3145728,
@@ -25,31 +25,141 @@
       "sitemap\\.xml"
     ]
   },
-  "productionWorker": {
-    "name": "pg72-id",
-    "route": "sso.pg72.tw",
-    "d1Bindings": ["PG72_ID_DB"],
-    "queueBindings": ["SECURITY_EVENTS"],
-    "rateLimitBindings": [
-      "ADMIN_RATE_LIMITER",
-      "AUTH_RATE_LIMITER",
-      "INTROSPECTION_CLIENT_RATE_LIMITER",
-      "INTROSPECTION_IP_RATE_LIMITER",
-      "REGISTRATION_RATE_LIMITER"
-    ],
-    "requiredSecrets": [
-      "BETTER_AUTH_SECRET",
-      "BOOTSTRAP_ADMIN_EMAIL",
-      "GOOGLE_CLIENT_ID",
-      "GOOGLE_CLIENT_SECRET"
-    ],
-    "vars": {
-      "AUTH_BASE_URL": "https://sso.pg72.tw",
-      "ENVIRONMENT": "production",
-      "PASSKEY_ORIGIN": "https://sso.pg72.tw",
-      "PASSKEY_RP_ID": "sso.pg72.tw",
-      "PASSKEY_STEP_UP_MAX_AGE_SECONDS": "600",
-      "REGISTRATION_MODE": "invite"
+  "environments": {
+    "production": {
+      "sourceConfig": "apps/sso/wrangler.jsonc",
+      "generatedConfig": "apps/sso/dist/pg72_id/wrangler.json",
+      "worker": {
+        "name": "pg72-id",
+        "main": {
+          "source": "worker/index.ts",
+          "generated": "index.js"
+        },
+        "compatibilityDate": "2026-07-15",
+        "compatibilityFlags": ["nodejs_compat"],
+        "routes": [
+          {
+            "type": "custom-domain",
+            "pattern": "sso.pg72.tw",
+            "customDomain": true
+          }
+        ],
+        "assets": {
+          "type": "assets",
+          "name": "ASSETS",
+          "notFoundHandling": "single-page-application",
+          "runWorkerFirst": true,
+          "sourceDirectory": null,
+          "generatedDirectory": "../client"
+        },
+        "vars": [
+          { "type": "plain-var", "name": "AUTH_BASE_URL", "value": "https://sso.pg72.tw" },
+          { "type": "plain-var", "name": "PASSKEY_RP_ID", "value": "sso.pg72.tw" },
+          { "type": "plain-var", "name": "PASSKEY_ORIGIN", "value": "https://sso.pg72.tw" },
+          { "type": "plain-var", "name": "PASSKEY_STEP_UP_MAX_AGE_SECONDS", "value": "600" },
+          { "type": "plain-var", "name": "REGISTRATION_MODE", "value": "invite" },
+          { "type": "plain-var", "name": "ENVIRONMENT", "value": "production" }
+        ],
+        "secrets": [
+          { "type": "secret", "name": "BETTER_AUTH_SECRET" },
+          { "type": "secret", "name": "GOOGLE_CLIENT_ID" },
+          { "type": "secret", "name": "GOOGLE_CLIENT_SECRET" },
+          { "type": "secret", "name": "BOOTSTRAP_ADMIN_EMAIL" }
+        ],
+        "d1": [
+          {
+            "type": "d1",
+            "name": "PG72_ID_DB",
+            "target": {
+              "databaseName": "pg72-id",
+              "databaseId": {
+                "contract": "reviewed-nonworking-placeholder",
+                "value": "00000000-0000-0000-0000-000000000001"
+              },
+              "sourceMigrationsDirectory": "migrations",
+              "generatedMigrationsDirectory": "../../migrations"
+            }
+          }
+        ],
+        "queues": {
+          "producers": [
+            {
+              "type": "queue-producer",
+              "name": "SECURITY_EVENTS",
+              "target": "pg72-id-security-events"
+            }
+          ],
+          "consumers": [
+            {
+              "type": "queue-consumer",
+              "name": "pg72-id-security-events-consumer",
+              "target": "pg72-id-security-events",
+              "deadLetterTarget": "pg72-id-security-events-dlq",
+              "maxBatchSize": 10,
+              "maxBatchTimeout": 5,
+              "maxRetries": 5
+            }
+          ]
+        },
+        "rateLimits": [
+          { "type": "rate-limit", "name": "AUTH_RATE_LIMITER", "target": "1001", "limit": 30, "period": 60 },
+          { "type": "rate-limit", "name": "ADMIN_RATE_LIMITER", "target": "1002", "limit": 20, "period": 60 },
+          { "type": "rate-limit", "name": "REGISTRATION_RATE_LIMITER", "target": "1003", "limit": 5, "period": 60 },
+          { "type": "rate-limit", "name": "INTROSPECTION_IP_RATE_LIMITER", "target": "1004", "limit": 1200, "period": 60 },
+          { "type": "rate-limit", "name": "INTROSPECTION_CLIENT_RATE_LIMITER", "target": "1005", "limit": 600, "period": 60 }
+        ],
+        "observability": {
+          "enabled": true,
+          "head_sampling_rate": 1,
+          "logs": { "enabled": true, "head_sampling_rate": 1 },
+          "traces": { "enabled": true, "head_sampling_rate": 0.1 }
+        }
+      }
+    },
+    "localTestRp": {
+      "sourceConfig": "apps/test-rp/wrangler.jsonc",
+      "generatedConfig": null,
+      "worker": {
+        "name": "pg72-oidc-test-rp",
+        "main": {
+          "source": "worker/index.ts",
+          "generated": null
+        },
+        "compatibilityDate": "2026-07-14",
+        "compatibilityFlags": ["nodejs_compat"],
+        "routes": [],
+        "assets": null,
+        "vars": [
+          { "type": "plain-var", "name": "OIDC_ISSUER", "value": "http://localhost:5173" },
+          { "type": "plain-var", "name": "OIDC_CLIENT_ID", "value": "pg72-test-rp" },
+          { "type": "plain-var", "name": "RP_BASE_URL", "value": "http://localhost:5174" },
+          { "type": "plain-var", "name": "ENVIRONMENT", "value": "development" }
+        ],
+        "secrets": [],
+        "d1": [
+          {
+            "type": "d1",
+            "name": "TEST_RP_DB",
+            "target": {
+              "databaseName": "pg72-oidc-test-rp",
+              "databaseId": {
+                "contract": "reviewed-nonworking-placeholder",
+                "value": "00000000-0000-0000-0000-000000000002"
+              },
+              "sourceMigrationsDirectory": "migrations",
+              "generatedMigrationsDirectory": null
+            }
+          }
+        ],
+        "queues": { "producers": [], "consumers": [] },
+        "rateLimits": [],
+        "observability": {
+          "enabled": true,
+          "head_sampling_rate": 1,
+          "logs": { "enabled": true, "head_sampling_rate": 1 },
+          "traces": { "enabled": true, "head_sampling_rate": 0.1 }
+        }
+      }
     }
   }
 }

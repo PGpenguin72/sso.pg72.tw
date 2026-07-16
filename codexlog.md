@@ -114,3 +114,15 @@
   `pnpm --filter @pg72/id typecheck` passed and the complete workerd suite
   passed 183/183 tests in 14 files. Documentation, standalone migration replay,
   and the final required `check`/RP gates remain pending.
+
+## 2026-07-16 17:21 CST - Clean-worktree migration and RP prerequisites
+
+- Applied migrations `0001` through `0014` in order to a newly created,
+  isolated local D1 persistence directory with Wrangler. All 14 migrations
+  completed successfully; no remote D1 or production command was used.
+- The required test-RP run exposed a pre-existing clean-worktree mismatch:
+  `apps/test-rp/wrangler.jsonc` supplied `ENVIRONMENT=local`, while the runtime
+  accepts only `development`, `preview`, or `production`. A private `.dev.vars`
+  file was not read or copied.
+- Changed the checked-in local test-RP setting to `development`, matching the
+  runtime contract. `pnpm --filter @pg72/test-rp test` then passed 4/4 tests.

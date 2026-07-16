@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "artifact": {
+    "entrypoint": "index.js",
+    "maxEntrypointBytes": 3145728,
+    "maxTotalBytes": 4194304,
+    "allowedFiles": [
+      "README\\.md",
+      "index\\.js",
+      "assets/[A-Za-z0-9_-]+\\.js"
+    ]
+  },
+  "staticAssets": {
+    "entrypoint": "index.html",
+    "maxTotalBytes": 2097152,
+    "allowedFiles": [
+      "\\.assetsignore",
+      "assets/[A-Za-z0-9_-]+\\.(?:css|js)",
+      "favicon\\.svg",
+      "fonts/Inter-LICENSE\\.txt",
+      "fonts/inter-latin(?:-ext)?-wght-normal\\.woff2",
+      "index\\.html",
+      "llms\\.txt",
+      "robots\\.txt",
+      "sitemap\\.xml"
+    ]
+  },
+  "productionWorker": {
+    "name": "pg72-id",
+    "route": "sso.pg72.tw",
+    "d1Bindings": ["PG72_ID_DB"],
+    "queueBindings": ["SECURITY_EVENTS"],
+    "rateLimitBindings": [
+      "ADMIN_RATE_LIMITER",
+      "AUTH_RATE_LIMITER",
+      "INTROSPECTION_CLIENT_RATE_LIMITER",
+      "INTROSPECTION_IP_RATE_LIMITER",
+      "REGISTRATION_RATE_LIMITER"
+    ],
+    "requiredSecrets": [
+      "BETTER_AUTH_SECRET",
+      "BOOTSTRAP_ADMIN_EMAIL",
+      "GOOGLE_CLIENT_ID",
+      "GOOGLE_CLIENT_SECRET"
+    ],
+    "vars": {
+      "AUTH_BASE_URL": "https://sso.pg72.tw",
+      "ENVIRONMENT": "production",
+      "PASSKEY_ORIGIN": "https://sso.pg72.tw",
+      "PASSKEY_RP_ID": "sso.pg72.tw",
+      "PASSKEY_STEP_UP_MAX_AGE_SECONDS": "600",
+      "REGISTRATION_MODE": "invite"
+    }
+  }
+}

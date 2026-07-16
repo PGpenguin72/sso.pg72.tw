@@ -9,11 +9,31 @@
   "scripts": {
     "build": "pnpm -r --if-present build",
     "check": "pnpm test:clean-dist && pnpm --filter @pg72/id check && pnpm --filter @pg72/test-rp check && pnpm --filter @pg72/wiki check",
+    "dast:local": "node scripts/security/dast-local.mjs",
+    "dast:preview": "node scripts/security/dast.mjs --preview",
     "dev": "pnpm --filter @pg72/id dev",
     "dev:rp": "pnpm --filter @pg72/test-rp dev",
     "dev:wiki": "pnpm --filter @pg72/wiki dev",
+    "security:artifact": "node scripts/security/artifact-gate.mjs",
+    "security:audit": "node scripts/security/accepted-advisories.mjs",
+    "security:config": "node scripts/security/workflow-config.mjs && node scripts/security/wrangler-config.mjs",
+    "security:inventory": "node scripts/security/dependency-inventory.mjs",
+    "security:secrets": "node scripts/security/secret-scan.mjs",
+    "security:static": "oxlint --type-aware apps/sso/worker apps/test-rp/worker",
+    "security:tools:install": "node scripts/security/install-tools.mjs",
+    "security:check": "pnpm test:security && pnpm security:static && pnpm security:secrets && pnpm security:config && pnpm security:audit && pnpm security:artifact && pnpm security:inventory",
     "test": "pnpm -r --if-present test",
     "test:clean-dist": "node --test scripts/clean-package-dist.test.mjs",
+    "test:security": "node --test scripts/security/*.test.mjs",
     "typecheck": "pnpm -r --if-present typecheck"
+  },
+  "devDependencies": {
+    "@secretlint/secretlint-rule-preset-recommend": "13.0.2",
+    "ajv": "8.20.0",
+    "jsonc-parser": "3.3.1",
+    "oxlint": "1.74.0",
+    "oxlint-tsgolint": "0.24.0",
+    "secretlint": "13.0.2",
+    "yaml": "2.9.0"
   }
 }

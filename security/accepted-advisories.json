@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "advisories": [
+    {
+      "id": "GHSA-p2fr-6hmx-4528",
+      "package": "@better-auth/oauth-provider",
+      "version": "1.6.23",
+      "packageManifest": "apps/sso/package.json",
+      "severity": "moderate",
+      "title": "@better-auth/oauth-provider may provide access tokens for unauthorized audiences via unbound resource indicators",
+      "vulnerableVersions": ">=1.4.8 <1.7.0-beta.4",
+      "patchedVersions": ">=1.7.0-beta.4",
+      "url": "https://github.com/advisories/GHSA-p2fr-6hmx-4528",
+      "rationale": "The stable Better Auth 1.6.x line has no patched release, and PGID does not enable general-purpose RFC 8707 resource indicators.",
+      "compensatingControls": [
+        "PGID configures exactly one valid audience and every resource server requires that exact audience.",
+        "The Worker rejects every resource parameter at both /oauth2/authorize and /oauth2/token.",
+        "Better Auth core and plugins remain exact-pinned on the same stable patch line and are upgraded together."
+      ],
+      "owner": "PGID maintainer",
+      "acceptedOn": "2026-07-17",
+      "expiresOn": "2026-10-16",
+      "reviewCommand": "pnpm audit --json"
+    }
+  ]
+}

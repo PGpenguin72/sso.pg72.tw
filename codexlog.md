@@ -1,5 +1,11 @@
 # Codex Work Log
 
+> **Closed task log:** 本檔只記錄已完成的 Passkey step-up Task A。Source branch
+> `codex/passkey-step-up` 的 `426d8e4`–`74b2f56` 已整合成 delivery candidate 的
+> `aedf166`–`f041593`；後續工作不再 append 本檔。Current state 看
+> [`handoff.md`](./handoff.md)，跨 agent 稽核統一寫入 [`agentlog.md`](./agentlog.md)。
+> 本檔是技術證據，不是現行操作授權。
+
 ## 2026-07-16 16:34 CST - Passkey step-up design complete
 
 - Created isolated worktree `/private/tmp/codex-passkey-step-up` on

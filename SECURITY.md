@@ -64,6 +64,9 @@ This behavior is pinned by the exact-version patch `patches/@better-auth__oauth-
 
 - Severity: Moderate.
 - Owner: PGID maintainer.
+- Target date: 2026-10-16, or before full Production GO or adoption of the first
+  audited stable fixed release, whichever comes first. The owner must review
+  the accepted risk at that boundary even if no stable fix is available.
 - Exposure: resource indicators could otherwise select an audience not bound to the original grant.
 - Controls: exactly one `validAudiences` entry; the Worker rejects every `resource` parameter at `/oauth2/authorize` and `/oauth2/token`; v1 resource servers must require an exact single audience and must not use RFC 8707 resource indicators as an authorization boundary.
 - Exit condition: upgrade core and all Better Auth plugins together to the first audited stable release containing the fix, run its schema migration, remove the temporary edge rejection only after protocol regression tests pass.

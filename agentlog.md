@@ -1,5 +1,11 @@
 # Agent 操作紀錄器 (agentlog.md)
 
+> **現行授權提醒（取代下方舊規則）：** 本檔是 append-only 稽核紀錄，不是
+> 操作授權來源。下方 2026-07-16 早期的 Wrangler、production、投票與自動部署
+> 授權均已失效；現行規則只依 [`AGENTS.md`](./AGENTS.md) 與
+> [`codex.md`](./codex.md)。Coding agent 不得 push、deploy、執行 remote D1、
+> 切換 public registration 或改動 production；這些操作由 owner 執行。
+
 本檔詳細記錄 coding agent 在此 workspace 的每一項操作,供稽核與回溯。
 時間為 Asia/Taipei (UTC+8)。每筆記錄:時間、操作類型、工作目錄、涉及檔案、內容簡述、結果。
 
@@ -24,7 +30,7 @@
 | 2026-07-16 02:52 | agent 回報 | 原專案代碼/webmail.pg72.tw | deploy/pgid/oauth.inc.php, README.md | webmail Roundcube OIDC 串接方案完成(commit 478e7be, branch pgid-oidc-deploy-config);Roundcube 用 client_secret_post 與 PGID 相容;mail backend 待 owner 確認 | 完成 |
 | 2026-07-16 02:56 | agent 回報 | 原專案代碼/file.pg72.tw | deploy/pgid/(docker-compose、oauth2-proxy、nginx、filebrowser 設定) | file.pg72.tw oauth2-proxy gateway 串接方案完成(commit 306169ce, branch master);CVE-2026-54089 補償控制落地;client pg72-file 用 client_secret_post | 完成 |
 | 2026-07-16 02:58 | agent 回報 | 原專案代碼/upload.pg72.tw | utils/oidc_client.py, tests/, docs/pgid-cutover-runbook.md | upload admin OIDC 定案(commit 022ef81, branch windows);改用 client_secret_post;client pg72-upload;13 測試全過 | 完成 |
-| 2026-07-16 03:02 | SSH 唯讀勘查 | (VPS 23.146.248.189) | — | owner 授權勘查 mail backend:Debian12/Postfix3.7.11/Dovecot2.3.19/Roundcube1.6.16;Dovecot 無 XOAUTH2,passwd-file SHA512;IMAP 993/SMTP 25;未做任何變更 | 完成 |
+| 2026-07-16 03:02 | SSH 唯讀勘查 | (mail VPS address redacted) | — | owner 授權勘查 mail backend:Debian12/Postfix3.7.11/Dovecot2.3.19/Roundcube1.6.16;Dovecot 無 XOAUTH2,passwd-file SHA512;IMAP 993/SMTP 25;未做任何變更 | 完成 |
 | 2026-07-16 03:03 | 設計勘查 | ~/ahsnccu-ann | src/*.js | 抽出設計參考色票:深藍黑底+翡翠綠終端色+slate 灰,作 PGID 設計語言基礎 | 完成 |
 | 2026-07-16 03:05 | 更新訊息檔 | sso.pg72.tw | msg.md | 記錄 D1-D4 owner 答覆、D3 mail 勘查結論與套用二選一、自主推進聲明 | 完成 |
 | 2026-07-16 03:06 | agent 回報 | worktree docs | docs/、wiki/、README.md、AGENTS.md | API 手冊/GitBook wiki/介紹/README/AGENTS 完成(4 commit, branch worktree-agent-a99e...);待合併,README 的 Copy/Link 狀態需更正為已上線 | 完成 |
@@ -202,3 +208,48 @@
 - 寫完任務 2 後發現 `to_claude.md` 出現第一個 [MSG] 區塊(codex → claude,16:20 CST):Codex 已上線、已讀 to_codex.md、開啟 watcher、確認在 /private/tmp/codex-* 獨立 worktree + codex/ branch 作業且不 push/deploy/remote mutation,主線為 Passkey step-up。
 - 因此 handoff.md 原寫的「Codex 尚未上線」已失效,即時改為「2026-07-16 16:20 CST 上線並確認邊界」,並補上 Codex 自述的 step-up 設計範圍(一次性 challenge/assertion 綁 session/origin/RP ID、step-up 時戳寫 D1 source of truth、高風險 client mutation 檢查最近 step-up、break-glass 路徑、UI、replay/cross-session/expiry/missing-passkey 測試),同時明確標註**仍在進行中、尚未實作,production blocker 未解除**。
 - 未 commit `to_claude.md`(該檔為 Codex→Claude 通道,由 root Claude 處理);本 agent 僅讀取。
+
+## 2026-07-16 19:34 CST — Codex resume、completion audit 與 docs truth remediation
+
+- 執行者:root Codex調度；本文件修正由 subagent
+  `/root/integration_branch_map` 單一寫入，其他 subagents 未修改
+  `agentlog.md`。
+- 工作位置:`/private/tmp/codex-completion-doc-truth`，branch
+  `codex/completion-doc-truth`，由 `claude-project-completion@e35304a` 建立；
+  沒有在 dirty main checkout 編輯。
+- Resume 唯讀盤點:local `main@6fbffce`；`claude-project-completion` 是 main
+  線性 ahead 15 commits 的 integration spine，feature tip 為 `f074492`，
+  `e35304a` 只新增 point-in-time handoff。Standalone Passkey/Telegram/SID
+  branches 已有整合版本，不得重複合併。`claude-logout-storage` 的 `0016`
+  仍是未追蹤、未測、未 review 草稿，不在 delivery branch，本輪未觸碰。
+- Completion verification（由獨立 completion audit 與 Passkey review 重跑）:
+  `pnpm install --offline --frozen-lockfile` pass；明確 local placeholder env 下
+  SSO prescribed gate通過 typecheck、198/198 tests（15 files）與 production
+  build；test RP 11/11，local `cf-typegen` 後 typecheck與
+  `wrangler deploy --dry-run`通過；fresh isolated local D1依序套用
+  `0001`–`0015`；dist無`.dev.vars*`；tracked worktree clean。這仍不是
+  hermetic gate：generated binding types與local placeholders需顯式前置，且
+  repo仍無tracked CI/SAST/secret/IaC workflow。
+- 唯讀 release audit逐項核對 `new_handoff.md` §7：十項 findings 均仍成立；
+  central `sid`、Telegram verified-email/provider ownership、Passkey no-bypass
+  已在 local source與tests完成，但 global logout/outbox、recovery與real Google
+  callback coverage仍是open blockers。Roundcube finding是operator docs錯誤，
+  current opaque-token introspection runtime/tests本身正確。
+- 本 docs-only remediation 涉及:`new_handoff.md`、`handoff.md`、
+  `agentlog.md`、`codexlog.md`、`msg.md`、`SECURITY.md`、
+  `docs/design-system.md`、`docs/integration-plans/roundcube.md`、
+  `wiki/users/getting-started.md`、`wiki/faq.md`。內容為current/historical
+  角色與權限、release blockers、opaque-token runbook、invite-only truth、
+  accepted-Moderate target date、tracked design scope與歷史PII redaction；
+  `App.tsx`與package/runtime scripts未修改。
+- Docs validation:`git diff --check` pass；changed docs與`wiki/SUMMARY.md`共
+  11檔relative link targets全存在；heading inventory完成；stale
+  Passkey/only-main/watcher/invite wording無current命中；已知mail VPS address、
+  personal Cloudflare email/account IDs無殘留；常見token/private-key/secret-value
+  pattern無命中。兩次初始inline Node checker只有shell quoting造成
+  `SyntaxError` / `unmatched quote`，未改檔；改成不含shell-sensitive字元的
+  one-line read-only invocation後，relative links與heading/fence checks均pass。
+- 保留owner state:main仍為`M to_claude.md`、`M to_codex.md`、
+  `?? morden_dark.txt`；本branch未stage或修改三者。
+- 未執行:git push、merge/cherry-pick回main、deploy、remote D1、Cloudflare/VPS/
+  secret-store/production mutation；未修改`原專案代碼/`或未追蹤`0016`。

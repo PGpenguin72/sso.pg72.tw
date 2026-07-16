@@ -1,9 +1,15 @@
 # PGID Orchestration Handoff
 
-> 更新時間：2026-07-16 18:23 CST（Asia/Taipei）  
-> 停止原因：owner 要求停止目前工作並留下交接  
-> Canonical 規格：[`codex.md`](./codex.md)  
-> 工作守則：[`AGENTS.md`](./AGENTS.md)、[`CLAUDE.md`](./CLAUDE.md)  
+> **Closed historical snapshot:** 本文件記錄 2026-07-16 18:23 CST 的中止點；
+> owner 後續已恢復工作，因此本文的 agent、watcher、worktree 與待辦狀態均不可
+> 當成現況或操作授權。Current state / runbook 請看 [`handoff.md`](./handoff.md)，
+> 稽核紀錄請看 [`agentlog.md`](./agentlog.md)，現行權限只依
+> [`AGENTS.md`](./AGENTS.md) 與 [`codex.md`](./codex.md)。
+>
+> 更新時間：2026-07-16 18:23 CST（Asia/Taipei）
+> 停止原因：owner 要求停止目前工作並留下交接
+> Canonical 規格：[`codex.md`](./codex.md)
+> 工作守則：[`AGENTS.md`](./AGENTS.md)、[`CLAUDE.md`](./CLAUDE.md)
 > 本文件是 point-in-time 交接，不取代 `codex.md`。
 
 ## 1. 最重要的接手位置

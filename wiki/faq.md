@@ -9,7 +9,7 @@ A：PG72 自己掌控的單一登入系統。一個帳號登入所有 PG72 服�
 A：不需要。日常登入用 Google 或 Passkey（指紋 / 臉部 / 硬體金鑰），沒有密碼。
 
 **Q：可以只用 Passkey，不用 Google 嗎？**
-A：目前第一次建立帳號是透過 Google 登入（需已驗證 email）。建立帳號後可註冊 Passkey，之後即可用 Passkey 登入。註冊 Passkey 需要先有帳號並已登入。
+A：Production 目前是 invite-only beta。第一次建立帳號需要有效邀請，並透過邀請所對應、email 已驗證的 Google 帳號登入；verified email 本身不會繞過邀請。建立帳號後可註冊 Passkey，之後即可用 Passkey 登入。註冊 Passkey 需要先有帳號並已登入。
 
 **Q：我換了 Google 的 email，帳號會不見嗎？**
 A：不會。識別你的是不可變的帳號 ID，不是 email。

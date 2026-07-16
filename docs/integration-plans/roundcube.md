@@ -37,7 +37,7 @@ Roundcube 自 `1.5-beta` 起內建 OAuth2；`1.7` 大幅強化 OIDC。相關能�
 
 - **Generic OIDC / discovery**：`oauth_config_uri`（since 1.7）可取代手填 `oauth_auth_uri` / `oauth_token_uri` / `oauth_identity_uri`。指向 PGID 的 `.well-known/openid-configuration`。
 - **PKCE**：`oauth_pkce`（快照與 1.7 預設 `'S256'`；註解明言 `plain` 方法「voluntarily not implemented」）。符合 PGID 的 PKCE S256 要求。
-- **JWKS**：`oauth_jwks_uri` 支援；搭配 `oauth_cache`（since 1.7，backchannel 時 **mandatory**）與 `oauth_cache_ttl`（預設 `8h`）。
+- **JWKS**：`oauth_jwks_uri` 支援；搭配 `oauth_cache`（since 1.7，backchannel 時 **mandatory**）與 `oauth_cache_ttl`（預設 `8h`）。JWKS 只用於驗證 OIDC ID token 與 back-channel logout JWT；PGID 的 `pg72_at_` access token 是 opaque，不能用 JWKS 本地驗證。
 - **Back-channel logout**：內建 endpoint `<roundcube>/index.php/login/backchannel`（action `rcmail_action_login_oauth_backchannel`）。實作依 OpenID Connect Back-Channel Logout 1.0：驗 `logout_token`（`jwt_decode`）、檢查 `typ`（允許 untyped，但若有須為 `logout+jwt`）、要求有 `sub`、拒絕帶 `nonce`，然後 `schedule_token_revocation($event['sub'])`。回 200/204。
   - 註記：其去重與撤銷以 `sub` 為鍵排程撤銷；PGID 要求「以 `jti` 去重」，需確認 Roundcube 當版對重放 `logout_token` 的處理，必要時在 gateway/前置層補 `jti` 去重（見 §7）。
   - 查證來源（設定鍵與 since 版本）：<https://github.com/roundcube/roundcubemail/wiki/Configuration:-OAuth2>（查證日 2026-07-15）
@@ -61,7 +61,9 @@ maintenance-window 的部署方向，不代表本輪已重新確認 production D
 - Roundcube 用 OIDC 拿到的 access token，透過 SASL `XOAUTH2` 或 `OAUTHBEARER` 直接登入 IMAP/SMTP。
 - 設定：`oauth_auth_type`（`'XOAUTH2'` / `'OAUTHBEARER'` / `null` 自動）；`oauth_scope` 必須包含 mail backend 接受的 scope；`imap_host` / `smtp_host` 用 `ssl://` 或 `tls://`。
 - **硬性前提**：mail backend（IMAP + SMTP）必須支援對應 SASL 機制，且能**驗證 PGID 簽發的 token**：
-  - Dovecot：`auth_mechanisms = xoauth2 oauthbearer`，並設 OAuth2 validation（local JWT via PGID JWKS，或 introspection endpoint）。
+  - Dovecot：`auth_mechanisms = xoauth2 oauthbearer`，並把 OAuth2 validation
+    固定指向 PGID scoped introspection endpoint。Current Path A 的
+    `pg72_at_` access token 是 opaque，不能改用 PGID JWKS 本地驗證。
   - Postfix（SMTP submission）：經 Dovecot SASL 或 backend 支援 `XOAUTH2`/`OAUTHBEARER`。
 - PGID current-source contract 只允許固定 service client `pgid-mail-introspect`
   introspect `pg72-webmail` 的 opaque access token。Caller 用
@@ -193,7 +195,7 @@ Current target 是第一列的 Dovecot Path A。其餘列只保留為 rollback �
 
 | 條件 | 採用路徑 | 需要的 backend 支援 |
 |---|---|---|
-| backend 支援 `XOAUTH2`/`OAUTHBEARER` 且能驗 PGID token | §3.1（首選） | Dovecot `auth_mechanisms` 含 xoauth2/oauthbearer；OAuth2 validation 指向 PGID JWKS 或 introspection；SMTP submission 同步 |
+| backend 支援 `XOAUTH2`/`OAUTHBEARER` 且能驗 PGID token | §3.1（首選） | Dovecot `auth_mechanisms` 含 xoauth2/oauthbearer；OAuth2 validation 固定使用 PGID scoped introspection；SMTP submission 同步。JWKS 不驗 opaque access token |
 | backend 不支援 SASL OAuth，但可驗短效密碼 | §3.2 credential bridge | PGID 於 token 放 password claim；backend 以此值做 password 驗證，效期對齊 token |
 | backend 完全不支援 | app password（最後手段） | backend 產生/儲存長效 app password；與 PGID 撤銷脫鉤，需獨立管理 |
 
@@ -207,7 +209,7 @@ Current target 是第一列的 Dovecot Path A。其餘列只保留為 rollback �
 - Production normal-flow smoke 只驗 active/inactive/401。`429` exhaustion 與
   `503` limiter failure 必須在 isolated Preview 或 controlled local test
   驗證；不得對 production flood 或故意破壞 binding。
-- PGID 是「單一 audience」策略（見 SECURITY.md，因 `GHSA-p2fr-6hmx-4528` 補償控制拒絕 RFC 8707 `resource`）。若 mail backend 需要「給 mail 的專屬 audience token」，會與此補償控制衝突——**這是設計層必須先解的相容性問題**，需 owner + PGID core 決定 token 對 mail backend 的驗證方式（同 audience JWKS 本地驗，而非另發 resource-specific token）。
+- PGID 是「單一 audience」策略（見 SECURITY.md，因 `GHSA-p2fr-6hmx-4528` 補償控制拒絕 RFC 8707 `resource`）。Path A 不要求 Dovecot 解碼 audience：Dovecot 把 opaque token 送到固定的 scoped introspection pair，由 PGID 驗 token client、live session、scope 與 verified mailbox identity。不得改成同 audience + JWKS 本地驗，也不得另發 resource-specific token。
 
 ---
 
@@ -258,7 +260,7 @@ Current target 是第一列的 Dovecot Path A。其餘列只保留為 rollback �
 | PGID prerequisite 尚未部署 | 高 | Local tests 通過不代表 production 已有 0013/0014、rate bindings 或 service client | 依 handoff owner runbook 逐步 deploy/provision/smoke，保留 rollback |
 | Web UI OIDC 假象 | 高 | Web 登入成功不代表 IMAP/SMTP 已通過認證 | 明確分開 §3 兩層，各自驗收 |
 | app password 與撤銷脫鉤 | 高 | 最後手段下，PGID 撤銷無法讓 mail 憑證失效 | 僅作最後手段；獨立生命週期管理 + audit；優先推 backend 支援 OAuth |
-| 單一 audience 與 mail token 衝突 | 中-高 | SECURITY.md 拒 RFC 8707 `resource`；mail backend 若要專屬 audience 會衝突 | 以同 audience + JWKS 本地驗；owner + PGID core 決策 |
+| 單一 audience 與 mail token 衝突 | 中-高 | SECURITY.md 拒 RFC 8707 `resource`；mail backend 若要求自行驗專屬 audience 會衝突 | 固定使用 scoped introspection，不讓 Dovecot 以 JWKS 解 opaque token；若 backend 不接受此模式則停止 Path A rollout |
 | `1.8-git` 誤用 | 中 | 快照為 dev branch，codex.md 明令不可部署 | 一律以 `1.7.2` stable 打包 |
 | `jti` 去重不足 | 中 | 原生以 `sub` 排程撤銷，重放冪等性待確認 | 確認當版行為；不足時前置 receiver 補 `jti` 去重 |
 | token 短於 IMAP 連線壽命 | 中 | 長連線需 refresh 重連，失敗會中斷收發 | 實測 refresh/重連；縮短連線或加重連邏輯 |

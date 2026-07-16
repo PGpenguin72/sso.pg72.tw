@@ -1,13 +1,16 @@
 # PGID 設計語言 (Design System)
 
-> **權威主題:`morden_dark.txt`(owner 於 2026-07-16 指定)** — 風格為「Linear / Modern」深色系。
-> 本檔是該主題套用到 PGID/各專案的落地指南。若與 `morden_dark.txt` 衝突,以 `morden_dark.txt` 為準。
-> 用途:階段 30「統一 owner 自有專案視覺」的唯一依據。
+> 本檔完整保存 owner 於 2026-07-16 確認的「Linear / Modern」深色主題，
+> 是 repository 內可獨立使用的 PGID 視覺規格，不依賴任何未追蹤的本機檔案。
+> 跨 repository 套用須在各專案自己的工作流程與授權範圍內進行。
 
 ## 0. 階段 30 適用範圍(重要)
 
-- **要統一**:owner 自己 vibe 出來的原創專案(sso.pg72.tw 及 apps、copy、link、status、upload,以及其他自有原創前端)。
+- **本 repo 範圍**:`sso.pg72.tw` 與本 workspace 內可追蹤的 PGID 介面/文件。
+- **其他第一方專案**:copy、link、upload 等只能在各自 repository、依各自規則
+  套用；本 workspace 不直接修改 `原專案代碼/`。
 - **不要碰**:
+  - Status / XUGOU fork（owner 已明確排除）；
   - `anzhiyu`、`fuwari` 這兩個部落格(保留各自主題);
   - 任何從**別人倉庫 clone** 下來的內容(保持上游樣式);
   - 上游快照專案 file(File Browser)、webmail(Roundcube)的**核心**(只在自有的 gateway/包裝層套用,不改上游 UI)。
@@ -17,7 +20,7 @@
 
 深空近黑底(`#050506`,非純黑)+ 單一飽和靛藍強調(`#5E6AD2`)+ 分層環境光。氛圍:電影感的技術極簡——像夜裡透過霧面玻璃看一個高階桌面應用。深但不壓迫、技術但不冷硬、精確但不僵。核心手法:**分層環境光 + 互動深度**(多層背景漸層、緩動的模糊光暈 blob、滑鼠追蹤 spotlight、多層陰影、200–300ms expo-out 微互動)。
 
-## 2. 色票 Tokens(以 morden_dark 為準)
+## 2. 色票 Tokens
 
 ```css
 :root {
@@ -79,4 +82,5 @@
 3. 只套用於**自有原創專案**(見第 0 節範圍);排除 anzhiyu/fuwari/clone 內容。
 4. 每專案改完各自 build/視覺驗證,再由設計審查角色複核跨專案一致性。
 
-> 主題來源:owner 提供的 `morden_dark.txt`(Linear/Modern)。owner 若要調整,改該檔或第 2 節變數即可。
+> 本頁已包含完整主題定義；owner 若要調整，直接更新本頁第 2 節及實作中的
+> 對應 tokens，讓 tracked 規格與程式保持同步。

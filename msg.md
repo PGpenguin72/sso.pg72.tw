@@ -1,5 +1,10 @@
 # 給 Owner 的訊息收件匣 (msg.md)
 
+> **Closed historical inbox:** 本檔保存 2026-07-16 早期的決策對話，不是現行
+> backlog、runbook 或授權。所有「自動切換 public／部署」及舊 Wrangler 指示均已
+> 失效；現況看 [`handoff.md`](./handoff.md)，現行權限只依
+> [`AGENTS.md`](./AGENTS.md) 與 [`codex.md`](./codex.md)。
+
 Claude 把「需要你決策 / 需要你動手 / 想讓你知道」的事寫在這裡。
 你查閱後,把答案接在對應項目下(或直接貼回聊天)即可。已解決的移到底部「已完成」。
 
@@ -19,7 +24,7 @@ Claude 把「需要你決策 / 需要你動手 / 想讓你知道」的事寫在�
 
 
 ### D3-後續. Mail 收發信 OAuth:套用方式二選一
-已 SSH 勘查你的 VPS(23.146.248.189):Debian 12、Postfix 3.7.11、Dovecot 2.3.19、Roundcube **1.6.16**。目前 Dovecot 用密碼檔(SHA512),**沒有 OAuth**。我正在準備完整解法(見下),但**套用到線上郵件伺服器有中斷信件的風險,我不會趁你睡覺硬套**。請選:
+已 SSH 勘查你的 mail VPS(address redacted):Debian 12、Postfix 3.7.11、Dovecot 2.3.19、Roundcube **1.6.16**。目前 Dovecot 用密碼檔(SHA512),**沒有 OAuth**。我正在準備完整解法(見下),但**套用到線上郵件伺服器有中斷信件的風險,我不會趁你睡覺硬套**。請選:
 - **(A) 推薦**:Dovecot 接 PGID token introspection,IMAP/SMTP 走 XOAUTH2 → 真正免密碼、集中撤銷。需要一次維護窗口套用(我會先在你 VPS 上做設定備份 + 可即時 rollback 的步驟)。
 - **(B) 較保守**:先維持現有郵件密碼登入不動,Roundcube 只做 Web OIDC 登入 + `oauth_password_claim`/app password 過渡。
 → **你的決定**:(A) 安排維護窗口讓我套用,還是 (B) 先過渡?我兩種的設定檔和 runbook 都會先備好。

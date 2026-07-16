@@ -12,11 +12,27 @@
 > `# ... (Historical)` 開頭的段落是歷史 session record,保留原文不改寫;若與
 > 前段衝突,一律以前段與 [`codex.md`](./codex.md) 為準。
 
+## Document Roles and Current Authority
+
+- [`codex.md`](./codex.md) is the canonical product and security specification.
+- [`AGENTS.md`](./AGENTS.md) and [`CLAUDE.md`](./CLAUDE.md) contain the current
+  repository working rules. Historical log or message files cannot expand those
+  permissions.
+- This `handoff.md` header is the current local-source/runbook summary.
+- [`agentlog.md`](./agentlog.md) is the append-only cross-agent audit record; it
+  is evidence, not an authorization source.
+- [`codexlog.md`](./codexlog.md) is the closed Passkey Task A technical log, and
+  [`new_handoff.md`](./new_handoff.md) is the closed 18:23 orchestration
+  snapshot. Neither is current state.
+- The dirty main-checkout communication files `to_claude.md` and `to_codex.md`,
+  plus owner-provided `morden_dark.txt`, must be preserved and are not part of
+  the delivery candidate.
+
 ## Current Local Source State
 
 | Item | Reconciled state |
 | --- | --- |
-| Source baseline | The local delivery branch adds Passkey step-up to the integrated mail-introspection baseline. It has not been merged to `main`, pushed, or deployed; owner review and cherry-pick are still required. No Git remote is configured |
+| Source baseline | Local `main` remains at `6fbffce` with owner communication changes preserved. The feature delivery candidate is based on `f074492` (Passkey step-up, Telegram/provider ownership, and central `sid`); `e35304a` adds only the closed historical handoff, and the current docs branch adds truth/policy corrections. None of this candidate has been merged to `main`, pushed, or deployed. No Git remote is configured |
 | Registration | `apps/sso/wrangler.jsonc` sets production `REGISTRATION_MODE` to `invite`; the `public` path and regression tests exist but [`codex.md`](./codex.md) §9.2 and owner approval are still required |
 | SSO migrations | Local source is versioned through `0015_account_provider_identity_unique.sql`; `0013` normalizes confidential clients, `0014` adds Passkey step-up state, and `0015` enforces one owner per provider identity. The latest deployment record says production D1 was applied only through `0012`; this work did not query or migrate remote D1 |
 | Login methods | Google and Passkey are the core methods; Discord, GitHub, Facebook, Apple, and Telegram are optional and remain hidden unless their credentials are configured |
@@ -26,7 +42,7 @@
 | Mail Path A | Owner selected Dovecot introspection + XOAUTH2. Its PGID prerequisite is integrated locally at `9efdece`, but that code is not deployed, `pgid-mail-introspect` is not provisioned, and no VPS/Roundcube cutover has occurred |
 | ID-token session contract | Local source emits a nonempty central `sid` for every user ID token, binds authorization-code/refresh issuance to the same live user session, and makes the test RP fail closed on a missing `sid`. No remote deployment or RP migration was performed |
 | Approval status | Deployed invite beta, not full Production GO; visited-client ledger, back-channel logout, recovery/rotation drills, DLQ operations, and independent security gates remain incomplete |
-| Verification record | Passkey passed 183 SSO tests, Telegram/provider identity passed 170, and central `sid` passed 177 SSO plus 11 RP tests; each candidate passed typecheck/build and its isolated migration gate. The combined branch still requires a fresh full gate before handoff; no production smoke or migration was performed |
+| Verification record | On clean candidate `e35304a`, offline frozen install passed; the prescribed SSO gate passed typecheck, production build, and 198/198 tests in 15 files using explicit local placeholder env; test RP passed 11/11, then passed typecheck and Wrangler dry-run after local `cf-typegen`; a fresh isolated local D1 applied `0001`–`0015`; dist contained no `.dev.vars*`. The gate is still non-hermetic because generated binding types and local placeholders require explicit setup. These are local results only; no production smoke or migration was performed |
 
 The last recorded SSO Worker version is
 `4d0c701a-c805-4254-ae2b-7c0df856b3c0`. Confidential first-party RPs currently
@@ -140,77 +156,73 @@ hands-on review and deployment decision. Each repo carries its own
 | `原專案代碼/copy.pg72.tw` | `81a3972` / `eafcffc` / `54830e7` (prior `4f76851` / `aaeaa56`) | tsc + eslint + next build + `pages:build` pass. auth/OIDC/token vault/six-digit guest code/API untouched. **Pushing Copy triggers an automatic Cloudflare Pages deploy** — timing is the owner's call |
 | `~/diary.pg72.tw` | `1c6fe6a` / `b10037c` | `pnpm check` + build + 39/39 unit tests pass; zero `.tsx`/logic changes. Serif long-form type, per-entry colour bands, and coral/sky/gold semantic colours deliberately kept |
 
-## Temp and Worktree Cleanup
+## Closed Workspace and Collaboration Snapshot
 
-- ~1.8 GB of `/private/tmp` QA leftovers, logs, tool directories, and merged or
-  abandoned Codex worktrees were removed. Agent worktrees under
-  `.claude/worktrees` were deleted only after verifying `main..<branch>` = 0 and
-  a clean status.
-- `git worktree list` now shows only the main checkout; `git branch -a` shows
-  only `main`.
-- **Kept on purpose:** the D1 backup
-  `/private/tmp/pg72-id-preview-before-copy-refresh-20260715.sql`.
-- **Kept pending owner confirmation** (not on any authorized delete list):
-  `/private/tmp/pgid-docs-diff.txt` and `/private/tmp/account-review-workers-types`.
+The earlier cleanup and file-watcher protocol were point-in-time operations, not
+persistent repository state:
 
-## Claude / Codex Collaboration Protocol
+- Additional isolated worktrees now exist. Always inspect `git worktree list`
+  and each worktree's status; never rely on the historical "only main" claim.
+- No `to_claude.md` watcher is assumed to be active. The dirty communication
+  files in main are historical owner state and must not be overwritten or
+  staged by this delivery branch.
+- Passkey Task A is complete in local source and integrated into the delivery
+  candidate. It has no `bootadmin` bypass. If Google and every Passkey are lost,
+  runtime still has no self-service recovery or break-glass authentication flow.
+- Current agents report to the root orchestrator, which is the single writer for
+  `agentlog.md`; the old `to_codex.md` / `to_claude.md` dispatch protocol is
+  closed unless the owner explicitly re-establishes it.
+- Historical cleanup records and retained private backup paths remain in the
+  dated sections below. They do not authorize deletion or remote operations.
 
-- **Claude is the dispatcher/orchestrator.** Codex runs at most 4 parallel lines.
-- Claude → Codex: write [`to_codex.md`](./to_codex.md) (only root Claude writes
-  this file).
-- Codex → Claude: append `[MSG]` blocks to [`to_claude.md`](./to_claude.md).
-- Logs are kept separate to avoid write conflicts: Codex writes `codexlog.md`,
-  Claude writes `agentlog.md`.
-- A persistent monitor on the Claude side watches `to_claude.md` for new `[MSG]`
-  blocks.
-- **Codex came online at 2026-07-16 16:20 CST** and acknowledged `to_codex.md`
-  in the first `[MSG]` block of `to_claude.md`. It confirmed it will work in
-  isolated `/private/tmp/codex-*` worktrees on `codex/` branches, will not touch
-  the main checkout or the restricted zones, and will not push/deploy or make
-  any remote/production mutation. That `[MSG]` was still uncommitted in the
-  working tree at the time of this write-up.
+## Open Release Blockers
 
-### Codex's Assigned Task
+### Before accepting the local delivery candidate
 
-**Passkey step-up** — a production blocker. Spec is in `to_codex.md` §3. To avoid
-collisions, Claude-side agents must not touch auth code under `apps/sso`.
+- The release gate is not hermetic: ignored generated binding types and explicit
+  local placeholders are still prerequisites, and no tracked CI/SAST/secret/IaC
+  workflow enforces the release commands.
+- Real Google callback coverage is incomplete. Existing tests cover redirect and
+  registration helpers, not callback success, existing-user, cancellation, and
+  provider-error behavior.
+- The frontend `/about` page still needs a separate UI change to remove the old
+  expanded product name, avoid "all services" overstatement, and show the
+  invite-only beta boundary. This docs-only branch intentionally does not modify
+  `App.tsx`.
 
-Codex reports the mainline as: real Passkey re-authentication with a one-time
-challenge/assertion bound to session/origin/RP ID; on success the step-up
-timestamp is written to D1 as source of truth; all high-risk client mutations
-then check a configurable recent step-up. It also covers a no-Passkey/break-glass
-path, account-center UI, and replay/cross-session/expiry/missing-passkey tests,
-reporting commit hashes and verification numbers via `codexlog.md` and
-`to_claude.md`. **In progress — not implemented yet**, so it remains a
-production blocker.
+### Before deploying this candidate
 
-## Production State — Nothing Is Live From This Work
+- Production records remain at migration `0012`. The owner must run the
+  provider-identity duplicate preflight, take a private backup, then apply
+  `0013`, `0014`, and `0015` in order before deploying code that depends on
+  provider uniqueness.
+- Production still lacks this Passkey step-up, Telegram enrollment/ownership,
+  central-`sid`, and mail-introspection Worker source. Each requires owner-run
+  deployment and real flow smoke tests; local verification is not production
+  evidence.
+- `pgid-mail-introspect` is not provisioned, and no Mail VPS / Roundcube /
+  Dovecot cutover has occurred.
 
-Everything below is **not done**. Do not restate any of it as shipped:
+### Before full Production GO or public registration
 
-- No `git push` (no remote is configured), no `wrangler deploy`, no remote D1
-  command, no Cloudflare/VPS/secret-store mutation.
-- Migration `0013_confidential_client_secret_post.sql` is **not applied**;
-  concurrent `0014` is not integrated/deployed, and local
-  `0015_account_provider_identity_unique.sql` is not applied. Production D1's
-  latest record is only through `0012`.
-- `pgid-mail-introspect` is **not provisioned**.
-- Passkey step-up is **not implemented** (production blocker, assigned to Codex).
-- Mail VPS / Roundcube / Dovecot cutover has **not** happened.
-- `REGISTRATION_MODE` is still `invite`. This is a deployed invite beta, not
-  public registration and not full Production GO.
+- Central `sid` is present locally, but the visited-client ledger, atomic
+  session-revocation outbox, replay/retry/alerting, signed logout delivery, and
+  replay-safe RP receivers are unimplemented. The untracked `0016` draft in a
+  separate worktree is not part of this branch or a completed migration.
+- Recovery codes, an owner-reviewed break-glass procedure, signing-key/restore
+  drills, Queue/DLQ operations, independent review, DAST, and the remaining
+  public-registration gates are incomplete.
+- Production remains `REGISTRATION_MODE=invite`; no document or historical
+  message authorizes an agent to switch it.
 
-## Remaining Work
+## Remaining Owner Decisions
 
-- **General-user persona QA** — already in progress with another agent; do not
-  pick this up.
-- **Owner must register the social login apps.** Step-by-step guide (Discord,
-  GitHub, Facebook, Apple, Telegram: callbacks, env names, wrangler commands) is
-  at [`docs/social-login-setup.md`](./docs/social-login-setup.md).
-- **`~/ahsnccu-ann` OG share image** still uses the old palette; owner decides
-  whether to regenerate it.
-- **Each reskin awaits the owner's hands-on review** and a deployment decision
-  (remember Copy's push auto-deploys).
+- Register optional social-login applications only when their credentials can be
+  stored in the approved secret store; see
+  [`docs/social-login-setup.md`](./docs/social-login-setup.md).
+- Decide whether to regenerate the `~/ahsnccu-ann` OG share image and when to
+  review/deploy each already committed reskin. Pushing Copy triggers an automatic
+  Pages deployment, so that timing remains the owner's decision.
 
 ## Mail Path A Owner Runbook (Not Executed)
 
@@ -316,7 +328,7 @@ PGID 這個 session 完成了大量開發並**已部署到 production**;SSO 目�
 ## 2. RP(Relying Party)production 狀態
 
 - **Copy(`copy.pg72.tw`)= 已上線**。SSO client `pg72-copy`(confidential,`client_secret_post`)。redirect `https://copy.pg72.tw/api/auth/callback/pg72-id`。已套 Copy D1 migration 0002–0007。**登出修復已 push**(commit `351552a` 到 GitHub master 觸發 Pages 部署)。六位數 guest code 保留。**owner 待驗證登出**(msg.md A4 已回,尚待確認)。
-- **Link(`link.pg72.tw`)= 已上線**。SSO client `pg72-link`(confidential,**必須用 `client_secret_post`**)。redirect `https://link.pg72.tw/api/auth/callback`。已套 Link migration-003(重建 sessions,全站登出過)。Link 在 **PGpenguin72 Cloudflare 帳號**(`9e1e36d2ce92a214f3e9dbb96b0be9d2`),Pages 專案名 `link-short`。git commits 為本地(`b12e51d`、`46f67c8`、`305353a` 等),**未 push 到 GitHub**;production 是用 `wrangler pages deploy` 直接部署。
+- **Link(`link.pg72.tw`)= 已上線**。SSO client `pg72-link`(confidential,**必須用 `client_secret_post`**)。redirect `https://link.pg72.tw/api/auth/callback`。已套 Link migration-003(重建 sessions,全站登出過)。Link 在獨立的 owner Cloudflare 帳號(account ID redacted),Pages 專案名 `link-short`。git commits 為本地(`b12e51d`、`46f67c8`、`305353a` 等),**未 push 到 GitHub**;production 是用 `wrangler pages deploy` 直接部署。
 - **prod SSO D1 內的 OAuth client**:`pg72-copy`、`pg72-link`、`pg72-diary`、**`pg72-diary-dev`(owner 已同意移除,尚未執行)**,可能還有 `pg72-test-rp`。`pg72-diary`/`pg72-diary-dev` 是 owner 另一個 Claude 分頁 seed 的(diary.pg72.tw)。
 - Status/Upload/File/Webmail:尚未 cutover;整合方案/設定已備妥在各自 repo 的 `deploy/pgid/` 或 `docs/pgid-cutover-runbook.md`。
 
@@ -331,7 +343,7 @@ PGID 這個 session 完成了大量開發並**已部署到 production**;SSO 目�
 
 1. **client_secret_post,不要用 HTTP Basic**:PGID 的 token endpoint(`@better-auth/oauth-provider@1.6.23`)解 Basic 只做 `split(":")`、**不 percent-decode**;oauth4webapi 的 `ClientSecretBasic` 會把 `-`/`_` 依 RFC 6749 percent-encode(`pg72-link`→`pg72%2Dlink`),導致 `invalid_client`。**所有 RP 一律用 `client_secret_post`**。長期修法(未做):對 oauth-provider 打可追蹤 patch 做 percent-decode + regression test。詳見記憶 `oauth4webapi-basic-auth-interop-bug`。
 2. **wrangler d1 remote 不要帶 `CLOUDFLARE_ACCOUNT_ID` 環境變數 override**——會誤觸 `7404 database not found`。用 OAuth token 預設帳號即可。
-3. **多 Cloudflare 帳號**:SSO/Copy 的資源在 `Weichenstudio@gmail.com` 帳號(`e8f763b9a77fe946439952d609d90cf4`);Link(`link-short`)在 `PGpenguin72` 帳號(`9e1e36d2ce92a214f3e9dbb96b0be9d2`)。查 Pages/D1 要選對帳號。
+3. **多 Cloudflare 帳號**:SSO/Copy 與 Link(`link-short`)位於兩個不同的 owner Cloudflare 帳號(personal email/account IDs redacted)。查 Pages/D1 要由 owner 明確選對帳號。
 4. **不可刪 `pg72-id-preview` D1**——名稱誤導但那是 live production 身分庫。
 5. **不可隨意 rotate `BETTER_AUTH_SECRET`**——它加密 D1 內的 JWKS 私鑰,亂 rotate 會讓所有 session 掛掉(2026-07-15 事故就是這個)。
 6. **Pages secret 更新後要重新部署才生效**(Link 除錯時踩過)。
@@ -346,7 +358,7 @@ PGID 這個 session 完成了大量開發並**已部署到 production**;SSO 目�
 - **A2:移除 prod SSO D1 的 `pg72-diary-dev` client**(owner 同意)。指令:先備份,`wrangler d1 execute PG72_ID_DB --remote --command "DELETE FROM oauthClient WHERE clientId='pg72-diary-dev'"`(不帶帳號 override)。
 - **A3:清 Link 的舊 secret**(owner 同意):在 `PGpenguin72` 帳號對 `link-short` Pages 刪除 `ALLOWED_EMAIL`、`GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`(Link 已改用 PGID,這三個沒用)。
 - **D-QA:owner 選定四角色**=資安/美術/工程/一般使用者,對 **PGID**(不是個人站)。已跑資安(bug-hunt,無 Critical/High)、美術、工程(QA 工程師);**尚缺「一般使用者」角色**(可對已部署的 live PGID 跑)。
-- **mail:owner 選 Path A**(Dovecot introspection + XOAUTH2 免密碼收發信)。設定已備妥在 `原專案代碼/webmail.pg72.tw/deploy/pgid/mail/`。**PGID 側前置**:`/oauth2/introspect` 需對 access token 回 `active:true` 且回 `email`(RFC 7662 只保證 username)——**尚未實作/驗證**。**套用到 VPS(23.146.248.189)屬高風險跨專案操作,需 3-agent 投票 + 維護窗口 + owner 在場**,不可半夜硬套。
+- **mail:owner 選 Path A**(Dovecot introspection + XOAUTH2 免密碼收發信)。設定已備妥在 `原專案代碼/webmail.pg72.tw/deploy/pgid/mail/`。**PGID 側前置**:`/oauth2/introspect` 需對 access token 回 `active:true` 且回 `email`(RFC 7662 只保證 username)——**尚未實作/驗證**。**套用到 mail VPS(address redacted)屬高風險跨專案操作,需維護窗口 + owner 在場**,不可半夜硬套；現行 agent 權限仍以本檔開頭與 `AGENTS.md` 為準。
 - **設計統一範圍(owner 確認)**:重塑 `ahsnccu-ann`、`原專案代碼/copy.pg72.tw`、`原專案代碼/link.pg72.tw`、`原專案代碼/upload.pg72.tw`、`~/diary.pg72.tw`(diary 可碰)。**排除**:status/PG-xugou(XUGOU fork)、anzhiyu/fuwari(部落格)、其他 clone、NightStudy、sm(owner 說不用)。主題用 `morden_dark.txt`。**尚未開始**(此 handoff 前正要派 agent)。
 
 **A1(已查明,無需 owner 動作)**:Status 的 Telegram token 是上游 XUGOU 作者 `zaunist` 2025-12-17 commit 的(非 owner),owner 無法也無需撤銷,只需確保不使用(已停用)。

@@ -10,14 +10,16 @@ PGID 帳號是你在所有 PG72 服務共用的身分。你不需要為每個服
 
 ## 第一次註冊
 
-目前的日常登入方式是 **Google** 與 **Passkey**。第一次建立帳號的方式是：
+Production 目前是 **invite-only beta**。Google email 已驗證只是必要條件，
+不會繞過邀請；未受邀者目前不能自行建立帳號。第一次建立帳號的方式是：
 
-1. 前往 PGID（`https://sso.pg72.tw`）或任一 PG72 服務的登入頁。
-2. 選擇「用 Google 登入」。
-3. 選擇你的 Google 帳號並同意基本資料授權。
-4. 只要你的 Google email 已通過驗證，PGID 就會在第一次登入時自動建立帳號。
+1. 先由管理員對你的 email 建立有效邀請。
+2. 前往 PGID（`https://sso.pg72.tw`）或任一已接入 PGID 的服務登入頁。
+3. 選擇「用 Google 登入」，並選擇邀請所對應、email 已驗證的 Google 帳號。
+4. PGID 同時確認有效邀請與 verified email 後，才會建立帳號並消耗邀請。
 
-> 若你的 Google email 未通過驗證，PGID 會拒絕建立帳號（訊息為「需要已驗證的 email」）。請先在 Google 完成 email 驗證。
+> 公開註冊程式路徑已有測試，但 production 尚未啟用。未來即使經安全
+> gate 與 owner 核准切換至 public，Google 仍必須提供 verified email。
 
 註冊完成後，強烈建議立刻[設定一組 Passkey](passkey.md)，之後就能無密碼快速登入，也多一層安全保障。
 
@@ -25,7 +27,9 @@ Telegram 不提供 verified email，所以不能用來建立新 PGID 帳號。Te
 
 ## 邀請
 
-除了公開註冊，PGID 也保留**邀請**機制。如果管理員以你的 email 發了邀請，你第一次登入時會自動取得邀請指定的角色（例如管理權限）。邀請是一次性的，用過即失效。
+邀請是目前 production 建立帳號的必要條件。如果管理員以你的 email 發了邀請，
+你第一次完成 Google 登入時會取得邀請指定的角色（例如管理權限）。邀請是
+一次性的，用過即失效；未來若 public 模式經核准啟用，邀請機制仍會保留。
 
 ## 登入
 

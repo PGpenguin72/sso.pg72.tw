@@ -597,6 +597,7 @@ describe("Mail introspection service client", () => {
     const admin = await createAuthenticatedUser(
       `${crypto.randomUUID()}@example.com`,
       "admin",
+      { passkeyStepUp: true },
     );
     await env.PG72_ID_DB.prepare(
       "UPDATE session SET createdAt = ? WHERE id = ?",
@@ -745,6 +746,7 @@ describe("Mail introspection service client", () => {
     const developer = await createAuthenticatedUser(
       `${crypto.randomUUID()}@example.com`,
       "developer",
+      { passkeyStepUp: true },
     );
     const createTarget = await exports.default.fetch(
       new Request(`${BASE_URL}/api/admin/clients`, {
@@ -766,6 +768,7 @@ describe("Mail introspection service client", () => {
     const admin = await createAuthenticatedUser(
       `${crypto.randomUUID()}@example.com`,
       "admin",
+      { passkeyStepUp: true },
     );
     const provisioned = await exports.default.fetch(
       new Request(PROVISION_URL, { method: "POST", headers: admin.headers }),
@@ -864,6 +867,7 @@ describe("Mail introspection service client", () => {
     const admin = await createAuthenticatedUser(
       `${crypto.randomUUID()}@example.com`,
       "admin",
+      { passkeyStepUp: true },
     );
     const auditBefore = await env.PG72_ID_DB.prepare(
       `SELECT
@@ -960,6 +964,7 @@ describe("Mail introspection service client", () => {
     const admin = await createAuthenticatedUser(
       `${crypto.randomUUID()}@example.com`,
       "admin",
+      { passkeyStepUp: true },
     );
     const provisioned = await exports.default.fetch(
       new Request(PROVISION_URL, { method: "POST", headers: admin.headers }),

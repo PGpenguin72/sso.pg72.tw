@@ -38,7 +38,9 @@ interface ClientRow {
 }
 
 async function createAdmin() {
-  return createAuthenticatedUser(`${crypto.randomUUID()}@example.com`, "admin");
+  return createAuthenticatedUser(`${crypto.randomUUID()}@example.com`, "admin", {
+    passkeyStepUp: true,
+  });
 }
 
 function createClientRequest(
@@ -983,6 +985,7 @@ describe("Admin OAuth client management", () => {
     const developer = await createAuthenticatedUser(
       `${crypto.randomUUID()}@example.com`,
       "developer",
+      { passkeyStepUp: true },
     );
     const clientId = `orphan-race-${crypto.randomUUID()}`;
     expect(

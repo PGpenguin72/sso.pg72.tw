@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   createAuthenticatedUser,
   createBootstrapAdmin,
+  grantPasskeyStepUpForTest,
   sha256Base64Url,
   type TestPlatformRole,
 } from "./helpers";
@@ -43,6 +44,12 @@ interface AuditRow {
 
 async function randomUser(role: TestPlatformRole = "user") {
   return createAuthenticatedUser(`${crypto.randomUUID()}@example.com`, role);
+}
+
+async function steppedUpUser(role: "admin" | "developer") {
+  const user = await randomUser(role);
+  await grantPasskeyStepUpForTest(user.userId, user.sessionId);
+  return user;
 }
 
 function listUsers(headers: Headers, query = ""): Promise<Response> {
@@ -666,9 +673,9 @@ describe("Developer-owned OAuth clients", () => {
   }
 
   it("scopes developer access to owned clients", async () => {
-    const developer = await randomUser("developer");
-    const otherDeveloper = await randomUser("developer");
-    const admin = await randomUser("admin");
+    const developer = await steppedUpUser("developer");
+    const otherDeveloper = await steppedUpUser("developer");
+    const admin = await steppedUpUser("admin");
 
     const ownedId = `owned-${crypto.randomUUID()}`;
     const createResponse = await createClient(
@@ -759,9 +766,9 @@ describe("Developer-owned OAuth clients", () => {
   });
 
   it("applies the ownership gate to consent trust metadata edits", async () => {
-    const developer = await randomUser("developer");
-    const otherDeveloper = await randomUser("developer");
-    const admin = await randomUser("admin");
+    const developer = await steppedUpUser("developer");
+    const otherDeveloper = await steppedUpUser("developer");
+    const admin = await steppedUpUser("admin");
 
     const ownedId = `trust-owned-${crypto.randomUUID()}`;
     expect(
@@ -798,8 +805,8 @@ describe("Developer-owned OAuth clients", () => {
   });
 
   it("treats unowned clients as admin-managed", async () => {
-    const developer = await randomUser("developer");
-    const admin = await randomUser("admin");
+    const developer = await steppedUpUser("developer");
+    const admin = await steppedUpUser("admin");
 
     const legacyId = `legacy-${crypto.randomUUID()}`;
     expect(
@@ -842,7 +849,7 @@ describe("Developer-owned OAuth clients", () => {
 
   it("disables and orphans owned clients when the owner is deleted", async () => {
     const admin = await randomUser("admin");
-    const developer = await randomUser("developer");
+    const developer = await steppedUpUser("developer");
     const bystander = await randomUser("user");
 
     const clientId = `orphan-${crypto.randomUUID()}`;
@@ -907,7 +914,7 @@ describe("Developer-owned OAuth clients", () => {
   });
 
   it("preserves and disables owned clients on self-deletion too", async () => {
-    const developer = await randomUser("developer");
+    const developer = await steppedUpUser("developer");
     const clientId = `self-orphan-${crypto.randomUUID()}`;
     expect(
       (await createClient(developer.headers, clientBody(clientId))).status,
@@ -935,6 +942,7 @@ describe("Role claims in issued ID tokens", () => {
   it("emits the effective role for a legacy bootstrap admin row", async () => {
     // Stored role stays a stale 'user'; the claim must still say bootadmin.
     const bootstrap = await createBootstrapAdmin();
+    await grantPasskeyStepUpForTest(bootstrap.userId, bootstrap.sessionId);
 
     const clientId = `claims-${crypto.randomUUID()}`;
     const redirectUri = `https://${clientId}.example/callback`;

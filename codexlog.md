@@ -69,3 +69,24 @@
   `pnpm --filter @pg72/id build` both passed. The build emitted only the
   expected local warning that required production secret names have no local
   values; no secret value was read or printed.
+
+## 2026-07-16 16:56 CST - Workerd security regression coverage
+
+- Added a real WebAuthn test authenticator: workerd generates a P-256 key pair,
+  stores its COSE public key, constructs authenticator/client data, signs the
+  assertion, and sends the DER signature through the production Worker route.
+  The SimpleWebAuthn verifier is not mocked.
+- Added seven focused cases: missing Passkey/no bootadmin bypass, no step-up
+  gate, successful assertion plus D1 timestamp/counter/audit and client
+  mutation, challenge replay, cross-session challenge use, expired step-up,
+  and missing authenticator user verification.
+- Existing client-mutation tests now opt into an explicit test-only stepped-up
+  fixture. The helper default remains no Passkey/no step-up, so negative tests
+  cannot be accidentally bypassed by a global fixture default.
+- The first worktree run lacked ignored `.dev.vars`, producing unrelated
+  missing-binding failures. No private file was read or copied. Tests were
+  rerun with explicit, non-functional vitest-only placeholders and localhost
+  configuration.
+- Verification: `pnpm --filter @pg72/id typecheck` passed; the complete
+  workerd run passed 173/173 tests in 14 files. This also validates D1 support
+  for the atomic `DELETE ... RETURNING` challenge-consumption statement.

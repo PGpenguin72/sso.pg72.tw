@@ -14,6 +14,34 @@ export async function sha256Base64Url(value: string): Promise<string> {
 
 export type TestPlatformRole = "admin" | "bootadmin" | "developer" | "user";
 
+export async function grantPasskeyStepUpForTest(
+  userId: string,
+  sessionId: string,
+  verifiedAt = new Date(),
+): Promise<void> {
+  const now = new Date().toISOString();
+  await env.PG72_ID_DB.batch([
+    env.PG72_ID_DB.prepare(
+      `INSERT INTO passkey
+        (id, name, publicKey, userId, credentialID, counter, deviceType,
+         backedUp, transports, createdAt, aaguid)
+       SELECT ?, ?, ?, ?, ?, 0, 'singleDevice', 0, '', ?, NULL
+        WHERE NOT EXISTS (SELECT 1 FROM passkey WHERE userId = ?)`,
+    ).bind(
+      crypto.randomUUID(),
+      "Test-only step-up credential",
+      btoa("test-only-placeholder-public-key"),
+      userId,
+      crypto.randomUUID(),
+      now,
+      userId,
+    ),
+    env.PG72_ID_DB.prepare(
+      `UPDATE session SET passkeyStepUpAt = ? WHERE id = ? AND userId = ?`,
+    ).bind(verifiedAt.toISOString(), sessionId, userId),
+  ]);
+}
+
 export async function createSessionFor(userId: string) {
   const sessionId = crypto.randomUUID();
   const token = crypto.randomUUID();
@@ -49,7 +77,7 @@ export async function createSessionFor(userId: string) {
 export async function createAuthenticatedUser(
   email: string,
   role: TestPlatformRole = "user",
-  options: { googleAccount?: boolean } = {},
+  options: { googleAccount?: boolean; passkeyStepUp?: boolean } = {},
 ) {
   const userId = crypto.randomUUID();
   // Real users sign up through Google, so a linked google account row exists
@@ -92,6 +120,9 @@ export async function createAuthenticatedUser(
   await env.PG72_ID_DB.batch(statements);
 
   const session = await createSessionFor(userId);
+  if (options.passkeyStepUp) {
+    await grantPasskeyStepUpForTest(userId, session.sessionId);
+  }
   return { ...session, googleAccountId };
 }
 

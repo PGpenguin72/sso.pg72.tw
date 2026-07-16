@@ -233,7 +233,9 @@ describe("Admin user management", () => {
     const tag = crypto.randomUUID().slice(0, 8);
     const first = await createAuthenticatedUser(`${tag}-a@example.com`);
     const second = await createAuthenticatedUser(`${tag}-b@example.com`);
-    const third = await createAuthenticatedUser(`${tag}-c@example.com`);
+    const third = await createAuthenticatedUser(`${tag}-c@example.com`, "user", {
+      accessLevel: "restricted",
+    });
     await createPasskey(first.userId);
     await env.PG72_ID_DB.prepare("UPDATE user SET name = ? WHERE id = ?")
       .bind(`named-${tag}`, second.userId)
@@ -290,6 +292,17 @@ describe("Admin user management", () => {
       pageTwoBody.users[0]?.id,
     );
 
+    const restrictedOnly = await listUsers(
+      admin.headers,
+      `?q=${encodeURIComponent(tag)}&access=restricted`,
+    );
+    const restrictedBody = (await restrictedOnly.json()) as UsersResponse;
+    expect(restrictedBody.total).toBe(1);
+    expect(restrictedBody.users[0]).toMatchObject({
+      id: third.userId,
+      accessLevel: "restricted",
+    });
+
     // LIKE wildcards are escaped, not interpreted.
     const wildcard = await listUsers(admin.headers, "?q=%25");
     expect(((await wildcard.json()) as UsersResponse).total).toBe(0);
@@ -297,6 +310,7 @@ describe("Admin user management", () => {
     // Invalid paging is rejected.
     expect((await listUsers(admin.headers, "?page=0")).status).toBe(400);
     expect((await listUsers(admin.headers, "?perPage=100")).status).toBe(400);
+    expect((await listUsers(admin.headers, "?access=unknown")).status).toBe(400);
 
     // Directory queries leave a redacted audit trail (no search text).
     const audit = await env.PG72_ID_DB.prepare(

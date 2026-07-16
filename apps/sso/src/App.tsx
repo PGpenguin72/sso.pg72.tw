@@ -15,6 +15,8 @@ import {
   Laptop,
   LogIn,
   LogOut,
+  LockKeyhole,
+  LockKeyholeOpen,
   Mail,
   Menu,
   MonitorSmartphone,
@@ -296,6 +298,8 @@ interface AdminOAuthClient {
 }
 
 type PlatformRole = "bootadmin" | "admin" | "developer" | "user";
+type AccountAccessLevel = "restricted" | "standard";
+type AdminUserAccessFilter = AccountAccessLevel | "all";
 
 interface AdminUserView {
   id: string;
@@ -303,6 +307,7 @@ interface AdminUserView {
   email: string;
   role: PlatformRole;
   status: "active" | "suspended";
+  accessLevel: AccountAccessLevel;
   createdAt: string;
   lastSessionAt: string | null;
   passkeyCount: number;
@@ -324,6 +329,11 @@ const ROLE_LABELS: Record<PlatformRole, string> = {
   user: "User",
 };
 
+const ACCESS_LEVEL_LABELS: Record<AccountAccessLevel, string> = {
+  restricted: "受限",
+  standard: "標準",
+};
+
 /** Mirrors the worker-side ASSIGNABLE_ROLES matrix for UI affordances. */
 const UI_ASSIGNABLE_ROLES: Record<PlatformRole, readonly PlatformRole[]> = {
   bootadmin: ["admin", "developer", "user"],
@@ -338,8 +348,10 @@ const ADMIN_USER_ERROR_MESSAGES: Record<string, string> = {
   cannot_suspend_self: "不能停權自己的帳號。",
   invalid_role: "角色無效。",
   rate_limited: "操作太頻繁，請稍後再試。",
+  restricted_account: "受限帳號必須先提升為標準帳號，才能變更角色。",
   role_not_assignable: "你的角色無法執行這個角色變更。",
   user_not_found: "找不到這個使用者，請重新整理列表。",
+  user_state_changed: "使用者狀態已變更，請重新整理後再試。",
 };
 
 function adminUserErrorMessage(code: unknown, fallback: string): string {
@@ -421,6 +433,7 @@ interface LoginMethodProvider {
 }
 
 interface LoginMethodsResponse {
+  accessLevel: AccountAccessLevel;
   providers: LoginMethodProvider[];
   passkeyCount: number;
   linkable: string[];
@@ -2459,6 +2472,8 @@ export function App() {
   const [adminUsersPage, setAdminUsersPage] = useState(1);
   const [adminUsersTotal, setAdminUsersTotal] = useState(0);
   const [adminUsersQuery, setAdminUsersQuery] = useState("");
+  const [adminUsersAccess, setAdminUsersAccess] =
+    useState<AdminUserAccessFilter>("all");
   const [userSearchDraft, setUserSearchDraft] = useState("");
   const [viewerRole, setViewerRole] = useState<PlatformRole | null>(null);
   const [userPendingDelete, setUserPendingDelete] = useState<string | null>(
@@ -2649,7 +2664,11 @@ export function App() {
   }, []);
 
   const loadAdminUsers = useCallback(
-    async (page: number, query: string) => {
+    async (
+      page: number,
+      query: string,
+      access: AdminUserAccessFilter,
+    ) => {
       setAdminUsersState("loading");
       setUserPendingDelete(null);
       try {
@@ -2658,6 +2677,7 @@ export function App() {
           perPage: "10",
         });
         if (query) params.set("q", query);
+        if (access !== "all") params.set("access", access);
         const response = await fetch(`/api/admin/users?${params}`, {
           credentials: "include",
           cache: "no-store",
@@ -2673,6 +2693,7 @@ export function App() {
         setAdminUsers(data.users);
         setAdminUsersPage(data.page);
         setAdminUsersTotal(data.total);
+        setAdminUsersAccess(access);
         setViewerRole(data.viewerRole);
         setAdminUsersState("ready");
       } catch {
@@ -2698,7 +2719,7 @@ export function App() {
         void loadAdminClients();
       }
       if (canManageUsers) {
-        void loadAdminUsers(1, "");
+        void loadAdminUsers(1, "", "all");
       }
     }
   }, [
@@ -3183,7 +3204,11 @@ export function App() {
         setNotice(
           `這個 Email 已有帳號，已直接套用角色 ${ROLE_LABELS[inviteRole]}。`,
         );
-        await loadAdminUsers(adminUsersPage, adminUsersQuery);
+        await loadAdminUsers(
+          adminUsersPage,
+          adminUsersQuery,
+          adminUsersAccess,
+        );
       } else {
         setNotice("邀請資格已建立，有效期限 7 天。");
       }
@@ -3217,7 +3242,51 @@ export function App() {
         return;
       }
       setNotice(`已將 ${user.email} 的角色變更為 ${ROLE_LABELS[role]}。`);
-      await loadAdminUsers(adminUsersPage, adminUsersQuery);
+      await loadAdminUsers(
+        adminUsersPage,
+        adminUsersQuery,
+        adminUsersAccess,
+      );
+    } catch {
+      setAdminUsersError("網路連線失敗，請稍後再試。");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const toggleUserAccess = async (user: AdminUserView) => {
+    const restricted = user.accessLevel === "standard";
+    setBusy(`user:${user.id}`);
+    setAdminUsersError(null);
+    try {
+      const response = await fetch(
+        `/api/admin/users/${encodeURIComponent(user.id)}/access`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ restricted }),
+        },
+      );
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        setAdminUsersError(
+          adminUserErrorMessage(payload.error, "無法更新帳號存取層級。"),
+        );
+        return;
+      }
+      setNotice(
+        restricted
+          ? `${user.email} 已設為受限帳號，角色降為 User，sessions 與 tokens 已撤銷。`
+          : `${user.email} 已提升為標準帳號；角色仍需另外指派。`,
+      );
+      await loadAdminUsers(
+        adminUsersPage,
+        adminUsersQuery,
+        adminUsersAccess,
+      );
     } catch {
       setAdminUsersError("網路連線失敗，請稍後再試。");
     } finally {
@@ -3253,7 +3322,11 @@ export function App() {
           ? `${user.email} 已停權，sessions 與 tokens 已撤銷。`
           : `${user.email} 已復權。`,
       );
-      await loadAdminUsers(adminUsersPage, adminUsersQuery);
+      await loadAdminUsers(
+        adminUsersPage,
+        adminUsersQuery,
+        adminUsersAccess,
+      );
     } catch {
       setAdminUsersError("網路連線失敗，請稍後再試。");
     } finally {
@@ -3286,7 +3359,11 @@ export function App() {
       setNotice(
         `已撤銷 ${user.email} 的 ${payload.revokedSessions ?? 0} 個 sessions。`,
       );
-      await loadAdminUsers(adminUsersPage, adminUsersQuery);
+      await loadAdminUsers(
+        adminUsersPage,
+        adminUsersQuery,
+        adminUsersAccess,
+      );
     } catch {
       setAdminUsersError("網路連線失敗，請稍後再試。");
     } finally {
@@ -3316,7 +3393,11 @@ export function App() {
         return;
       }
       setNotice(`使用者 ${user.email} 已刪除。`);
-      await loadAdminUsers(adminUsersPage, adminUsersQuery);
+      await loadAdminUsers(
+        adminUsersPage,
+        adminUsersQuery,
+        adminUsersAccess,
+      );
     } catch {
       setAdminUsersError("網路連線失敗，請稍後再試。");
     } finally {
@@ -4264,7 +4345,7 @@ export function App() {
                       event.preventDefault();
                       const query = userSearchDraft.trim();
                       setAdminUsersQuery(query);
-                      void loadAdminUsers(1, query);
+                      void loadAdminUsers(1, query, adminUsersAccess);
                     }}
                   >
                     <label>
@@ -4281,6 +4362,21 @@ export function App() {
                           autoComplete="off"
                         />
                       </div>
+                    </label>
+                    <label>
+                      <span>存取層級</span>
+                      <select
+                        value={adminUsersAccess}
+                        onChange={(event) => {
+                          const access = event.target
+                            .value as AdminUserAccessFilter;
+                          void loadAdminUsers(1, adminUsersQuery, access);
+                        }}
+                      >
+                        <option value="all">全部</option>
+                        <option value="restricted">受限</option>
+                        <option value="standard">標準</option>
+                      </select>
                     </label>
                     <button
                       type="submit"
@@ -4308,6 +4404,11 @@ export function App() {
                             isBootadmin ||
                             !assignable.includes(user.role);
                           const manageLocked = isSelf || isBootadmin;
+                          const accessLocked =
+                            manageLocked ||
+                            (user.accessLevel === "standard" &&
+                              user.role !== "user" &&
+                              !assignable.includes(user.role));
                           const roleOptions = assignable.includes(user.role)
                             ? assignable
                             : [user.role, ...assignable];
@@ -4331,6 +4432,7 @@ export function App() {
                                   {user.status === "suspended"
                                     ? " · 已停權"
                                     : " · Active"}
+                                  {` · ${ACCESS_LEVEL_LABELS[user.accessLevel]}`}
                                   {` · ${user.passkeyCount} passkeys`}
                                   {` · ${user.authorizedAppCount} 個授權 app`}
                                 </span>
@@ -4346,7 +4448,11 @@ export function App() {
                                   className="role-select"
                                   aria-label={`變更 ${user.email} 的角色`}
                                   value={user.role}
-                                  disabled={userBusy || roleLocked}
+                                  disabled={
+                                    userBusy ||
+                                    roleLocked ||
+                                    user.accessLevel === "restricted"
+                                  }
                                   onChange={(event) => {
                                     const role = event.target
                                       .value as PlatformRole;
@@ -4361,6 +4467,28 @@ export function App() {
                                     </option>
                                   ))}
                                 </select>
+                                <button
+                                  type="button"
+                                  className="icon-button"
+                                  aria-label={
+                                    user.accessLevel === "standard"
+                                      ? `限制 ${user.email}`
+                                      : `提升 ${user.email} 為標準帳號`
+                                  }
+                                  title={
+                                    user.accessLevel === "standard"
+                                      ? "設為受限帳號並撤銷 sessions/tokens"
+                                      : "提升為標準帳號"
+                                  }
+                                  disabled={userBusy || accessLocked}
+                                  onClick={() => void toggleUserAccess(user)}
+                                >
+                                  {user.accessLevel === "standard" ? (
+                                    <LockKeyhole aria-hidden="true" />
+                                  ) : (
+                                    <LockKeyholeOpen aria-hidden="true" />
+                                  )}
+                                </button>
                                 <button
                                   type="button"
                                   className="icon-button"
@@ -4435,7 +4563,11 @@ export function App() {
                           type="button"
                           className="button button-secondary button-compact"
                           onClick={() =>
-                            void loadAdminUsers(adminUsersPage, adminUsersQuery)
+                            void loadAdminUsers(
+                              adminUsersPage,
+                              adminUsersQuery,
+                              adminUsersAccess,
+                            )
                           }
                         >
                           <RefreshCw aria-hidden="true" />
@@ -4461,6 +4593,7 @@ export function App() {
                           void loadAdminUsers(
                             adminUsersPage - 1,
                             adminUsersQuery,
+                            adminUsersAccess,
                           )
                         }
                       >
@@ -4477,6 +4610,7 @@ export function App() {
                           void loadAdminUsers(
                             adminUsersPage + 1,
                             adminUsersQuery,
+                            adminUsersAccess,
                           )
                         }
                       >

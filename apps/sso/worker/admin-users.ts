@@ -269,6 +269,7 @@ adminUserRoutes.get("/", async (c) => {
   if (!gate.ok) return gate.response;
 
   const query = (c.req.query("q") ?? "").trim();
+  const access = c.req.query("access") ?? "all";
   const page = Number.parseInt(c.req.query("page") ?? "1", 10);
   const perPage = Number.parseInt(
     c.req.query("perPage") ?? String(USERS_PER_PAGE_DEFAULT),
@@ -276,6 +277,7 @@ adminUserRoutes.get("/", async (c) => {
   );
   if (
     query.length > USER_QUERY_MAX_LENGTH ||
+    (access !== "all" && access !== "standard" && access !== "restricted") ||
     !Number.isInteger(page) ||
     page < 1 ||
     page > USERS_PAGE_MAX ||
@@ -289,7 +291,8 @@ adminUserRoutes.get("/", async (c) => {
   const like = `%${query.replaceAll(/[\\%_]/g, (char) => `\\${char}`)}%`;
   const filter = `WHERE (?1 = ''
         OR u.email LIKE ?2 ESCAPE '\\'
-        OR u.name LIKE ?2 ESCAPE '\\')`;
+        OR u.name LIKE ?2 ESCAPE '\\')
+      AND (?3 = 'all' OR u.accessLevel = ?3)`;
 
   const [listing, count] = await Promise.all([
     c.env.PG72_ID_DB.prepare(
@@ -303,14 +306,14 @@ adminUserRoutes.get("/", async (c) => {
          FROM user u
         ${filter}
         ORDER BY u.createdAt DESC, u.id ASC
-        LIMIT ?3 OFFSET ?4`,
+        LIMIT ?4 OFFSET ?5`,
     )
-      .bind(query, like, perPage, (page - 1) * perPage)
+      .bind(query, like, access, perPage, (page - 1) * perPage)
       .all<AdminUserRow>(),
     c.env.PG72_ID_DB.prepare(
       `SELECT COUNT(*) AS total FROM user u ${filter}`,
     )
-      .bind(query, like)
+      .bind(query, like, access)
       .first<CountRow>(),
   ]);
 
@@ -322,7 +325,11 @@ adminUserRoutes.get("/", async (c) => {
     eventType: "admin.users_listed",
     outcome: "success",
     actorUserId: gate.actor.userId,
-    metadata: { filtered: query.length > 0, page },
+    metadata: {
+      accessFilter: access,
+      filtered: query.length > 0 || access !== "all",
+      page,
+    },
   });
 
   return c.json({

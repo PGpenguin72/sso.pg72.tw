@@ -1698,7 +1698,17 @@ svg {
 /* Admin user management */
 
 .user-search-form {
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(130px, 180px) auto;
+}
+
+@media (max-width: 760px) {
+  .user-search-form {
+    grid-template-columns: 1fr;
+  }
+
+  .user-search-form .button {
+    width: 100%;
+  }
 }
 
 .role-select {

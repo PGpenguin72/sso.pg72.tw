@@ -321,6 +321,42 @@ describe("telegram login endpoint", () => {
 });
 
 describe("telegram linking", () => {
+  it("blocks optional linking for a restricted account with a redacted audit", async () => {
+    const restricted = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "user",
+      { accessLevel: "restricted" },
+    );
+    const telegramId = randomTelegramId();
+    const response = await exports.default.fetch(
+      new Request(`${BASE_URL}/api/auth/telegram/link`, {
+        method: "POST",
+        headers: restricted.headers,
+        body: JSON.stringify(await telegramPayload({ id: telegramId })),
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "forbidden" });
+    const linked = await env.PG72_ID_DB.prepare(
+      "SELECT id FROM account WHERE providerId = 'telegram' AND accountId = ?",
+    )
+      .bind(telegramId)
+      .first();
+    expect(linked).toBeNull();
+    const audit = await env.PG72_ID_DB.prepare(
+      `SELECT metadata_json
+         FROM audit_event
+        WHERE event_type = 'account.restricted_action_denied'
+          AND subject_id = ?
+        ORDER BY occurred_at DESC LIMIT 1`,
+    )
+      .bind(restricted.userId)
+      .first<{ metadata_json: string | null }>();
+    expect(audit?.metadata_json).toBe('{"surface":"provider_link"}');
+    expect(audit?.metadata_json).not.toContain(telegramId);
+  });
+
   it("atomically permits only one owner under concurrent links", async () => {
     const telegramId = randomTelegramId();
     const first = await createAuthenticatedUser(

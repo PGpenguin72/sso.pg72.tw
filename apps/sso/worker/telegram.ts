@@ -4,6 +4,10 @@ import { makeSignature } from "better-auth/crypto";
 
 import { recordAudit } from "./audit";
 import { createAuth } from "./auth";
+import {
+  readAccountAccessState,
+  recordRestrictedActionDenied,
+} from "./account-access";
 import { readRuntimeConfig, type RuntimeConfig } from "./config";
 import { recordLoginAudit } from "./security-activity";
 
@@ -360,8 +364,30 @@ telegramRoutes.post("/api/auth/telegram", async (c) => {
 telegramRoutes.post("/api/auth/telegram/link", async (c) => {
   const auth = createAuth(c.env, c.executionCtx);
   const session = await auth.api.getSession({ headers: c.req.raw.headers });
-  if (!session || session.user.status !== "active") {
+  if (!session) {
     return c.json({ error: "unauthorized" }, 401);
+  }
+  const access = await readAccountAccessState(c.env, session.user.id);
+  if (!access || access.status !== "active") {
+    return c.json({ error: "unauthorized" }, 401);
+  }
+  if (access.accessLevel === "restricted") {
+    try {
+      await recordRestrictedActionDenied(
+        c.env,
+        session.user.id,
+        "provider_link",
+        c.executionCtx,
+      );
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: "restricted_action_audit_failed",
+          error: error instanceof Error ? error.name : "UnknownError",
+        }),
+      );
+    }
+    return c.json({ error: "forbidden" }, 403);
   }
 
   const verified = await verifiedTelegramUser(c);

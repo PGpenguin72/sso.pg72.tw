@@ -1,4 +1,8 @@
 import { normalizeEmail, type RuntimeConfig } from "./config";
+import {
+  accountAccessLevel,
+  type AccountAccessLevel,
+} from "./account-access";
 
 /**
  * Four-tier platform role hierarchy.
@@ -102,10 +106,12 @@ export function effectivePlatformRole(
   storedRole: unknown,
   email: string,
   config: Pick<RuntimeConfig, "bootstrapAdminEmail">,
+  accessLevel: AccountAccessLevel = "standard",
 ): PlatformRole {
   if (normalizeEmail(email) === config.bootstrapAdminEmail) {
     return "bootadmin";
   }
+  if (accountAccessLevel(accessLevel) === "restricted") return "user";
   if (storedRole === "bootadmin") return "admin";
   return isPlatformRole(storedRole) ? storedRole : "user";
 }
@@ -113,6 +119,7 @@ export function effectivePlatformRole(
 export type AdminActionDenial =
   | "bootadmin_protected"
   | "cannot_modify_self"
+  | "restricted_account"
   | "role_not_assignable";
 
 export interface RoleChangeRequest {

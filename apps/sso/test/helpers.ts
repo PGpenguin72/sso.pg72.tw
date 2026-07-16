@@ -13,6 +13,7 @@ export async function sha256Base64Url(value: string): Promise<string> {
 }
 
 export type TestPlatformRole = "admin" | "bootadmin" | "developer" | "user";
+export type TestAccountAccessLevel = "restricted" | "standard";
 
 export async function grantPasskeyStepUpForTest(
   userId: string,
@@ -77,7 +78,11 @@ export async function createSessionFor(userId: string) {
 export async function createAuthenticatedUser(
   email: string,
   role: TestPlatformRole = "user",
-  options: { googleAccount?: boolean; passkeyStepUp?: boolean } = {},
+  options: {
+    accessLevel?: TestAccountAccessLevel;
+    googleAccount?: boolean;
+    passkeyStepUp?: boolean;
+  } = {},
 ) {
   const userId = crypto.randomUUID();
   // Real users sign up through Google, so a linked google account row exists
@@ -85,12 +90,17 @@ export async function createAuthenticatedUser(
   const googleAccountId =
     options.googleAccount === false ? null : crypto.randomUUID();
   const now = new Date();
+  const accessLevel = options.accessLevel ?? "standard";
+  const publicAcceptance =
+    accessLevel === "restricted" ? "2026-07-17.test" : null;
 
   const statements = [
     env.PG72_ID_DB.prepare(
       `INSERT INTO user
-        (id, name, email, emailVerified, createdAt, updatedAt, role, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        (id, name, email, emailVerified, createdAt, updatedAt, role, status,
+         accessLevel, termsAcceptedVersion, privacyAcceptedVersion,
+         legalAcceptedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       userId,
       "Test User",
@@ -100,6 +110,10 @@ export async function createAuthenticatedUser(
       now.toISOString(),
       role,
       "active",
+      accessLevel,
+      publicAcceptance,
+      publicAcceptance,
+      accessLevel === "restricted" ? now.toISOString() : null,
     ),
   ];
   if (googleAccountId) {
@@ -123,7 +137,7 @@ export async function createAuthenticatedUser(
   if (options.passkeyStepUp) {
     await grantPasskeyStepUpForTest(userId, session.sessionId);
   }
-  return { ...session, googleAccountId };
+  return { ...session, accessLevel, googleAccountId };
 }
 
 /**

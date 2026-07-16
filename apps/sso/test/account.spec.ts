@@ -337,6 +337,7 @@ describe("login methods", () => {
     );
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
+      accessLevel: "standard",
       providers: [
         expect.objectContaining({
           id: googleAccountId,

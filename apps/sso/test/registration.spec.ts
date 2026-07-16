@@ -525,6 +525,7 @@ describe("registration policy", () => {
     });
 
     expect(grant).toMatchObject({
+      accessLevel: "restricted",
       privacyAcceptedVersion: "2026-07-17.test",
       role: "user",
       status: "active",
@@ -603,7 +604,11 @@ describe("registration policy", () => {
       registrationBinding: binding.registrationBinding,
     });
 
-    expect(grant).toMatchObject({ role: "admin", status: "active" });
+    expect(grant).toMatchObject({
+      accessLevel: "standard",
+      role: "admin",
+      status: "active",
+    });
   });
 
   it("public mode grants the bootstrap administrator the bootadmin role", async () => {
@@ -616,7 +621,11 @@ describe("registration policy", () => {
       registrationBinding: binding.registrationBinding,
     });
 
-    expect(grant).toMatchObject({ role: "bootadmin", status: "active" });
+    expect(grant).toMatchObject({
+      accessLevel: "standard",
+      role: "bootadmin",
+      status: "active",
+    });
   });
 
   it("rejects a replayed public registration intent", async () => {
@@ -724,7 +733,11 @@ describe("registration policy", () => {
       providerId: "github",
     });
 
-    expect(grant).toEqual({ role: "user", status: "active" });
+    expect(grant).toEqual({
+      accessLevel: "standard",
+      role: "user",
+      status: "active",
+    });
   });
 
   it("invite mode also rejects unverified emails", async () => {

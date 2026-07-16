@@ -5,6 +5,11 @@ import { oauthProvider } from "@better-auth/oauth-provider";
 import { passkey } from "@better-auth/passkey";
 
 import { recordAudit, type WaitUntilContext } from "./audit";
+import {
+  accountAccessLevel,
+  providerAccountInsertAllowed,
+  recordRestrictedActionDenied,
+} from "./account-access";
 import { ownedClientShutdownStatements } from "./client-ownership";
 import {
   CLIENT_SECRET_PREFIX,
@@ -103,6 +108,12 @@ export function createAuth(
     },
     user: {
       additionalFields: {
+        accessLevel: {
+          type: ["standard", "restricted"],
+          required: false,
+          defaultValue: "standard",
+          input: false,
+        },
         role: {
           type: ["user", "developer", "admin", "bootadmin"],
           required: false,
@@ -298,6 +309,27 @@ export function createAuth(
       },
       account: {
         create: {
+          before: async (account) => {
+            if (
+              !(await providerAccountInsertAllowed(
+                env,
+                account.userId,
+                account.providerId,
+              ))
+            ) {
+              await recordRestrictedActionDenied(
+                env,
+                account.userId,
+                "provider_link",
+                executionCtx,
+              );
+              throw new APIError("FORBIDDEN", {
+                code: "ACCOUNT_ACTION_RESTRICTED",
+                message: "This action is not available for this account.",
+              });
+            }
+            return { data: account };
+          },
           // Fires for the initial sign-up account and for every explicit
           // `/link-social` completion (implicit linking stays disabled).
           after: async (account) => {
@@ -381,7 +413,12 @@ export function createAuth(
         clientPrivileges: ({ user }) =>
           user !== undefined &&
           hasPermission(
-            effectivePlatformRole(user.role, user.email, config),
+            effectivePlatformRole(
+              user.role,
+              user.email,
+              config,
+              accountAccessLevel(user.accessLevel),
+            ),
             "clients.manage",
           ),
         prefix: {
@@ -394,6 +431,7 @@ export function createAuth(
             user.role,
             user.email,
             config,
+            accountAccessLevel(user.accessLevel),
           ),
         }),
         authorizeOpaqueAccessTokenIntrospection: ({
@@ -423,6 +461,7 @@ export function createAuth(
             user.role,
             user.email,
             config,
+            accountAccessLevel(user.accessLevel),
           ),
         }),
         advertisedMetadata: {

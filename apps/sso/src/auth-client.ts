@@ -12,6 +12,12 @@ export const authClient = createAuthClient({
   plugins: [
     inferAdditionalFields({
       user: {
+        accessLevel: {
+          type: ["standard", "restricted"],
+          required: false,
+          defaultValue: "standard",
+          input: false,
+        },
         role: {
           type: ["user", "developer", "admin", "bootadmin"],
           required: false,

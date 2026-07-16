@@ -2,6 +2,10 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 
 import { accountRoutes } from "./account";
+import {
+  readAccountAccessState,
+  recordRestrictedActionDenied,
+} from "./account-access";
 import { adminClientRoutes } from "./admin-clients";
 import { requireAdminPermission } from "./admin-gate";
 import {
@@ -334,6 +338,7 @@ function isSensitiveAuthPath(pathname: string): boolean {
     pathname.startsWith("/sign-in/") ||
     pathname.startsWith("/callback/") ||
     pathname.startsWith("/passkey/") ||
+    pathname === "/link-social" ||
     pathname === "/oauth2/authorize" ||
     pathname === "/oauth2/token" ||
     pathname === "/oauth2/introspect" ||
@@ -1305,6 +1310,34 @@ app.all("*", async (c) => {
     }
 
     const auth = createAuth(c.env, c.executionCtx);
+
+    if (pathname === "/link-social") {
+      const session = await auth.api.getSession({ headers: c.req.raw.headers });
+      if (session) {
+        const access = await readAccountAccessState(c.env, session.user.id);
+        if (!access || access.status !== "active") {
+          return c.json({ error: "forbidden" }, 403);
+        }
+        if (access.accessLevel === "restricted") {
+          try {
+            await recordRestrictedActionDenied(
+              c.env,
+              session.user.id,
+              "provider_link",
+              c.executionCtx,
+            );
+          } catch (error) {
+            console.error(
+              JSON.stringify({
+                event: "restricted_action_audit_failed",
+                error: error instanceof Error ? error.name : "UnknownError",
+              }),
+            );
+          }
+          return c.json({ error: "forbidden" }, 403);
+        }
+      }
+    }
 
     // For the self security-activity paths (session revocation, passkey
     // registration, consent), capture the actor before the handler runs:

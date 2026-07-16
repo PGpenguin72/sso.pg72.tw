@@ -2,6 +2,10 @@ import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 
 import {
+  readAccountAccessState,
+  type AccountAccessLevel,
+} from "./account-access";
+import {
   base64ToBytes,
   bytesToBase64,
   decodeDataUrl,
@@ -192,7 +196,7 @@ async function readJson<T>(request: Request): Promise<T | null> {
 }
 
 type UserGate =
-  | { ok: true; userId: string }
+  | { ok: true; accessLevel: AccountAccessLevel; userId: string }
   | { ok: false; response: Response };
 
 async function requireActiveUser(
@@ -201,7 +205,11 @@ async function requireActiveUser(
 ): Promise<UserGate> {
   const auth = createAuth(c.env, c.executionCtx);
   const session = await auth.api.getSession({ headers: c.req.raw.headers });
-  if (!session || session.user.status !== "active") {
+  if (!session) {
+    return { ok: false, response: c.json({ error: "unauthorized" }, 401) };
+  }
+  const access = await readAccountAccessState(c.env, session.user.id);
+  if (!access || access.status !== "active") {
     return { ok: false, response: c.json({ error: "unauthorized" }, 401) };
   }
 
@@ -214,7 +222,11 @@ async function requireActiveUser(
     }
   }
 
-  return { ok: true, userId: session.user.id };
+  return {
+    ok: true,
+    accessLevel: access.accessLevel,
+    userId: session.user.id,
+  };
 }
 
 async function auditAccountEvent(
@@ -425,6 +437,7 @@ accountRoutes.get("/api/account/login-methods", async (c) => {
   );
 
   return c.json({
+    accessLevel: gate.accessLevel,
     providers: accounts.results.map((account) => ({
       id: account.id,
       provider: account.providerId,
@@ -432,9 +445,12 @@ accountRoutes.get("/api/account/login-methods", async (c) => {
       canUnlink: totalMethods > 1,
     })),
     passkeyCount: counts.passkeys,
-    linkable: LINKABLE_PROVIDERS.filter(
-      (provider) => !linkedProviders.has(provider),
-    ),
+    linkable:
+      gate.accessLevel === "standard"
+        ? LINKABLE_PROVIDERS.filter(
+            (provider) => !linkedProviders.has(provider),
+          )
+        : [],
   });
 });
 

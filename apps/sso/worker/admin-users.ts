@@ -1,7 +1,16 @@
 import { Hono, type Context } from "hono";
 
+import type { AccountAccessLevel } from "./account-access";
 import { requireAdminPermission, type AdminActor } from "./admin-gate";
-import { recordAudit, type AuditMetadata, type AuditOutcome } from "./audit";
+import {
+  auditInsertForExistingUserStatement,
+  createAuditEvent,
+  enqueueSecurityEvent,
+  recordAudit,
+  type AuditMetadata,
+  type AuditOutcome,
+  type ExistingUserAuditGuard,
+} from "./audit";
 import { ownedClientShutdownStatements } from "./client-ownership";
 import { readRuntimeConfig } from "./config";
 import {
@@ -28,12 +37,17 @@ interface StatusInput {
   suspended?: unknown;
 }
 
+interface AccessInput {
+  restricted?: unknown;
+}
+
 interface AdminUserRow {
   id: string;
   name: string | null;
   email: string;
   role: string | null;
   status: string;
+  accessLevel: AccountAccessLevel;
   createdAt: string;
   lastSessionAt: string | null;
   passkeyCount: number;
@@ -45,6 +59,7 @@ interface TargetUserRow {
   email: string;
   role: string | null;
   status: string;
+  accessLevel: AccountAccessLevel;
 }
 
 interface CountRow {
@@ -103,7 +118,7 @@ async function fetchTarget(
   userId: string,
 ): Promise<ResolvedTarget | null> {
   const row = await c.env.PG72_ID_DB.prepare(
-    "SELECT id, email, role, status FROM user WHERE id = ? LIMIT 1",
+    "SELECT id, email, role, status, accessLevel FROM user WHERE id = ? LIMIT 1",
   )
     .bind(userId)
     .first<TargetUserRow>();
@@ -146,16 +161,73 @@ async function deniedRoleChange(
     targetRole: target.effectiveRole,
     targetUserId: target.row.id,
   });
-  if (denial && denial !== "cannot_modify_self") {
+  const restrictedDenial =
+    target.row.accessLevel === "restricted" && nextRole !== "user"
+      ? "restricted_account"
+      : null;
+  const finalDenial = denial ?? restrictedDenial;
+  if (finalDenial && finalDenial !== "cannot_modify_self") {
     await auditUserAdmin(c, {
       eventType: "user.role_changed",
       outcome: "denied",
       actorUserId: actor.userId,
       subjectId: target.row.id,
-      metadata: { reason: denial, to: nextRole, via },
+      metadata: { reason: finalDenial, to: nextRole, via },
     });
   }
-  return denial;
+  return finalDenial;
+}
+
+function transitionGuard(target: ResolvedTarget): ExistingUserAuditGuard {
+  return {
+    expectedAccessLevel: target.row.accessLevel,
+    expectedRole: target.row.role,
+    expectedStatus: target.row.status,
+    userId: target.row.id,
+  };
+}
+
+function guardedUserTransitionUpdate(
+  c: Context<AppEnv>,
+  eventId: string,
+  target: ResolvedTarget,
+  next: {
+    accessLevel: AccountAccessLevel;
+    role: string | null;
+    status: string;
+    updatedAt: string;
+  },
+): D1PreparedStatement {
+  return c.env.PG72_ID_DB.prepare(
+    `UPDATE user
+        SET accessLevel = ?, role = ?, status = ?, updatedAt = ?
+      WHERE id = ?
+        AND accessLevel = ?
+        AND role IS ?
+        AND status = ?
+        AND EXISTS (SELECT 1 FROM audit_event WHERE id = ?)`,
+  ).bind(
+    next.accessLevel,
+    next.role,
+    next.status,
+    next.updatedAt,
+    target.row.id,
+    target.row.accessLevel,
+    target.row.role,
+    target.row.status,
+    eventId,
+  );
+}
+
+function guardedUserStatement(
+  c: Context<AppEnv>,
+  eventId: string,
+  sql: string,
+  ...bindings: unknown[]
+): D1PreparedStatement {
+  return c.env.PG72_ID_DB.prepare(
+    `${sql} AND EXISTS (SELECT 1 FROM audit_event WHERE id = ?)`,
+  ).bind(...bindings, eventId);
 }
 
 /**
@@ -221,7 +293,7 @@ adminUserRoutes.get("/", async (c) => {
 
   const [listing, count] = await Promise.all([
     c.env.PG72_ID_DB.prepare(
-      `SELECT u.id, u.name, u.email, u.role, u.status, u.createdAt,
+      `SELECT u.id, u.name, u.email, u.role, u.status, u.accessLevel, u.createdAt,
               (SELECT MAX(s.updatedAt) FROM session s
                 WHERE s.userId = u.id) AS lastSessionAt,
               (SELECT COUNT(*) FROM passkey p
@@ -264,6 +336,7 @@ adminUserRoutes.get("/", async (c) => {
       email: row.email,
       role: effectivePlatformRole(row.role, row.email, config),
       status: row.status,
+      accessLevel: row.accessLevel,
       createdAt: row.createdAt,
       lastSessionAt: row.lastSessionAt,
       passkeyCount: row.passkeyCount,
@@ -332,41 +405,162 @@ adminUserRoutes.post("/:userId/status", async (c) => {
   if (denial) return denialResponse(c, denial);
 
   const now = new Date().toISOString();
-  const statements = [
-    c.env.PG72_ID_DB.prepare(
-      "UPDATE user SET status = ?, updatedAt = ? WHERE id = ?",
-    ).bind(input.suspended ? "suspended" : "active", now, userId),
-  ];
-
-  if (input.suspended) {
-    statements.push(
-      c.env.PG72_ID_DB.prepare("DELETE FROM session WHERE userId = ?").bind(
-        userId,
-      ),
-      c.env.PG72_ID_DB.prepare(
-        "UPDATE oauthRefreshToken SET revoked = ? WHERE userId = ? AND revoked IS NULL",
-      ).bind(now, userId),
-      c.env.PG72_ID_DB.prepare(
-        "DELETE FROM oauthAccessToken WHERE userId = ?",
-      ).bind(userId),
-    );
-  }
-
-  const results = await c.env.PG72_ID_DB.batch(statements);
-  if (results[0]?.meta.changes !== 1) {
-    return c.json({ error: "user_not_found" }, 404);
-  }
-
-  await auditUserAdmin(c, {
+  const event = createAuditEvent({
     eventType: input.suspended ? "user.suspended" : "user.reactivated",
     outcome: "success",
     actorUserId: gate.actor.userId,
     subjectId: userId,
+    metadata: { accessLevel: target.row.accessLevel },
   });
+  const statements = [
+    auditInsertForExistingUserStatement(c.env, event, transitionGuard(target)),
+    guardedUserTransitionUpdate(c, event.eventId, target, {
+      accessLevel: target.row.accessLevel,
+      role: target.row.role,
+      status: input.suspended ? "suspended" : "active",
+      updatedAt: now,
+    }),
+  ];
+
+  if (input.suspended) {
+    statements.push(
+      guardedUserStatement(
+        c,
+        event.eventId,
+        "DELETE FROM session WHERE userId = ?",
+        userId,
+      ),
+      guardedUserStatement(
+        c,
+        event.eventId,
+        "UPDATE oauthRefreshToken SET revoked = ? WHERE userId = ? AND revoked IS NULL",
+        now,
+        userId,
+      ),
+      guardedUserStatement(
+        c,
+        event.eventId,
+        "DELETE FROM oauthAccessToken WHERE userId = ?",
+        userId,
+      ),
+    );
+  }
+
+  const results = await c.env.PG72_ID_DB.batch(statements);
+  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+    return c.json({ error: "user_state_changed" }, 409);
+  }
+  await enqueueSecurityEvent(c.env, event, c.executionCtx);
 
   return c.json({
     userId,
     status: input.suspended ? "suspended" : "active",
+    accessLevel: target.row.accessLevel,
+    at: now,
+  });
+});
+
+adminUserRoutes.post("/:userId/access", async (c) => {
+  const gate = await requireAdminPermission(c, "users.manage");
+  if (!gate.ok) return gate.response;
+
+  const userId = c.req.param("userId");
+  const input = await readJson<AccessInput>(c.req.raw);
+  if (!validUserId(userId) || typeof input?.restricted !== "boolean") {
+    return c.json({ error: "invalid_request" }, 400);
+  }
+
+  const target = await fetchTarget(c, userId);
+  if (!target) return c.json({ error: "user_not_found" }, 404);
+  let denial = denyUserManagement({
+    actorUserId: gate.actor.userId,
+    targetProtected: target.protected,
+    targetUserId: userId,
+  });
+  if (!denial && input.restricted && target.effectiveRole !== "user") {
+    denial = denyRoleChange({
+      actorRole: gate.actor.role,
+      actorUserId: gate.actor.userId,
+      nextRole: "user",
+      targetProtected: target.protected,
+      targetRole: target.effectiveRole,
+      targetUserId: userId,
+    });
+  }
+  const eventType = input.restricted
+    ? "user.access_restricted"
+    : "user.access_promoted";
+  if (denial) {
+    await auditUserAdmin(c, {
+      eventType,
+      outcome: "denied",
+      actorUserId: gate.actor.userId,
+      subjectId: userId,
+      metadata: { reason: denial },
+    });
+    return denialResponse(c, denial);
+  }
+
+  const nextAccessLevel: AccountAccessLevel = input.restricted
+    ? "restricted"
+    : "standard";
+  const nextRole = input.restricted ? "user" : target.row.role;
+  const now = new Date().toISOString();
+  const event = createAuditEvent({
+    eventType,
+    outcome: "success",
+    actorUserId: gate.actor.userId,
+    subjectId: userId,
+    metadata: {
+      from: target.row.accessLevel,
+      previousRole: target.effectiveRole,
+      to: nextAccessLevel,
+    },
+  });
+  const statements = [
+    auditInsertForExistingUserStatement(c.env, event, transitionGuard(target)),
+    guardedUserTransitionUpdate(c, event.eventId, target, {
+      accessLevel: nextAccessLevel,
+      role: nextRole,
+      status: target.row.status,
+      updatedAt: now,
+    }),
+  ];
+  if (input.restricted) {
+    statements.push(
+      guardedUserStatement(
+        c,
+        event.eventId,
+        "DELETE FROM session WHERE userId = ?",
+        userId,
+      ),
+      guardedUserStatement(
+        c,
+        event.eventId,
+        "UPDATE oauthRefreshToken SET revoked = ? WHERE userId = ? AND revoked IS NULL",
+        now,
+        userId,
+      ),
+      guardedUserStatement(
+        c,
+        event.eventId,
+        "DELETE FROM oauthAccessToken WHERE userId = ?",
+        userId,
+      ),
+    );
+  }
+
+  const results = await c.env.PG72_ID_DB.batch(statements);
+  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+    return c.json({ error: "user_state_changed" }, 409);
+  }
+  await enqueueSecurityEvent(c.env, event, c.executionCtx);
+
+  return c.json({
+    userId,
+    accessLevel: nextAccessLevel,
+    role: nextRole ?? "user",
+    status: target.row.status,
     at: now,
   });
 });

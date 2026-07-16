@@ -1,5 +1,6 @@
 import { APIError } from "better-auth/api";
 
+import type { AccountAccessLevel } from "./account-access";
 import { recordAudit, type WaitUntilContext } from "./audit";
 import { normalizeEmail, type RuntimeConfig } from "./config";
 import {
@@ -28,6 +29,7 @@ export interface RegistrationInput {
 }
 
 export interface RegistrationGrant {
+  accessLevel: AccountAccessLevel;
   legalAcceptedAt?: Date;
   privacyAcceptedVersion?: string;
   role: "bootadmin" | "admin" | "developer" | "user";
@@ -131,6 +133,10 @@ export async function authorizeRegistration(
 
   return {
     ...legalAcceptance,
+    accessLevel:
+      config.registrationMode === "public" && !invitation && !isBootstrapAdmin
+        ? "restricted"
+        : "standard",
     role: isBootstrapAdmin ? "bootadmin" : (invitation?.role ?? "user"),
     status: "active",
   };

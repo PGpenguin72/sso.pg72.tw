@@ -1,5 +1,9 @@
 import type { Context } from "hono";
 
+import {
+  accountAccessLevel,
+  recordRestrictedActionDenied,
+} from "./account-access";
 import { createAuth } from "./auth";
 import {
   FRESH_SESSION_MAX_AGE_MS,
@@ -41,12 +45,56 @@ export async function requireAdminPermission(
   }
 
   const config = readRuntimeConfig(c.env);
+  const currentUser = await c.env.PG72_ID_DB.prepare(
+    `SELECT email, role, status, accessLevel
+       FROM user
+      WHERE id = ?
+      LIMIT 1`,
+  )
+    .bind(session.user.id)
+    .first<{
+      accessLevel: unknown;
+      email: string;
+      role: string | null;
+      status: string;
+    }>();
+  if (!currentUser || currentUser.status !== "active") {
+    return { ok: false, response: c.json({ error: "forbidden" }, 403) };
+  }
+
+  const accessLevel = accountAccessLevel(currentUser.accessLevel);
   const role = effectivePlatformRole(
-    session.user.role,
-    session.user.email,
+    currentUser.role,
+    currentUser.email,
     config,
+    accessLevel,
   );
-  if (session.user.status !== "active" || !hasPermission(role, permission)) {
+  const rateLimit = await c.env.ADMIN_RATE_LIMITER.limit({
+    key: session.user.id,
+  });
+  if (!rateLimit.success) {
+    return { ok: false, response: c.json({ error: "rate_limited" }, 429) };
+  }
+
+  if (accessLevel === "restricted") {
+    try {
+      await recordRestrictedActionDenied(
+        c.env,
+        session.user.id,
+        permission,
+        c.executionCtx,
+      );
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: "restricted_action_audit_failed",
+          error: error instanceof Error ? error.name : "UnknownError",
+        }),
+      );
+    }
+    return { ok: false, response: c.json({ error: "forbidden" }, 403) };
+  }
+  if (!hasPermission(role, permission)) {
     return { ok: false, response: c.json({ error: "forbidden" }, 403) };
   }
   if (options.fresh) {
@@ -103,13 +151,6 @@ export async function requireAdminPermission(
         ),
       };
     }
-  }
-
-  const rateLimit = await c.env.ADMIN_RATE_LIMITER.limit({
-    key: session.user.id,
-  });
-  if (!rateLimit.success) {
-    return { ok: false, response: c.json({ error: "rate_limited" }, 429) };
   }
 
   return { ok: true, actor: { role, userId: session.user.id } };

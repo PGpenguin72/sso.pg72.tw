@@ -20,6 +20,7 @@ interface AdminUserView {
   email: string;
   role: TestPlatformRole;
   status: "active" | "suspended";
+  accessLevel: "restricted" | "standard";
   createdAt: string;
   lastSessionAt: string | null;
   passkeyCount: number;
@@ -251,6 +252,7 @@ describe("Admin user management", () => {
       email: `${tag}-a@example.com`,
       role: "user",
       status: "active",
+      accessLevel: "standard",
       passkeyCount: 1,
       authorizedAppCount: 0,
     });

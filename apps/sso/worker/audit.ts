@@ -37,6 +37,13 @@ export interface ExistingClientAuditGuard {
   expectedOwnerUserId?: string;
 }
 
+export interface ExistingUserAuditGuard {
+  expectedAccessLevel: string;
+  expectedRole: string | null;
+  expectedStatus: string;
+  userId: string;
+}
+
 export function createAuditEvent(input: RecordAuditInput): SecurityEvent {
   return {
     eventId: crypto.randomUUID(),
@@ -101,6 +108,40 @@ export function auditInsertForExistingClientStatement(
     guard.clientId,
     guard.expectedOwnerUserId ?? null,
     guard.expectedOwnerUserId ?? null,
+  );
+}
+
+export function auditInsertForExistingUserStatement(
+  env: Env,
+  event: SecurityEvent,
+  guard: ExistingUserAuditGuard,
+): D1PreparedStatement {
+  return env.PG72_ID_DB.prepare(
+    `INSERT INTO audit_event
+      (id, event_type, actor_user_id, client_id, subject_id, outcome,
+       metadata_json, occurred_at)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (
+        SELECT 1
+          FROM user
+         WHERE id = ?
+           AND accessLevel = ?
+           AND role IS ?
+           AND status = ?
+      )`,
+  ).bind(
+    event.eventId,
+    event.eventType,
+    event.actorUserId ?? null,
+    event.clientId ?? null,
+    event.subjectId ?? null,
+    event.outcome,
+    event.metadata ? JSON.stringify(event.metadata) : null,
+    event.occurredAt,
+    guard.userId,
+    guard.expectedAccessLevel,
+    guard.expectedRole,
+    guard.expectedStatus,
   );
 }
 

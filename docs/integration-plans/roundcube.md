@@ -1,9 +1,16 @@
 # Roundcube 接入 PGID 整合計畫
 
-狀態：草案（規劃階段，僅供評估）
-撰寫日期：2026-07-15
+狀態：Owner 已選 Dovecot introspection + XOAUTH2 Path A；PGID prerequisite 已在 local source 完成，但尚未 production deploy/provision/VPS cutover
+原始查證日期：2026-07-15
+Current-source 對帳：2026-07-16
 對應產品：PGID（issuer `https://sso.pg72.tw`，OAuth 2.1 / OIDC Authorization Code + PKCE S256）
 方針：不維護 fork；production 從鎖定版本、checksum/digest 的 upstream stable 自行打包，優先用原生設定/plugin，不改上游 auth core。
+
+> 本文的 Roundcube/upstream 與 mail-backend 資訊是 2026-07-15
+> 唯讀查證紀錄。本輪只對齊 PGID repository truth，沒有重新讀取 production
+> Cloudflare、D1、VPS、Dovecot 或 Roundcube 狀態，也沒有執行任何 remote
+> 指令。Local commit `9efdece` 的完整 gate 為 166 個 SSO tests 與 4 個 RP
+> protocol tests；這不是 production smoke record。
 
 ---
 
@@ -47,11 +54,22 @@ Roundcube 是 IMAP/SMTP 的 client。使用者在 Web UI 用 PGID 登入後，Ro
 
 ### 3.1 XOAUTH2 / OAUTHBEARER（首選，若 backend 支援）
 
+**Owner 已選此路徑，具體為 Dovecot introspection + XOAUTH2。** 這是後續
+maintenance-window 的部署方向，不代表本輪已重新確認 production Dovecot
+版本、設定或能力。
+
 - Roundcube 用 OIDC 拿到的 access token，透過 SASL `XOAUTH2` 或 `OAUTHBEARER` 直接登入 IMAP/SMTP。
 - 設定：`oauth_auth_type`（`'XOAUTH2'` / `'OAUTHBEARER'` / `null` 自動）；`oauth_scope` 必須包含 mail backend 接受的 scope；`imap_host` / `smtp_host` 用 `ssl://` 或 `tls://`。
 - **硬性前提**：mail backend（IMAP + SMTP）必須支援對應 SASL 機制，且能**驗證 PGID 簽發的 token**：
   - Dovecot：`auth_mechanisms = xoauth2 oauthbearer`，並設 OAuth2 validation（local JWT via PGID JWKS，或 introspection endpoint）。
   - Postfix（SMTP submission）：經 Dovecot SASL 或 backend 支援 `XOAUTH2`/`OAUTHBEARER`。
+- PGID current-source contract 只允許固定 service client `pgid-mail-introspect`
+  introspect `pg72-webmail` 的 opaque access token。Caller 用
+  `client_secret_post`，不可用 Basic。Eligible token 必須有 live central
+  session、`email` scope、active user 與 verified email；成功 response 只含
+  `active`、`client_id`、`scope`、`iss`、`exp`、`iat`、`email`、
+  `email_verified`，刻意不含 `sub`/`sid`。不符合或無權檢查的 token 精確回
+  `{"active":false}`。
 - token 效期是問題：IMAP 連線可能長於 access token 效期，需 refresh 並重連；`1.7.2` 已把 password/token 取得整理為經 token 或 userinfo。實測長連線 refresh 行為為 GO/NO-GO 項。
 
 ### 3.2 短效 credential bridge（backend 不支援 SASL OAuth 時）
@@ -67,13 +85,19 @@ Roundcube 是 IMAP/SMTP 的 client。使用者在 Web UI 用 PGID 登入後，Ro
   - `config/defaults.inc.php`：`imap_host = 'localhost:143'`、`smtp_host = 'localhost:587'`（純預設值，非部署事實）。
   - `.ci/compose.yaml`：測試用 `greenmail/standalone`（`-Dgreenmail.auth.disabled`）、IMAP `tls://mailhost:3143`、SMTP `mailhost:3025`——這是 CI 測試 harness，**不是** production backend。
   - 無 `docker-compose`（production）、無 Dovecot/Postfix/mailcow/docker-mailserver 設定樣板。
-- 結論：**需 owner 確認 production mail backend**（哪套 IMAP/SMTP、是否支援 XOAUTH2/OAUTHBEARER、能否對 PGID 驗 token）。此答案決定走 §3.1 還是 §3.2，是本計畫最大未知。
+- 原始結論是 snapshot 無法辨識 production mail backend。後續 owner 已選
+  Dovecot Path A，因此不再等待 A/B 選型；但本輪沒有重新查 production，
+  實際版本、SASL capabilities、introspection 設定、SMTP 經 Dovecot SASL
+  的路徑與 rollback 仍須由 owner 在維護窗口前確認。
 
 ---
 
 ## 4. 建議架構
 
-以 Roundcube 原生 OIDC 接 PGID 做 Web UI 登入；mail backend 認證路徑視 backend 能力二選一。不改 auth core，僅用設定 + `oauth_cache` 所需的 DB/Redis。
+以 Roundcube 原生 OIDC 接 PGID 做 Web UI 登入，mail backend 採 owner 已選
+的 Dovecot introspection + XOAUTH2 Path A。不改 auth core，僅用設定與
+`oauth_cache` 所需的 DB/Redis；§3.2 保留為 rollback/重新設計參考，不是
+目前 deployment target。
 
 ### 元件與 pinned 版本
 
@@ -82,7 +106,7 @@ Roundcube 是 IMAP/SMTP 的 client。使用者在 Web UI 用 PGID 登入後，Ro
 | Roundcube | **`1.7.2`**（by release tarball checksum / image digest） | Web UI + 原生 OIDC client | <https://github.com/roundcube/roundcubemail/releases> |
 | PHP | `8.3.x`（1.7 需 ≥ 8.1；CI 用 php8.3） | runtime | <https://roundcube.net/news/2026/05/10/roundcube-1.7.0-released> |
 | `oauth_cache` 後端 | DB（既有）或 Redis（pin digest） | JWKS/token cache，backchannel 必需 | 依部署查證 |
-| Mail backend | **待 owner 確認**（Dovecot/Postfix 或其他） | IMAP/SMTP，決定 §3 路徑 | 待確認 |
+| Mail backend | **Dovecot Path A（owner decision）** | IMAP/SMTP XOAUTH2，以 PGID introspection 驗 token | Production version/config 本輪未重新查證 |
 
 打包規則：從 `1.7.2` release tarball（核對 checksum）或鎖 image digest 自行打包；不使用 `1.8-git` 快照、不使用 `latest`。實際打包前重新查 stable 與 advisories。
 
@@ -104,10 +128,10 @@ Roundcube 是 IMAP/SMTP 的 client。使用者在 Web UI 用 PGID 登入後，Ro
               │  代使用者登入 (SASL)
               ▼
    ┌───────────────────────────────────────────────┐
-   │ Mail backend（待 owner 確認）                  │
-   │  路徑 A: XOAUTH2 / OAUTHBEARER（驗 PGID token）│
-   │  路徑 B: oauth_password_claim 短效密碼          │
-   │  最後手段: 每使用者 app password（與撤銷脫鉤）  │
+   │ Mail backend（owner 選 Dovecot Path A）          │
+   │  XOAUTH2 → PGID introspection                    │
+   │  service client: pgid-mail-introspect            │
+   │  production/VPS 尚未套用                         │
    └───────────────────────────────────────────────┘
 ```
 
@@ -120,7 +144,7 @@ Web UI OIDC（值為示意，實際依 PGID discovery）：
 ```php
 $config['oauth_provider']      = 'generic';          // 非 google/outlook 內建
 $config['oauth_provider_name'] = 'PGID';
-$config['oauth_client_id']     = '<由 PGID 管理員建立>';
+$config['oauth_client_id']     = 'pg72-webmail';
 $config['oauth_client_secret'] = '<走 secret store，勿入 source/log>';
 $config['oauth_config_uri']    = 'https://sso.pg72.tw/.well-known/openid-configuration';
 $config['oauth_issuer']        = 'https://sso.pg72.tw';
@@ -137,6 +161,9 @@ Identity mapping（**用 `sub` 不用 email**）：
 
 - codex.md 要求以不可變 `sub` 識別使用者。Roundcube 傳統以 IMAP username 當帳號鍵，`oauth_user_create_map` 預設把 `name`/`email` 映射到 user_name/user_email。
 - 需確認 Roundcube 當版能否以 `sub` 作內部使用者鍵；若其帳號模型綁 IMAP login name，則「使用者主鍵」實質由 mail backend 決定。此處與 §3 的 backend 選型耦合，**需 owner 與 mail backend 設計一併決定**：Roundcube user 與 PGID `sub` 的對應如何維持穩定（例如 backend 以 `sub` 當 mailbox 鍵）。
+- Path A introspection response 的 verified `email` 只供 Dovecot 對應既有
+  mailbox username，不把 email 升格為 PGID/Roundcube 的身分主鍵，也不可
+  用它靜默合併身分。
 
 IMAP/SMTP（依 §3 路徑）：
 
@@ -151,9 +178,18 @@ $config['oauth_auth_type']= 'XOAUTH2';   // 或 'OAUTHBEARER' / null 自動
 $config['oauth_password_claim'] = '<PGID token 內的短效密碼 claim>'; // 需加入 oauth_scope
 ```
 
+Dovecot introspection 另使用固定 client ID `pgid-mail-introspect` 與只顯示
+一次的 secret。Secret 只能在 owner 完成 production Passkey step-up 後，
+透過 PGID same-origin admin provisioning 取得並存進 VPS secret
+configuration；不能共用 `pg72-webmail` 的 OIDC client secret，也不能寫入
+此檔、source、D1 明文、log、issue 或聊天。
+
 ---
 
 ## 6. Mail backend 認證分析（XOAUTH2 / OAUTHBEARER 路徑）
+
+Current target 是第一列的 Dovecot Path A。其餘列只保留為 rollback 或重新
+設計參考；本輪沒有重新登入 VPS 驗證實際 production capability。
 
 | 條件 | 採用路徑 | 需要的 backend 支援 |
 |---|---|---|
@@ -164,6 +200,13 @@ $config['oauth_password_claim'] = '<PGID token 內的短效密碼 claim>'; // �
 要點：
 
 - access token 效期通常短於 IMAP 連線壽命，必須實測 token refresh 後重連是否順暢（GO/NO-GO）。
+- Introspection 只接受 `POST application/x-www-form-urlencoded`，body 內帶
+  `client_id`、`client_secret`、`token`；Basic/`Authorization`、GET、重複
+  single-value fields 與超過 4 KiB body 都被拒絕。無效或未授權 token 回
+  HTTP 200 + 精確 `{"active":false}`，錯誤 client credential 回 401。
+- Production normal-flow smoke 只驗 active/inactive/401。`429` exhaustion 與
+  `503` limiter failure 必須在 isolated Preview 或 controlled local test
+  驗證；不得對 production flood 或故意破壞 binding。
 - PGID 是「單一 audience」策略（見 SECURITY.md，因 `GHSA-p2fr-6hmx-4528` 補償控制拒絕 RFC 8707 `resource`）。若 mail backend 需要「給 mail 的專屬 audience token」，會與此補償控制衝突——**這是設計層必須先解的相容性問題**，需 owner + PGID core 決定 token 對 mail backend 的驗證方式（同 audience JWKS 本地驗，而非另發 resource-specific token）。
 
 ---
@@ -181,6 +224,13 @@ $config['oauth_password_claim'] = '<PGID token 內的短效密碼 claim>'; // �
 
 ## 8. 部署驗收清單
 
+- [x] PGID local source `9efdece` 已完成 scoped mail introspection，完整 local gate 為 166 SSO + 4 RP tests。
+- [ ] **先關閉 production blocker**：system-client provision/rotation 已要求真正的 Passkey step-up；現行 `<10m` session-age freshness 不能代替 step-up。
+- [ ] Owner 已重新確認 production `pg72-webmail` exact metadata，並建立 private D1 backup / Time Travel 記錄。
+- [ ] Owner 已套用 local migration `0013`（最新既有 production record 只有 `0012`）。
+- [ ] PGID Worker 已部署，`INTROSPECTION_IP_RATE_LIMITER` namespace `1004` 與 `INTROSPECTION_CLIENT_RATE_LIMITER` namespace `1005` bindings 均存在。
+- [ ] 完成 Passkey step-up 後，以 same-origin fresh admin session provision `pgid-mail-introspect`，並立即將一次性 secret 放入 approved secret store/VPS secret config。
+- [ ] Production active/inactive/401 normal-flow smoke 通過；429/503 僅在 isolated Preview/controlled local test 驗證，沒有對 production flood/failure injection。
 - [ ] 從 `1.7.2` release（checksum/digest 鎖定）打包，**不使用 `1.8-git` 快照**，未改 auth core。
 - [ ] PHP ≥ 8.1（建議 8.3），`public_html/` 為對外 entry-point（1.7 強制）。
 - [ ] `oauth_config_uri` 指向 PGID discovery，`oauth_pkce=S256`，`oauth_issuer=https://sso.pg72.tw`。
@@ -202,7 +252,9 @@ $config['oauth_password_claim'] = '<PGID token 內的短效密碼 claim>'; // �
 
 | 風險 | 嚴重度 | 說明 | 緩解 |
 |---|---|---|---|
-| mail backend 能力未知 | 高 | 是否支援 XOAUTH2/OAUTHBEARER 或短效 claim，決定整個路徑 | **owner 先確認 backend**；未確認前不進 production |
+| production Dovecot 狀態未重新查證 | 高 | Owner 已選 Path A，但本輪沒有確認實際版本、SASL capability、introspection/SMTP path 或 rollback | 維護窗口前由 owner 唯讀查證；未確認前不 cut over |
+| 缺少真正 Passkey step-up | 高 | Current admin gate 只看 session age，不能證明剛完成強認證 | 先實作、測試並獨立審查 step-up，再 provision/rotate system client |
+| PGID prerequisite 尚未部署 | 高 | Local tests 通過不代表 production 已有 0013、rate bindings 或 service client | 依 handoff owner runbook 逐步 deploy/provision/smoke，保留 rollback |
 | Web UI OIDC 假象 | 高 | Web 登入成功不代表 IMAP/SMTP 已通過認證 | 明確分開 §3 兩層，各自驗收 |
 | app password 與撤銷脫鉤 | 高 | 最後手段下，PGID 撤銷無法讓 mail 憑證失效 | 僅作最後手段；獨立生命週期管理 + audit；優先推 backend 支援 OAuth |
 | 單一 audience 與 mail token 衝突 | 中-高 | SECURITY.md 拒 RFC 8707 `resource`；mail backend 若要專屬 audience 會衝突 | 以同 audience + JWKS 本地驗；owner + PGID core 決策 |
@@ -216,10 +268,11 @@ $config['oauth_password_claim'] = '<PGID token 內的短效密碼 claim>'; // �
 
 ## 10. 需 owner 決定的開放問題
 
-1. **Production mail backend 是什麼？**（Dovecot/Postfix、mailcow、其他託管服務）快照無 production 設定，這是最關鍵未知。
-2. 該 backend 是否支援 `XOAUTH2`/`OAUTHBEARER`，且能以 PGID JWKS 本地驗 token 或 introspection？決定走 §3.1 還是 §3.2。
-3. 若 backend 不支援 SASL OAuth：採 `oauth_password_claim` 短效密碼 bridge，還是退回 app password（最後手段）？PGID 是否願意在 token 放短效密碼 claim？
-4. 單一 audience 策略下（SECURITY.md 拒 RFC 8707 `resource`），mail backend 如何驗 PGID token？是否以同 audience + JWKS 本地驗，避免另發 resource-specific token？
-5. Roundcube 使用者主鍵與 PGID `sub` 的對應如何維持穩定（mailbox 是否以 `sub` 為鍵）？
-6. `jti` 去重：是否需在 Roundcube 前置一支小型 back-channel receiver 以補足 codex.md 的 `jti` 去重與冪等要求？
-7. 撤銷 SLA：Web session 與 IMAP 連線各自的撤銷生效上限訂多少（尤其 app password 情境的缺口如何在 Security Gate 記錄為 accepted risk）？
+Path A 已選，不再把 A/B 選型列為開放問題。進 production 前仍需 owner 關閉：
+
+1. Passkey step-up 的 endpoint、challenge/session binding、有效窗口與 regression tests 如何落地，並由誰獨立審查？
+2. Production Dovecot/Postfix 實際版本與設定是否支援預定 XOAUTH2 + introspection 路徑？SMTP submission 是否確實經 Dovecot SASL？
+3. Roundcube 使用者主鍵與 PGID `sub` 的對應如何維持穩定；verified email 作 mailbox username mapping 時，變更與衝突如何處理？
+4. 單一 audience 策略下（SECURITY.md 拒 RFC 8707 `resource`），Dovecot 是否能直接使用 current opaque-token introspection contract？
+5. `jti` 去重是否需在 Roundcube 前置 receiver 補足；Web session 與既有 IMAP connection 的撤銷 SLA 各是多少？
+6. Owner maintenance window、legacy auth rollback、監控與 secret rotation 負責人何時確認？

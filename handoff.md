@@ -10,20 +10,77 @@
 
 | Item | Reconciled state |
 | --- | --- |
-| Source baseline | Root Git repository at `1459229` (`main`) before this documentation commit; no Git remote configured; worktree was clean at reconciliation start |
+| Source baseline | Local `main` contains mail-introspection implementation commit `9efdece`; the later documentation reconciliation does not change runtime behavior. No Git remote is configured |
 | Registration | `apps/sso/wrangler.jsonc` sets production `REGISTRATION_MODE` to `invite`; the `public` path and regression tests exist but [`codex.md`](./codex.md) §9.2 and owner approval are still required |
-| SSO migrations | Integrated local source is versioned through `0013_confidential_client_secret_post.sql`; it normalizes client metadata only. The latest deployment record says production D1 was applied only through `0012`, and this reconciliation did not apply `0013` remotely |
+| SSO migrations | Integrated local source is versioned through `0013_confidential_client_secret_post.sql`, which normalizes existing confidential clients to `client_secret_post`. The latest deployment record says production D1 was applied only through `0012`; this reconciliation did not query or migrate remote D1 |
 | Login methods | Google and Passkey are the core methods; Discord, GitHub, Facebook, Apple, and Telegram are optional and remain hidden unless their credentials are configured |
 | Platform roles | `bootadmin`, `admin`, `developer`, `user` |
 | Production RPs | Deployment records show Copy and Link live on PGID; Copy's six-digit guest code remains a separate identity path |
-| Mail Path A | PGID introspection email claim is implemented in local commit `df8c5d0` and its branch passed 149 SSO tests; at reconciliation time it was not merged/deployed/production-verified, and VPS/mail cutover still requires an owner maintenance window |
+| Mail Path A | Owner selected Dovecot introspection + XOAUTH2. Its PGID prerequisite is integrated locally at `9efdece`, but that code is not deployed, `pgid-mail-introspect` is not provisioned, and no VPS/Roundcube cutover has occurred |
 | Approval status | Deployed invite beta, not full Production GO; central `sid`, back-channel logout, recovery/rotation drills, DLQ operations, and independent security gates remain incomplete |
-| Verification record | The pre-reconciliation log records 144 SSO tests; introspection branch `df8c5d0` records 149. This documentation-only reconciliation did not rerun tests, and the combined integration still requires its full gate |
+| Verification record | Integrated commit `9efdece` passed the complete local gates: 166 SSO tests and 4 RP protocol tests. These results verify local source only; there is no production mail smoke record |
 
 The last recorded SSO Worker version is
 `4d0c701a-c805-4254-ae2b-7c0df856b3c0`. Confidential first-party RPs currently
 use `client_secret_post`. Copy and Link being live does not waive consent,
 stable-`sub`, RP session, rollback, or global-logout requirements.
+
+## Mail Path A Owner Runbook (Not Executed)
+
+This is an ordered production plan for the owner, not a record of completed
+work. This reconciliation ran no remote command and made no Cloudflare, D1,
+secret-store, Roundcube, Dovecot, or VPS change.
+
+1. Close the Passkey step-up blocker for system-client provisioning and secret
+   rotation. The current less-than-10-minute session-age gate is not a real
+   reauthentication ceremony and is insufficient for this production change.
+2. Confirm the production OIDC client `pg72-webmail` exists with the intended
+   exact HTTPS redirect URI, `email` scope, grants, and metadata. Do not infer
+   production state from local fixtures.
+3. Create a private production D1 export and record the current Time Travel
+   point before changing client metadata.
+4. Owner verifies and applies `0013_confidential_client_secret_post.sql` to the
+   production identity D1. The latest existing deployment record is only
+   through `0012`.
+5. Deploy the verified Worker source with both configured Rate Limiting
+   bindings: `INTROSPECTION_IP_RATE_LIMITER` namespace `1004` and
+   `INTROSPECTION_CLIENT_RATE_LIMITER` namespace `1005`.
+6. Complete the new Passkey step-up at PGID, then from that same origin and an
+   admin session less than 10 minutes old call
+   `POST /api/admin/clients/provision-mail-introspector`. The caller needs
+   `clients.manage_all`; do not treat session age alone as step-up.
+7. Immediately save the one-time `pgid-mail-introspect` client secret in the
+   approved secret store/VPS secret configuration. Never put it in source,
+   plaintext D1, command history, logs, issues, or chat. The database retains
+   only its hash; a lost value must be rotated.
+8. Before touching the mail server, smoke-test normal production behavior:
+   an eligible `pg72-webmail` opaque access token with a live central session,
+   `email` scope, active user, and verified email returns the allowlisted active
+   response; expired/revoked/wrong-client/ineligible tokens return exactly
+   `{"active":false}`; and bad client credentials return `401`. Responses must
+   be `no-store` and must not expose `sub`, `sid`, token, or secret. Verify `429`
+   rate exhaustion and `503` limiter-failure behavior only in isolated Preview
+   or a controlled local test; never flood or deliberately break production.
+9. Only after those checks does the owner open the announced VPS maintenance
+   window and apply the prepared Roundcube/Dovecot Path A configuration. Verify
+   Web OIDC login, IMAP and SMTP XOAUTH2, refresh/reconnect, revocation, logs,
+   and the legacy rollback path before closing the window.
+
+### Mail Path A Rollback
+
+1. Stop new XOAUTH2 traffic first: restore the previous Roundcube/Dovecot auth
+   path or disable `pgid-mail-introspect`. Confirm mail access through the known
+   good path before changing the PGID Worker.
+2. Roll the Worker back to the recorded known-good version and repeat health,
+   discovery, JWKS, session, Copy, and Link checks. A Worker rollback does not
+   undo D1 or VPS changes.
+3. Do not normally reverse `0013`: it is a client-metadata normalization rather
+   than a destructive schema change, and older code already accepts
+   `client_secret_post`. Reverse it only through a separately reviewed recovery
+   plan based on the private backup; never delete the migration record by hand.
+4. Keep `pgid-mail-introspect` disabled while diagnosing. If its one-time secret
+   may have escaped, rotate it before any retry. Preserve audit evidence without
+   recording the credential or inspected tokens.
 
 ---
 
@@ -34,6 +91,12 @@ stable-`sub`, RP session, rollback, or global-logout requirements.
 > 本段內較後面的「醒後進度」會取代同段前面較早的待辦；現況先看上方
 > `Current Local Source State`，再以 `codex.md` 與程式設定為準。
 > 本段不含任何 secret 值。
+>
+> **Mail supersession:** 下文所寫 introspection「尚未實作/驗證」已由
+> local commit `9efdece` 取代；但「尚未部署、尚未 provision、VPS 尚未
+> cutover」仍成立。任何歷史 `client_secret_basic`/Basic 操作指示均已
+> 失效；目前 token client contract 是 `client_secret_post`，introspection
+> 更會直接拒絕 `Authorization`/Basic。
 
 ## 0. 一句話現況
 
@@ -75,6 +138,9 @@ PGID 這個 session 完成了大量開發並**已部署到 production**;SSO 目�
 
 ## 5. 待辦與待決(完整見 `msg.md`)
 
+> **歷史狀態提醒：** 本節 mail 條目的「PGID introspection 尚未實作」已
+> 被上方 current header 取代；保留原文只是為了說明當時為何選 Path A。
+
 **Owner 已回覆但我尚未執行(被此 handoff 中斷)**:
 - **A2:移除 prod SSO D1 的 `pg72-diary-dev` client**(owner 同意)。指令:先備份,`wrangler d1 execute PG72_ID_DB --remote --command "DELETE FROM oauthClient WHERE clientId='pg72-diary-dev'"`(不帶帳號 override)。
 - **A3:清 Link 的舊 secret**(owner 同意):在 `PGpenguin72` 帳號對 `link-short` Pages 刪除 `ALLOWED_EMAIL`、`GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`(Link 已改用 PGID,這三個沒用)。
@@ -115,6 +181,11 @@ PGID 這個 session 完成了大量開發並**已部署到 production**;SSO 目�
 - 🔄 **設計統一進行中**:5 個背景 agent 正在重塑 `~/ahsnccu-ann`、`原專案代碼/copy.pg72.tw`、`原專案代碼/link.pg72.tw`、`原專案代碼/upload.pg72.tw`、`~/diary.pg72.tw`,依 `morden_dark.txt`。**每個 repo 各自寫 `DESIGN-LOG.md` + 增量 commit,不 push**。若 token 中斷/CODEX 接手:去各 repo 讀 `DESIGN-LOG.md` 看進度,未完成的續作;完成後主線可把各 DESIGN-LOG 摘要併回 agentlog。這些是純視覺、不動邏輯。
 
 **尚未做(接手可續)**:
+
+> **Superseded mail item:** 下列第 2 項的本地實作/驗證已在 `9efdece`
+> 完成；production deploy、service-client provisioning 與第 3 項 VPS
+> maintenance window 仍未完成。
+
 1. **一般使用者 QA**:對 live PGID(https://sso.pg72.tw)跑「一般使用者」角色(D-QA 四角色已做資安/美術/工程,缺這個)。
 2. **mail PGID-introspection 前置**:實作/驗證 SSO `/oauth2/introspect` 對 access token 回 `active:true` + `email`(Path A 必要)。設定已在 `原專案代碼/webmail.pg72.tw/deploy/pgid/mail/`。
 3. **mail VPS 套用**:高風險,需 3-agent 投票 + 維護窗口 + owner 在場,勿擅自套。
@@ -942,6 +1013,10 @@ credentials, client IDs and active signing keys.
 
 ## 17. Copy Production Cutover (Not Yet Done)
 
+> **Superseded status:** Copy 已在 production 使用 PGID；本節的 “Not Yet
+> Done”、`client_secret_basic` 與缺少 production client/secret 等文字只
+> 是 2026-07-15 snapshot，不能作為現行 cutover 指示。
+
 The Copy source integration is substantial and should not be reimplemented from
 scratch. It already includes:
 
@@ -1034,6 +1109,11 @@ gateway must overwrite user-supplied identity headers. Do not deploy the supplie
 upstream source snapshot as the long-term fork.
 
 ### Webmail / Roundcube
+
+> **Superseded planning status:** Owner 後續已選 Dovecot introspection +
+> XOAUTH2 Path A；PGID prerequisite 已在 local source `9efdece` 完成並通過
+> 166/4 gates，但尚未部署、provision 或套用到 VPS。現行步驟以上方
+> Mail Path A Owner Runbook 為準。
 
 Use a pinned stable Roundcube release; the supplied `1.8-git` snapshot is not a
 production package. Roundcube supports Generic OIDC and related flows, but web

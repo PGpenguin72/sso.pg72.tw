@@ -52,6 +52,9 @@ A：PGID 目前刻意拒絕所有 RFC 8707 `resource` 參數（回 `invalid_targ
 **Q：怎麼拿 refresh token？**
 A：client 要有 `offline_access` scope 與 `refresh_token` grant，且使用者需在 consent 核准。refresh token 會 rotation，每次換發後要改存新值。
 
+**Q：我的服務可以用 introspection 查其他 client 的 token 嗎？**
+A：不行。一般 client 只能查自己的 token。唯一 cross-client 例外是 PG72 Mail 基礎設施的固定 `pgid-mail-introspect` → `pg72-webmail` 配對，而且只接受符合 live-session、`email` scope 與 active verified-user 條件的 opaque access token；JWT、refresh token 與其他配對都回 inactive。這項行為目前已在 local source 實作並通過本地測試，尚未部署或 provision。見 [Mail Token Introspection](developers/mail-introspection.md)。
+
 ## 還是找不到答案？
 
 [聯絡我們](contact.md)。

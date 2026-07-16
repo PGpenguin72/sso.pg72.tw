@@ -14,7 +14,10 @@
 - 必須支援裝置 session、單一/全部撤銷、全域登出、audit 與管理員停權。
 - 不共用 `Domain=.pg72.tw` cookie。所有 app 使用 OIDC redirect 與自己的 host-only session。
 - Email 不是使用者主鍵；所有服務以不可變 OIDC `sub` 識別使用者。
+- 唯一例外是 Mail Path A 的 Dovecot legacy mailbox lookup：固定 introspection pair 可取 verified email 對應既有 mailbox，但不得用它合併 PGID/RP 身分或擴張到其他 client。
 - Dynamic client registration 關閉。Client、redirect URI 與 scopes 由管理員明確建立。
+
+截至 2026-07-16，本地 root `main` 已包含 Mail Path A introspection prerequisite，完整 typecheck、workerd suite、production build 與 test RP protocol gate 已通過。這些是 local-source 結果：沒有 deploy、remote D1 操作、`pgid-mail-introspect` provisioning 或 mail VPS cutover，不得寫成 production 已上線。
 
 ## Canonical 技術方向
 
@@ -25,6 +28,7 @@
 - Cloudflare Queues 處理 back-channel logout delivery 與 audit fan-out。
 - Workers Rate Limiting binding 處理安全節流；不使用 KV 作精確 rate-limit counter。
 - D1 是 session/token revocation 的 source of truth；Queue 不是。
+- D1 `audit_event` 是 audit source of truth；client mutation 與 audit insert 同 batch 完成後，Queue 才作 best-effort fan-out。
 
 截至 2026-07-15，已查詢 npm stable tag：
 
@@ -35,6 +39,8 @@
 真正安裝時必須重新查詢 stable tag 與 security advisories。Core 與所有 `@better-auth/*` plugins 使用 exact pin、相同 patch line，不使用 `^` 或 `~`。
 
 目前 `@better-auth/oauth-provider@1.6.23` 有 Moderate `GHSA-p2fr-6hmx-4528`，stable `1.6.x` 尚無修補版。依 [`SECURITY.md`](./SECURITY.md) 保持單一 audience 並在 Worker 拒絕所有 RFC 8707 `resource` 參數；不得移除補償控制，直到已修正的 stable 版本完成 migration 與 protocol regression。
+
+同版本另有 tracked exact package patch `patches/@better-auth__oauth-provider@1.6.23.patch`，只為 `pgid-mail-introspect` → `pg72-webmail` opaque access-token introspection 提供 opt-in 例外，並固定 RFC 7662 inactive、`token_type_hint` fallback 與 JOSE/kid error classification。升級時不得機械搬移或用 `allowUnusedPatches` 隱藏 mismatch；只有 stable provider 具等價行為、移除 patch 後 clean frozen install 與完整 protocol suite 都通過，才可移除。
 
 ## Better Auth GO/NO-GO
 
@@ -62,6 +68,7 @@
 - Better Auth 以 request-scoped factory 從 `c.env` 建立；不可把 request state 或 D1 binding 放入 module-level mutable singleton。
 - 每個 Promise 必須 `await`、`return` 或交給 `ctx.waitUntil()`。
 - Session、token、revocation 與 audit source-of-truth 寫入必須在回應前完成，不能只丟進 `waitUntil()`。
+- Security-event Queue 是 D1 commit 後的 best-effort fan-out；Queue failure 目前只有 redacted log，durable outbox/補送與告警尚未實作，屬 Production GO 前必須補齊的債務。Queue failure 不把已提交的 mutation 偽裝成回滾，也不能用 Queue 取代 D1 audit。
 - Worker-to-Worker 使用 Service Bindings；Cloudflare storage 使用 bindings，不在 Worker 內呼叫 Cloudflare REST API。
 - 大型或未知大小 body 必須 streaming，不呼叫無上限的 `response.text()` / `arrayBuffer()`。
 - 不使用 `passThroughOnException()`。
@@ -81,6 +88,11 @@
 - 每個第一方 RP 實作冪等 back-channel logout endpoint，以 `jti` 去重。
 - 管理服務即時檢查中央撤銷狀態且 fail closed；公開服務撤銷 cache 上限 30 秒。
 - Recovery codes 只作一次性復原，不是日常登入方式。
+- Mail introspection 唯一 delegated pair 是 `pgid-mail-introspect` → `pg72-webmail` opaque access token；必須同時有 live central session、`email` scope、active user 與 verified email。JWT、refresh token、其他 pair 或缺任一條件都回 RFC 7662 inactive。
+- Mail response 只提供 Dovecot lookup 所需欄位，不回 `sub`/`sid`。`token_type_hint` 只是 hint；token-controlled JOSE 或缺 `kid` 回 inactive，JWKS/infrastructure fault 仍回 server error。
+- Introspection 使用兩個獨立 binding：namespace `1004` 的 IP 1200/60 與 namespace `1005` 的 client-class/IP 600/60。Cloudflare limiter 是 per-location、permissive／eventually consistent，只是 abuse control，不能取代認證、撤銷或全域精確計數。
+- System-client provision/rotate/disable/delete 要 `clients.manage_all` 與 10 分鐘 session-age gate；fresh session 不等於 Passkey step-up。Passkey step-up 尚未實作，是 production blocker。
+- `pgid-mail-introspect` secret 疑似外洩時先 disable，再 rotate、更新受管 secret 與 Dovecot 設定；停用中的 client 無法通過真正的 introspection smoke，須在維護窗口 re-enable 後立即 smoke，失敗即 re-disable/rollback。secret 不進 source、D1 明文、log 或文件。
 
 ## 專案 Ownership
 
@@ -132,7 +144,7 @@ File Browser/Roundcube production 部署必須從鎖定版本、checksum/image d
 - 現有 `1.8-git` snapshot 不可直接部署。
 - 上游已提供 Generic OIDC、PKCE、JWKS 與 back-channel logout，優先用原生設定。
 - IMAP/SMTP 是否可免密碼取決於 mail backend 的 XOAUTH2/OAUTHBEARER 支援，不能只靠 Web UI OIDC 假設。
-- Mail Path A 的 PGID introspection email claim 已本地實作並測試，但尚未 production 部署/驗證；VPS/mail cutover 仍需 owner 在場的維護窗口。
+- Mail Path A 的窄 scope introspection prerequisite 已在本地 `main` 實作並通過完整 gate，但尚未 deploy、provision 或 production 驗證；verified email 只供 Dovecot legacy mailbox lookup。VPS/mail cutover、secret 注入、disable/rotate 演練與 rollback 仍需 owner 在場的維護窗口。
 
 ## Security Gate
 
@@ -145,6 +157,7 @@ File Browser/Roundcube production 部署必須從鎖定版本、checksum/image d
 - DAST 覆蓋 auth、OIDC、admin、gateway 與 logout endpoints。
 - Request-abort/isolate regression、併發與 rate-limit tests。
 - Backup restore、key rotation、session revoke、Queue retry/DLQ 演練。
+- 高風險 system-client provisioning/secret rotation 的 Passkey step-up；現行 fresh session age gate 不能替代這項驗證。
 - 無未處理的 Critical/High finding；Medium 必須有 owner、期限與補救措施。
 
 任何人都不能保證系統必然「通過所有漏洞測試」。本專案的要求是把可測試的安全條件寫成自動化 gate，並在公開前安排獨立 review，而不是用文件聲明取代驗證。

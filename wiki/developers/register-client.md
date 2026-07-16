@@ -46,7 +46,7 @@ confidential client 換 token 時，請把 `client_id` / `client_secret` 放在 
 
 ## System-reserved clients
 
-`pg72-webmail` 與 `pgid-mail-introspect` 是 PGID 保留的 system client ID，developer 不能建立或接管。`pgid-mail-introspect` 是無登入 grant 的 mail service client，只能由 manage-all 管理員透過專用 provisioning 操作建立；該端點沒有 request 欄位，body 會被忽略，secret 仍只顯示一次。它只能 introspect `pg72-webmail` 的 opaque access token，不能查其他 client、JWT 或 refresh token。完整契約見 [PGID 串接 API 手冊 §5.4](../../docs/api/PGID-integration.md#54-mail-introspection-system-client)。
+`pg72-webmail` 與 `pgid-mail-introspect` 是 PGID 保留的 system client ID，developer 不能建立或接管。`pgid-mail-introspect` 是無登入 grant 的 unowned service client，只能由 `clients.manage_all` 管理員透過專用 provisioning 操作建立；該端點應送空 body，secret 只顯示一次且資料庫只存 hash。它只能 introspect `pg72-webmail` 的 opaque access token，不能查其他 client、JWT 或 refresh token，也不能自行取得 token。操作方式與 fail-closed 契約見 [Mail Token Introspection](mail-introspection.md)；wire details 見 [PGID 串接 API 手冊 §5.4](../../docs/api/PGID-integration.md#54-mail-introspection-system-client)。
 
 ## 下一步
 

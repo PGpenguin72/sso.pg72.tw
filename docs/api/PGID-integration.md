@@ -167,11 +167,93 @@ Client secret 為 `pg72_cs_<suffix>` 格式，**只在建立時回傳一次**，
 
 ### 5.4 Mail introspection system client
 
-一般 client 只能 introspect 自己的 token。唯一 cross-client 例外是固定的 `pgid-mail-introspect`，且只能檢查簽發給 `pg72-webmail` 的 opaque access token；JWT、refresh token 與其他 client 配對一律不授權。
+這是 Mail Path A 的固定基礎設施契約，不是一般 RP 可申請的 cross-client 權限。一般 client 仍只能 introspect 自己的 token；唯一例外是：
 
-此 service client 不能走一般 client 建立流程。具 `clients.manage_all` 權限且符合上述 session / Origin / freshness 條件的管理員，使用 `POST /api/admin/clients/provision-mail-introspector` 建立它。端點沒有定義 request 欄位；在 4 KiB admin body 上限內，送入的 body 目前會被忽略，不用來設定 client。成功回 `201` 與只顯示一次的 `clientSecret`；已存在時回 `409 client_exists`。資料庫只存 secret hash，client 沒有 redirect URI、scope 或可簽發 token 的 grant。Production 尚未部署此 local-source 行為，也尚未 provision 該 client。
+```text
+introspection client: pgid-mail-introspect
+token audience/client: pg72-webmail
+token kind: opaque access token (pg72_at_...)
+```
 
-`pgid-mail-introspect` 與 `pg72-webmail` 是 system-reserved client ID，developer 不能 claim。Provision、secret rotation、停用與刪除都要求 `clients.manage_all` 與上述 fresh-session gate；這不構成 Passkey step-up。
+三項必須同時精確相符。JWT（包含 ID token 與任何已簽章 access token）、refresh token、簽給其他 client 的 opaque access token，以及由其他 introspection client 提交的 token，都不會取得 delegated 結果。`token_type_hint` 只改變 access/refresh 的查詢順序；即使 hint 猜錯，provider 仍會嘗試另一種 token，但不會因此放寬上述授權。
+
+即使配對相符，active 結果仍要求 token：
+
+- 尚未過期或撤銷，且 `pg72-webmail` client 仍為 enabled；
+- 保留可驗證、未過期的 central session；session 被撤銷、刪除或與 token 脫鉤時 fail closed；
+- 含 `email` scope；
+- 對應到目前存在且 `status=active` 的 user；
+- user 的 email 非空且 `emailVerified=true`。
+
+任一條件不成立都只回 inactive，不透露是哪一項失敗。此 verified email 只供 Dovecot 對應既有 mailbox username，不是 PGID 或其他 RP 的身分主鍵。
+
+#### 5.4.1 Provisioning 與 secret
+
+此 service client 不能走一般 client 建立流程。具 `clients.manage_all` 權限的管理員使用 `POST /api/admin/clients/provision-mail-introspector` 建立它；請求還必須帶有效的 PGID session cookie、精確等於 `AUTH_BASE_URL` 的 `Origin`，而且 session 的 `createdAt` 必須是過去 10 分鐘內。端點沒有 request 欄位，應送空 body；在 4 KiB admin body 上限內，即使送了 body 也不會拿來設定 client。
+
+成功回 `201` 與只顯示一次的 `clientSecret`；已存在時回 `409 {"error":"client_exists"}`。明文 secret 不寫入資料庫，資料庫只存 suffix 的 hash。Client 為 unowned system service client，沒有 redirect URI、scope 或可簽發 token 的 OAuth grant；內部 `urn:pg72:grant-type:introspection-only` sentinel 只用來防止 provider 套用預設 grant，不能拿來換 token 或走 authorize。
+
+`pgid-mail-introspect` 與 `pg72-webmail` 都是 system-reserved client ID，developer 不能 claim。Provision、secret rotation、停用與刪除都要求 `clients.manage_all` 與上述 cookie / Origin / fresh-session gate。10 分鐘 session age gate **不等於**重新認證；高風險操作的 Passkey step-up 尚未實作，是 production cutover 前必須關閉的安全欠項。
+
+目前 repository 的 local source 已實作此行為並通過本地完整 regression gate；production 尚未部署它，也尚未 provision `pgid-mail-introspect`。不要把下列 local contract 解讀成已上線狀態。
+
+#### 5.4.2 Introspection request
+
+只接受 `POST`、`Content-Type: application/x-www-form-urlencoded`，完整 body 上限為 4096 bytes。Client credentials 必須用 `client_secret_post` 放在 form body；任何 `Authorization` header（包含 Basic）都會被拒絕。
+
+以下是單行 form body 範本；大寫項目是 placeholder，必須以 form URL encoding 代入 secret store 的 `PGID_MAIL_INTROSPECTION_CLIENT_SECRET` 與 Webmail 收到的 access token。範例不含任何 secret 或 token 值：
+
+```http
+POST /oauth2/introspect HTTP/1.1
+Host: sso.pg72.tw
+Content-Type: application/x-www-form-urlencoded
+
+client_id=pgid-mail-introspect&client_secret=URL_ENCODED_SECRET_FROM_PGID_MAIL_INTROSPECTION_CLIENT_SECRET&token=URL_ENCODED_WEBMAIL_OPAQUE_ACCESS_TOKEN&token_type_hint=access_token
+```
+
+`client_id`、`client_secret`、`token`、`token_type_hint` 是四個 single-value 欄位；其中任何一個重複出現都回 `400 invalid_request`。`token_type_hint` 可省略；提供時只作查詢順序提示，不是型別斷言。不要把 secret 或 token 寫進 URL、log、issue、commit 或聊天。
+
+#### 5.4.3 Introspection response
+
+授權且有效時回 HTTP `200`。Mail response 使用欄位 allowlist：必有 `active`、`client_id`、`scope`、`email`、`email_verified`，並只在 provider 有值時加入 `iss`、`exp`、`iat`。不會回 `sub`、`sid` 或 `token_type`，也不應由 caller 推導或依賴這些欄位。
+
+```json
+{
+  "active": true,
+  "client_id": "pg72-webmail",
+  "scope": "openid email",
+  "iss": "https://sso.pg72.tw",
+  "exp": 1800000000,
+  "iat": 1799999100,
+  "email": "verified-user@example.invalid",
+  "email_verified": true
+}
+```
+
+已成功認證的 caller 遇到未知、過期、撤銷、無權查看或不符合 Mail 條件的 token 時，一律回 HTTP `200` 與精確內容：
+
+```json
+{"active":false}
+```
+
+這也包含 malformed JWT、缺少或找不到 `kid` 的 JWT、簽章 / claim 驗證失敗、ID token、其他 signed JWT 與 refresh token。這些都是由輸入 token 控制的 inactive 情況；JWKS 損毀、同一 `kid` 對到多把 key 或內部 dependency failure 則仍是 server error，caller 必須 fail closed。
+
+所有 introspection JSON response 都帶 `Cache-Control: no-store` 與 `Pragma: no-cache`。Dedicated IP limiter 先於 body 與協議解析執行；通過 body size 與足以判定 client class 的 form preflight 後，client-class / IP limiter 會在 duplicate-field rejection 與 provider validation 前執行。因此 limiter 的 `429` / `503` 可能先於部分 protocol error。Local `wrangler.jsonc` 目前的兩層上限分別是每 IP 每分鐘 1200 次，以及每個 `mail` / `other` client class + IP 每分鐘 600 次；Cloudflare rate-limit binding 是防濫用控制，不應被 caller 當成精確的 distributed quota。
+
+其餘狀態契約如下：
+
+| HTTP | JSON `error` / 意義 | Caller 行為 |
+| --- | --- | --- |
+| `200` | 上述 active allowlist 或精確 `{"active":false}` | 只有 `active === true` 才接受；其餘拒絕登入。 |
+| `400` | `invalid_request` | 修正 request/form 欄位驗證、malformed form、Authorization header、重複 single-value 欄位或不合法 hint；不要帶原 request 到 log。 |
+| `401` | `invalid_client` | Secret 錯誤、client 不存在或 disabled；拒絕請求並由 operator 檢查 credential / client 狀態。 |
+| `405` | `invalid_request` | 改用 `POST`。 |
+| `413` | `invalid_request` | Body 超過 4096 bytes；拒絕，不要截斷 token 後重送。 |
+| `415` | `invalid_request` | 改用 `application/x-www-form-urlencoded` media type（可帶合法 media-type 參數）。 |
+| `429` | `rate_limited` | Fail closed，使用有上限且帶 jitter 的 backoff；不可把它當 inactive cache。 |
+| `503` | `temporarily_unavailable` | Dedicated limiter binding 無法判定；fail closed 並短暫重試。 |
+
+更精簡的 operator / developer 導覽見 [`wiki/developers/mail-introspection.md`](../../wiki/developers/mail-introspection.md)。
 
 ---
 

@@ -8,6 +8,7 @@ PGID is the custom identity provider for PG72 services. Phase 0 runs on Cloudfla
 - admin/developer-managed OAuth clients (dynamic registration disabled), mandatory consent, and the `bootadmin`/`admin`/`developer`/`user` platform role model;
 - host-only central sessions, device revocation, invitations, account suspension, and audit events;
 - versioned D1 migrations through local source `0013`; the latest production record remains applied through `0012` until the owner verifies/applies `0013` remotely;
+- a tightly scoped mail introspection path for Dovecot: local source authorizes only `pgid-mail-introspect` to inspect eligible `pg72-webmail` access tokens and disclose verified email; this path is not deployed or provisioned in production;
 - an independent OIDC relying party based on `oauth4webapi`;
 - workerd regression tests for discovery, security headers, registration policy, request aborts, D1 constraints, PKCE transactions, and callback replay.
 
@@ -59,7 +60,7 @@ PG72 services integrate as standard OIDC relying parties. Integration status (se
 | Status (`status.pg72.tw`) | OIDC BFF + D1 opaque session | Local integration complete; Preview and back-channel logout pending. |
 | Upload admin (`upload.pg72.tw/admin`) | Authlib OIDC + SQLite session (`client_secret_post`) | Local integration complete; VPS Preview/cutover runbook prepared. |
 | File Browser (`file.pg72.tw`) | oauth2-proxy gateway + proxy auth header | Deploy config prepared (`deploy/pgid/`); not yet deployed. |
-| Roundcube (`webmail.pg72.tw`) | Native Generic OIDC + Dovecot XOAUTH2 for mail | PGID introspection email prerequisite implemented/tested locally; not production-verified. Mail-server apply still requires owner maintenance window. |
+| Roundcube (`webmail.pg72.tw`) | Native Generic OIDC + Dovecot XOAUTH2 for mail | Owner selected Dovecot Path A. PGID prerequisite is implemented at local commit `9efdece` and passed the complete local gate (166 SSO tests, 4 RP tests); it is not deployed, `pgid-mail-introspect` is not provisioned, and the VPS has not been cut over. |
 
 Copy and Link have switched production traffic to PGID. Relying parties must use `client_secret_post` for the token endpoint (the provider's HTTP Basic parsing is not RFC-6749-percent-decode compatible). See `handoff.md` for cutover records.
 
@@ -120,6 +121,8 @@ pnpm audit --prod --audit-level high
 
 The audit currently reports the accepted Moderate `GHSA-p2fr-6hmx-4528`. Its constrained exposure and temporary controls are documented in [`SECURITY.md`](./SECURITY.md). A High or Critical advisory fails the release gate.
 
+The recorded full gate for the mail-introspection implementation at `9efdece` is 166 passing SSO tests and 4 passing RP protocol tests. That is a local-source verification record, not evidence of a production deployment or smoke test.
+
 ## Cloudflare Provisioning
 
 ### Preview
@@ -148,5 +151,14 @@ Full Production GO checklist:
 4. Create production OAuth clients through an authenticated admin operation with exact HTTPS redirect URIs.
 5. Configure Google callback `https://sso.pg72.tw/callback/google`.
 6. Re-run real Google and production Passkey flows, verify Copy/Link sign-out, and complete central `sid`/back-channel logout, recovery, rotation, restore, DLQ, and independent-review gates before changing the beta status.
+
+Mail Path A remains a separate owner-run rollout:
+
+1. Implement and verify real Passkey step-up for system-client provisioning and rotation; the current session-age freshness check alone is a production blocker.
+2. Verify the exact production `pg72-webmail` client metadata and take a private production D1 backup.
+3. Owner applies migration `0013`, then deploys the verified Worker source with Rate Limiting namespaces `1004` and `1005` bound as configured.
+4. After Passkey step-up, use a same-origin PGID admin session less than 10 minutes old to provision `pgid-mail-introspect`; immediately store its one-time secret in the approved secret store, never source, logs, issues, or chat.
+5. Verify eligible active, ineligible inactive, and bad-credential `401` production behavior. Verify rate-limit `429` and limiter-failure `503` only in isolated Preview or a controlled local test, never by flooding or breaking production.
+6. Cut over Dovecot/Roundcube only in that owner-controlled window with the rollback in [`handoff.md`](./handoff.md) ready. This documentation reconciliation ran no remote command and changed no production or VPS state.
 
 Dynamic client registration, passwords, Email OTP, TOTP, cross-subdomain cookies, and Cloudflare Access authentication are intentionally disabled.

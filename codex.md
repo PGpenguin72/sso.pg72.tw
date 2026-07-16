@@ -7,7 +7,9 @@
 
 ## 0. Phase 0 實作狀態
 
-截至 2026-07-16，本輪整合以本地 source baseline `1459229`（root `main`，無 remote）起始；整合後包含可部署的 SSO Worker、React 帳號中心、D1 migrations `0001`–`0013`、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理，以及使用 `oauth4webapi` 的獨立 test RP。`0013_confidential_client_secret_post.sql` 將既有 confidential client metadata 正規化為 `client_secret_post`；它不旋轉 secret、不改 grant/token，也不代表 production 已套用。整合前的 operational log 記錄過一次 144-test 完整 SSO 驗證；後續 introspection branch `df8c5d0` 回報 149 SSO tests 通過，兩條程式變更合併後仍須重跑完整 gate。
+截至 2026-07-16，root `main` 的本地 source 已包含可部署的 SSO Worker、React 帳號中心、D1 migrations `0001`–`0013`、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理、Mail Path A introspection prerequisite，以及使用 `oauth4webapi` 的獨立 test RP。最新本地完整 typecheck、workerd suite、production build 與 test RP protocol gate 全數通過。這次驗證沒有執行 deploy、remote D1、system-client provisioning 或其他 production 操作；程式合併與本地測試不得寫成遠端已上線。
+
+`0013_confidential_client_secret_post.sql` 將既有 confidential client metadata 正規化為 `client_secret_post`；它不旋轉 secret、不改 grant/token，也不代表 production 已套用。現有 deployment record 仍只確認 production D1 套用至 `0012`，`0013` 必須由 owner 在維護窗口另行確認與執行。
 
 既有部署紀錄顯示 `pg72-id` 已部署至 `https://sso.pg72.tw`，目前記錄的 Worker 版本是 `4d0c701a-c805-4254-ae2b-7c0df856b3c0`，production D1 已套用至 `0012`；Copy 與 Link 也已切換 production traffic 至 PGID。這些紀錄建立了「已部署 invite beta」現況，但仍不是完整 Production GO：中央 `sid`、back-channel logout、DLQ 告警、完整復原演練與其他 §9.2 gate 尚未完成。本次文件校準未執行 remote/production 查詢，實際遠端版本仍應由 owner 在維護窗口依 `handoff.md` 驗證。
 
@@ -17,7 +19,7 @@ Status 上游原始碼曾包含硬編碼 Telegram bot credential；目前兩個 
 
 Production `REGISTRATION_MODE` 目前仍是 `invite`。`public` 程式路徑與 workerd regression tests 已備妥：Google 首次登入要求 verified email、邀請功能保留、新帳號建立使用獨立 per-IP `REGISTRATION_RATE_LIMITER`，suspended/deleted 使用者仍由 session 建立檢查擋下。完整安全 gate 尚未完成，未完成項目列於 §9.2；只有 owner 明確核准並部署設定變更後才算開啟公開註冊。
 
-Mail Path A 所需的 PGID introspection email claim 已在本地 commit `df8c5d0` 實作並通過 149 SSO tests：只有 active access token 才可取得供 mail binding 使用的 email claim。這項結果尚未部署或經 production 驗證；Dovecot/Postfix/Roundcube 的 VPS cutover 仍須 owner 在場的維護窗口，不得因本地測試通過而直接套用。
+Mail Path A 所需的 PGID introspection prerequisite 已合併至本地 `main` 並納入上述完整 gate。它只允許固定的 `pgid-mail-introspect` 查詢簽發給 `pg72-webmail` 的 opaque access token，且 token 必須保有 live central session、`email` scope，以及 active、verified-email user；完整契約見 §10.5。這項結果尚未部署、尚未 provision system client，也未經 production 驗證；Dovecot/Postfix/Roundcube 的 VPS cutover 仍須 owner 在場的維護窗口，不得因本地測試通過而直接套用。
 
 2026-07 的 dependency audit 另發現 `GHSA-p2fr-6hmx-4528`：Better Auth stable `1.6.x` 未綁定 RFC 8707 resource indicator 與原 authorization grant。Phase 0 保持單一 `validAudiences`，並在 Worker 邊界拒絕 authorize/token 的所有 `resource` 參數；v1 不以 resource indicator 作授權邊界。詳細 owner、補償控制與 exit condition 見 [`SECURITY.md`](./SECURITY.md)。第一個包含修正的 stable release 發布後，必須讓 core/plugins 一起升級、重產 migration 並重跑完整 protocol suite。
 
@@ -136,6 +138,10 @@ Better Auth 僅作為協議與驗證引擎。PGID 自行實作產品介面、邀
 
 GitHub issue 內的 workaround 不是正式安全保證。任何 workaround 必須以 package patch 固定、附 regression test，並在升級時重新驗證。若 Phase 0 prototype 無法可靠通過以上測試，不在故障基礎上繼續堆功能；改由 VPS 上成熟 IdP/protocol runtime 承擔 Issuer，仍保留 `https://sso.pg72.tw` 與相同 RP contract。
 
+目前 `@better-auth/oauth-provider@1.6.23` 另以 tracked exact-version package patch `patches/@better-auth__oauth-provider@1.6.23.patch` 固定 Mail Path A introspection 行為。Patch 預設仍是 same-client introspection，只提供 opt-in hook 讓 PGID 實作 §10.5 的單一 cross-client 例外；同時修正 `APIError.status` 的 RFC 7662 inactive 判斷、把 `token_type_hint` 維持為 hint 而非限制 lookup，以及分類 token-controlled JOSE/kid failure。這不是可泛用的跨 client 授權開關。
+
+升級 Better Auth 時不得把 patch 機械套到其他版本，也不得用 `allowUnusedPatches` 隱藏版本不符。只有 pinned stable provider 已提供經審核的等價行為、乾淨 frozen install 能在移除 patch 後通過，且完整 introspection/protocol regression suite 全數通過，才可移除或重作這個 patch；core 與所有 plugins 仍須維持 exact pin 並一起評估 migration/advisory。
+
 ## 6. 高階架構
 
 ```text
@@ -218,7 +224,7 @@ Queue 用於：
 
 Queue 是 at-least-once delivery。所有 consumer 必須以 `event_id` 或 logout token 的 `jti` 去重，並支援重試。無法成功送達的事件進入 Dead Letter Queue 並產生管理告警。
 
-Queue 不作為撤銷真實來源；D1 中的 session/token 狀態才是 source of truth。
+Queue 不作為撤銷或 audit 真實來源；D1 中的 session/token 狀態與 `audit_event` 才是 source of truth。需要 audit 的 client mutation 必須將狀態變更與 D1 audit insert 放在同一個 batch，成功後才回應；Queue 只在 D1 commit 後作 best-effort security-event fan-out。Queue 在接受事件前失敗可能漏掉 fan-out，目前只有 redacted log，尚無 durable outbox/replayer 或告警補送；補齊這項是 full Production GO 前必須決定的債務。Queue 失敗不得讓已提交的 D1 狀態看似回滾，也不得把未入 D1 的事件視為已稽核。
 
 ### 7.4 Auth Gateway
 
@@ -241,6 +247,7 @@ Auth Gateway 僅用於無法原生支援 OIDC 的 HTTP 應用程式。
 - Google provider account 以 Google subject ID 綁定，不只比對 Email。
 - 同 Email 帳號不得靜默合併；必須由已登入使用者明確連結。
 - File Browser 等需要 username 的服務使用從 `sub` 派生的穩定別名，不直接使用可修改 Email。
+- 唯一的日常 Email identity 例外是 §10.5 的 Dovecot legacy mailbox lookup：固定 mail introspector 可從符合窄條件的 `pg72-webmail` access token 取得 verified email，以對應既有 mailbox。這不改變 PGID/RP 的 `sub` 主鍵規則，不可擴張成帳號合併、一般服務授權或其他 client 的 identity binding。
 
 ### 8.2 使用者狀態
 
@@ -297,6 +304,7 @@ invited -> active -> suspended -> deleted
 - [ ] 負載測試、備份還原演練、key rotation 與 Queue retry/DLQ 演練。
 - [ ] 新帳號限制狀態（限縮敏感功能）機制。
 - [ ] Back-channel logout 全面上線與 DLQ 告警。
+- [ ] Provision/rotate system client 等高風險操作的 Passkey step-up；目前 10 分鐘 session-age freshness 只是一道補償控制，不是重新驗證。
 
 ### 9.3 Google
 
@@ -315,6 +323,7 @@ invited -> active -> suspended -> deleted
 - 使用者可查看、命名與移除每一組 Passkey。
 - 管理員至少登錄兩組不同復原路徑的 Passkey。
 - 移除最後一組 Passkey、變更 Email、管理 client 或建立 recovery codes 必須 fresh authentication。
+- 現行 client mutation 的 fresh gate 只檢查 session 建立時間在 10 分鐘內；它不證明剛完成 Passkey 驗證。System-client provisioning、secret rotation 等高風險操作在 production 啟用前仍須加入 Passkey step-up，不能以 session age 宣稱已滿足。
 - Recovery code 僅供一次性帳號復原，不作為日常登入方式。
 
 ## 10. OIDC Client Contract
@@ -364,6 +373,29 @@ email email_verified name picture
 | 管理服務撤銷快取 | 不快取或使用同請求即時檢查 |
 
 第一方 Web App 完成 OIDC callback 後建立自己的 server-side session。Token 不得存入 `localStorage` 或可被 JavaScript 讀取的 cookie。
+
+### 10.5 Mail introspection system client（本地已實作，未部署）
+
+Mail Path A 對 RFC 7662 的唯一 cross-client 例外固定為：
+
+```text
+introspection client: pgid-mail-introspect
+token client:         pg72-webmail
+token type:           opaque access token only
+required state:       live central session + email scope + active user + verified email
+```
+
+- `pgid-mail-introspect` 與 `pg72-webmail` 是 system-reserved client ID；developer 不能 claim。一般 client 仍只能 introspect 自己的 token。
+- JWT、refresh token、其他 introspection-client/token-client 配對，以及缺少 live session、`email` scope、active user 或 verified email 的 token，一律回 RFC 7662 inactive；不能因來自第一方 client 而放寬。
+- 未知、過期、撤銷、停用 target client、JWT 無 `kid` 或 token-controlled JOSE 驗證失敗都回 HTTP 200 `{"active":false}`。`token_type_hint` 只是優先查詢提示，hint miss 必須再查另一種 token type。JWKS corruption、重複 matching `kid`、fetch timeout 等 server/infrastructure fault 仍是 internal error，不得偽裝成一般 inactive token。
+- 成功的 mail response 只允許 `active`、`client_id`、`scope`、`iss`、`exp`、`iat`、`email`、`email_verified`；不得回 `sub`、`sid` 或其他不必要 claim。Email 只供 Dovecot legacy mailbox lookup，不成為 PGID 或 Roundcube 的主鍵。
+- Introspection client 使用 `client_secret_post`；Worker preflight 拒絕 Authorization header、重複 single-value credentials/token 欄位、錯誤 media type、非 POST 與超過 4 KiB 的 body。Client authentication 失敗回 HTTP 401；token 狀態不得藉由 error response 洩漏。
+- `POST /api/admin/clients/provision-mail-introspector` 只允許 `clients.manage_all` actor，建立無 owner、無 redirect URI/scope，且只有 introspection-only sentinel grant（不能簽發 token）的 confidential service client；secret 只顯示一次，D1 只存 hash。Provision、rotate、disable/delete 都要求 10 分鐘內建立的 fresh session，但此 age gate 不是 Passkey step-up，後者仍是 production blocker。
+- 若 service secret 疑似外洩，先停用 `pgid-mail-introspect` 使 introspection fail closed，再 rotate secret、更新受管 secret store／Dovecot 設定；停用中的 client 無法通過真正的 introspection smoke，須在維護窗口重新啟用後立即 smoke，失敗即 re-disable/rollback。不得在事故處理中把 secret 寫入 D1 明文、log、文件或聊天。
+
+Introspection 不共用一般 auth 端點的 30/min limiter。`INTROSPECTION_IP_RATE_LIMITER` 使用 namespace `1004`、每 60 秒 1200 次的 IP bucket；`INTROSPECTION_CLIENT_RATE_LIMITER` 使用 namespace `1005`、每 60 秒 600 次的 client-class/IP bucket（`mail` 與 `other` 分開）。Binding failure 回 503、拒絕回 429。Cloudflare Workers Rate Limiting binding 的判斷是 per-location 且 permissive／eventually consistent，這些數字是濫用緩解而不是精確全域上限；不能用它取代 client authentication、token validation、D1 revocation source of truth 或上游邊界防護。
+
+以上程式與 regression coverage 已在本地 `main` 通過 §0 記錄的完整 gate，但 production 尚未 deploy、system client 尚未 provision，本輪也沒有執行 remote D1 操作或 mail VPS cutover。
 
 ## 11. Session 與全域登出
 
@@ -541,7 +573,7 @@ Audit metadata 不得包含 access token、refresh token、session token、autho
 - 支援 signing key overlap rotation，舊 key 在既有短效 token 到期後才移除。
 - 所有 secret 經 Wrangler secrets/Secrets Store 管理，不寫入 repo、log 或 D1 明文。
 - Recovery code、refresh token、client secret 與 invitation token 只保存不可逆 hash，除非協議明確要求可還原資料。
-- 管理員操作要求 fresh authentication；高風險操作要求 Passkey step-up。
+- 管理員操作要求 fresh authentication；高風險操作要求 Passkey step-up。目前 client mutation 的 session-age gate 已實作，Passkey step-up 尚未實作，屬 production blocker。
 - 管理員至少具有兩種獨立復原方式，並保留受控 break-glass 程序。
 - CORS 採 allowlist，不對 credentialed endpoints 使用 `*`。
 - 所有 state-changing endpoints 使用 CSRF 保護或不依賴 cookie 的等效防護。
@@ -668,7 +700,7 @@ Webmail 仍須分成兩個問題：
 
 在取得實際 IMAP/SMTP server 類型與設定前，不承諾瀏覽器 SSO 能完全取代郵件帳密。若 mail backend 不支援 `XOAUTH2`/`OAUTHBEARER`，需明確設計短效 mail credential bridge 或保留獨立 app password，不能把 SSO access token 當一般密碼轉送。
 
-目前選定的 Mail Path A 使用 Dovecot introspection + XOAUTH2。PGID 回傳 active access token email claim 的 prerequisite 已本地實作及測試，但尚未部署或 production 驗證；mail VPS 設定仍待 owner 維護窗口與完整 rollback/驗收。
+目前選定的 Mail Path A 使用 Dovecot introspection + XOAUTH2。§10.5 的固定 service-client／target-client 例外已在本地 `main` 實作及測試；只有具 live session、`email` scope 與 active verified user 的 `pg72-webmail` opaque access token 才會回 verified email，且該 email 只供 Dovecot 對應既有 mailbox。它尚未部署、provision 或經 production 驗證；mail VPS 設定、service-secret 注入、disable/rotate 演練與完整 rollback/驗收仍待 owner 維護窗口。
 
 ## 19. 測試與驗收
 
@@ -680,6 +712,7 @@ Webmail 仍須分成兩個問題：
 - Authorization code 無法重複兌換。
 - Refresh token rotation 與重用偵測正確。
 - Token revocation 與 introspection 狀態一致。
+- Mail delegated introspection 覆蓋 fixed client pair、live-session/email/verified-user gate、JWT/refresh/其他 pair 拒絕、`token_type_hint` fallback、JOSE/kid failure、secret disable/rotate、rate-limit failure 與最小 response allowlist。
 - Signing key rotation 期間新舊有效 token 均符合預期。
 
 ### 19.2 Authentication tests
@@ -741,6 +774,7 @@ Webmail 仍須分成兩個問題：
 - Status 與 Upload 的程式整合及本機安全測試完成；browser、agent、upload capability 已分離，待各自 Preview 實機 flow。
 - 從上游 stable release 自行打包 File Browser 與 Roundcube，不直接部署目前的 source snapshot。
 - 設定 File Browser proxy auth 與 Roundcube Generic OIDC。
+- Mail Path A 的窄 scope introspection prerequisite 已在本地 `main` 完成並通過完整 gate；仍待 owner 執行 deploy、system-client provisioning、Dovecot/VPS 設定、事故 rollback 與實機驗收。
 - 建立 auth gateway、origin lockdown 與管理服務 fail-closed policy。
 
 ### Phase 4：公開註冊 gate

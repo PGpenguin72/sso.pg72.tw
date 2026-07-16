@@ -8,7 +8,7 @@ PGID is the custom identity provider for PG72 services. Phase 0 runs on Cloudfla
 - nonempty central `sid` claims on every user ID token, with refresh issuance bound to the same live user session;
 - admin/developer-managed OAuth clients (dynamic registration disabled), mandatory consent, and the `bootadmin`/`admin`/`developer`/`user` platform role model;
 - host-only central sessions, device revocation, invitations, account suspension, and audit events;
-- versioned D1 migrations through local source `0015`: `0013` normalizes confidential client authentication, `0014` adds Passkey step-up state, and `0015` enforces global provider-identity ownership; the latest production record remains applied through `0012` until the owner verifies and applies the pending migrations in order;
+- versioned D1 migrations through local source `0016`: `0013` normalizes confidential client authentication, `0014` adds Passkey step-up state, `0015` enforces global provider-identity ownership, and `0016` adds one-time public-registration intents plus immutable legal-acceptance history; the latest production record remains applied through `0012` until the owner verifies and applies the pending migrations in order;
 - a tightly scoped mail introspection path for Dovecot: local source authorizes only `pgid-mail-introspect` to inspect eligible `pg72-webmail` access tokens and disclose verified email; this path is not deployed or provisioned in production;
 - Passkey step-up before every OAuth client mutation, using a one-time session/user-bound challenge, required user verification, and a D1 session timestamp; this path is implemented and tested locally but not migrated, deployed, independently reviewed, or smoke-tested in production;
 - an independent OIDC relying party based on `oauth4webapi`;
@@ -37,11 +37,13 @@ Current safeguards in public mode:
 - A first Google sign-in creates the account only when Google asserts a verified email; unverified emails are rejected in both modes.
 - Telegram does not provide an email, so it never creates a PGID account in either mode. It can sign in only after that Telegram identity was explicitly linked from an authenticated PGID session.
 - Passkey registration still requires an existing account and an authenticated session.
+- Public account creation requires an explicit current Terms/Privacy acceptance and a Turnstile token that the Worker verifies server-side for the exact PGID hostname and registration action. A successful challenge creates a short-lived, one-time opaque intent; only that intent ID crosses the protected OAuth state.
+- D1 records the accepted Terms/Privacy version identifiers and server-side intent issuance time with the new user. Database triggers require the three acceptance fields together, preserve the initial values, and write the immutable acceptance-history row in the user transaction.
 - New-account creation has its own per-IP Workers Rate Limiting budget (`REGISTRATION_RATE_LIMITER`, 5/min), stricter than the sign-in limiter (30/min). The budget is consumed before any denial audit write or invitation lookup so those cannot be spammed.
 - Suspended accounts and deleted (missing) users are blocked at session creation, so public mode does not bypass suspension. A deleted user who re-registers receives a brand-new `sub`.
 - Registration denials never reveal whether an account exists.
 
-Known-incomplete gates that block opening registration (tracked in `codex.md` §9.2): Turnstile/bot challenge, Terms/Privacy consent recording, abuse detection and response runbook, independent security review, OIDC conformance/security testing, DAST, SAST/secret/IaC scan gates, load testing, backup-restore and key-rotation drills, restricted state for new accounts, and full back-channel logout rollout.
+Known-incomplete gates that block opening registration (tracked in `codex.md` §9.2): production deployment/configuration and independent review of the local Turnstile/legal-acceptance slice, owner approval of the live policy version identifiers, abuse detection and response runbook, OIDC conformance/security testing, DAST, SAST/secret/IaC scan gates, load testing, backup-restore and key-rotation drills, restricted state for new accounts, and full back-channel logout rollout.
 
 ## Workspace
 
@@ -105,7 +107,7 @@ pnpm --filter @pg72/test-rp db:migrate:local
 pnpm --filter @pg72/id db:seed-test-rp:local
 ```
 
-Copy tracked `apps/sso/.dev.vars.example` to ignored `apps/sso/.dev.vars`, then replace the required placeholders with a random local secret and development Google credentials. Optional provider values are intentionally empty so copying the template cannot enable a provider; only fill them in when testing that provider. Never commit the real `.dev.vars`.
+Copy tracked `apps/sso/.dev.vars.example` to ignored `apps/sso/.dev.vars`, then replace the required placeholders with a random local secret and development Google credentials. The template exercises public mode, so it also needs a hostname-scoped Turnstile test widget and approved local Terms/Privacy version identifiers; set `REGISTRATION_MODE=invite` instead when that flow is not under test. Optional provider values are intentionally empty so copying the template cannot enable a provider; only fill them in when testing that provider. Never commit the real `.dev.vars`.
 
 ```bash
 openssl rand -base64 32
@@ -192,7 +194,7 @@ Mail Path A remains a separate owner-run rollout:
 
 1. Review the locally implemented Passkey step-up and verify its session/challenge binding, UV, replay, expiry, and missing-Passkey behavior independently; production still lacks migration `0014` and this Worker version.
 2. Verify the exact production `pg72-webmail` client metadata and take a private production D1 backup.
-3. Run the provider-identity duplicate preflight in `codex.md` §0.1, apply the reviewed pending migrations in numeric order (`0013`, `0014`, then `0015`), and deploy the verified Worker source with `PASSKEY_STEP_UP_MAX_AGE_SECONDS=600` plus Rate Limiting namespaces `1004` and `1005` bound as configured.
+3. Run the provider-identity duplicate preflight in `codex.md` §0.1, apply the reviewed pending migrations in numeric order (`0013`, `0014`, `0015`, then `0016`), and deploy the verified Worker source with `PASSKEY_STEP_UP_MAX_AGE_SECONDS=600` plus Rate Limiting namespaces `1004` and `1005` bound as configured. Migration `0016` is required by this Worker schema even while production remains invite-only; applying it does not authorize changing `REGISTRATION_MODE`.
 4. After Passkey step-up, use a same-origin PGID admin session less than 10 minutes old to provision `pgid-mail-introspect`; immediately store its one-time secret in the approved secret store, never source, logs, issues, or chat.
 5. Verify eligible active, ineligible inactive, and bad-credential `401` production behavior. Verify rate-limit `429` and limiter-failure `503` only in isolated Preview or a controlled local test, never by flooding or breaking production.
 6. Cut over Dovecot/Roundcube only in an owner-controlled maintenance window with

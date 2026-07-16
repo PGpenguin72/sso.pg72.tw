@@ -2,6 +2,7 @@ import { APIError } from "better-auth/api";
 
 import { recordAudit, type WaitUntilContext } from "./audit";
 import { normalizeEmail, type RuntimeConfig } from "./config";
+import { claimPublicRegistrationIntent } from "./public-registration";
 
 interface InvitationRow {
   id: string;
@@ -19,11 +20,15 @@ export interface RegistrationInput {
   emailVerified: boolean;
   /** Client IP taken from `cf-connecting-ip`; `"local"` when absent. */
   clientIp: string;
+  registrationIntentId?: string;
 }
 
 export interface RegistrationGrant {
+  legalAcceptedAt?: Date;
+  privacyAcceptedVersion?: string;
   role: "bootadmin" | "admin" | "developer" | "user";
   status: "active";
+  termsAcceptedVersion?: string;
 }
 
 /**
@@ -73,6 +78,16 @@ export async function authorizeRegistration(
     });
   }
 
+  const legalAcceptance =
+    config.registrationMode === "public"
+      ? await claimPublicRegistrationIntent(
+          env,
+          config,
+          input.registrationIntentId,
+          executionCtx,
+        )
+      : {};
+
   // Invitations stay functional in public mode: a pending invitation still
   // assigns its role and is consumed by the create.after hook.
   const invitation = await env.PG72_ID_DB.prepare(
@@ -100,6 +115,7 @@ export async function authorizeRegistration(
   }
 
   return {
+    ...legalAcceptance,
     role: isBootstrapAdmin ? "bootadmin" : (invitation?.role ?? "user"),
     status: "active",
   };

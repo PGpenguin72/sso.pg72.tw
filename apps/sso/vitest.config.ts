@@ -12,7 +12,11 @@ const TEST_BINDINGS = {
   PASSKEY_ORIGIN: "http://localhost:5173",
   PASSKEY_RP_ID: "localhost",
   PASSKEY_STEP_UP_MAX_AGE_SECONDS: "600",
+  PRIVACY_VERSION: "2026-07-17.test",
   REGISTRATION_MODE: "invite",
+  TERMS_VERSION: "2026-07-17.test",
+  TURNSTILE_SECRET_KEY: "test-only-turnstile-secret",
+  TURNSTILE_SITE_KEY: "test-only-turnstile-site-key",
   // Exercise the custom provider without reading an ignored .dev.vars file.
   TELEGRAM_BOT_TOKEN: "123456:AAvitest-telegram-bot-token",
 } as const;

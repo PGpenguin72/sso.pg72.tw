@@ -35,7 +35,15 @@ export interface RuntimeConfig {
   passkeyOrigin: string;
   passkeyRpId: string;
   passkeyStepUpMaxAgeMs: number;
+  publicRegistration: PublicRegistrationConfig | null;
   registrationMode: RegistrationMode;
+}
+
+export interface PublicRegistrationConfig {
+  privacyVersion: string;
+  termsVersion: string;
+  turnstileSecretKey: string;
+  turnstileSiteKey: string;
 }
 
 function required(value: string | undefined, name: string): string {
@@ -65,6 +73,16 @@ function boundedInteger(
     throw new Error(`${name} must be an integer from ${minimum} to ${maximum}`);
   }
   return parsed;
+}
+
+function versionIdentifier(value: string | undefined, name: string): string {
+  const version = required(value, name);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(version)) {
+    throw new Error(
+      `${name} must be a 1-64 character version identifier`,
+    );
+  }
+  return version;
 }
 
 export function readRuntimeConfig(env: Env): RuntimeConfig {
@@ -104,6 +122,24 @@ export function readRuntimeConfig(env: Env): RuntimeConfig {
     env.BOOTSTRAP_ADMIN_EMAIL,
     "BOOTSTRAP_ADMIN_EMAIL",
   ).toLowerCase();
+  const publicRegistration =
+    registrationMode === "public"
+      ? {
+          privacyVersion: versionIdentifier(
+            env.PRIVACY_VERSION,
+            "PRIVACY_VERSION",
+          ),
+          termsVersion: versionIdentifier(env.TERMS_VERSION, "TERMS_VERSION"),
+          turnstileSecretKey: required(
+            env.TURNSTILE_SECRET_KEY,
+            "TURNSTILE_SECRET_KEY",
+          ),
+          turnstileSiteKey: required(
+            env.TURNSTILE_SITE_KEY,
+            "TURNSTILE_SITE_KEY",
+          ),
+        }
+      : null;
 
   if (environment === "production") {
     if (authBaseUrl !== "https://sso.pg72.tw") {
@@ -121,6 +157,7 @@ export function readRuntimeConfig(env: Env): RuntimeConfig {
     passkeyOrigin,
     passkeyRpId,
     passkeyStepUpMaxAgeMs: passkeyStepUpMaxAgeSeconds * 1000,
+    publicRegistration,
     registrationMode,
   };
 }

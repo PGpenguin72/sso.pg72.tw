@@ -4,7 +4,7 @@ PGID currently runs as a deployed, invite-only production beta. Existing deploym
 
 This deployed state is not the same as full Production GO or general-public approval. Local source now emits and validates the central ID-token `sid`, but the visited-client ledger, replay-safe back-channel logout, recovery/rotation drills, independent review, and other gates below are still incomplete; no document may treat production traffic alone as proof that those controls passed.
 
-The repository's local source now includes the narrowly scoped Mail Path A introspection prerequisite and Passkey step-up for every OAuth client mutation, and has passed its full local typecheck, workerd, production-build, and test-RP protocol gate. Production has none of migrations `0013`/`0014`/`0015` or this Worker version; `pgid-mail-introspect` has not been provisioned, no remote D1 operation was performed, and the mail VPS has not been cut over. These local results must not be represented as production behavior.
+The repository's local source now includes the narrowly scoped Mail Path A introspection prerequisite, Passkey step-up for every OAuth client mutation, and a public-registration prerequisite slice using Turnstile plus versioned legal acceptance. Production has none of migrations `0013`/`0014`/`0015`/`0016` or this Worker version; `pgid-mail-introspect` has not been provisioned, no public-registration bindings have been configured, no remote D1 operation was performed, and the mail VPS has not been cut over. These local results must not be represented as production behavior.
 
 ## Reporting
 
@@ -39,13 +39,15 @@ Before enabling `REGISTRATION_MODE=public` or declaring full Production GO, comp
 - automated SAST, dependency, secret, and IaC/config scanning;
 - a central visited-client ledger, replay-safe back-channel logout, retry/DLQ alerting, and RP logout verification;
 - recovery-code/break-glass, signing-key rotation, D1 restore, and Queue retry/DLQ drills;
-- Turnstile or equivalent bot controls, abuse response, and versioned Terms/Privacy consent;
+- deploy, configure, independently review, and smoke-test the locally implemented Turnstile and versioned Terms/Privacy acceptance path after applying migration `0016`; the owner must approve the exact live policy versions, and an abuse-response runbook remains separately required;
 - deploy and independently review the locally implemented Passkey step-up for high-risk system-client provisioning and secret rotation; production must apply migration `0014`, and the session-age freshness check remains an additional condition rather than a substitute;
 - no unresolved Critical or High finding; every accepted Medium still needs an owner, deadline, and compensating control.
 
 The canonical checklist is [`codex.md`](./codex.md) §9.2. The deployed configuration remains `invite` until that gate passes and the owner explicitly approves and deploys the switch.
 
 The verified-email enrollment boundary applies to every new account. Telegram Login Widget payloads contain no email, so an unmatched Telegram identity is rate-limited, audited without its Telegram ID or other PII, and rejected in both `invite` and `public` modes. Telegram may authenticate only an active account to which that provider identity was explicitly linked from an authenticated PGID session; no placeholder-email account is created. D1 enforces one owner for every `(providerId, accountId)` pair, and Telegram linking uses the constraint result rather than a race-prone read-then-insert decision.
+
+The local public-registration path fails closed unless the browser explicitly accepts the configured current policy versions and completes Turnstile. The Worker validates the Turnstile response server-side for the exact issuer hostname and fixed registration action, stores a random short-lived one-time intent, and consumes it atomically during verified-email account creation. Only the public site key and policy version identifiers are returned to the browser; the Turnstile secret belongs in Wrangler secrets or Secrets Store. Migration `0016` stores the server-side acceptance time and immutable version history. None of these controls are active in the deployed invite-only production configuration.
 
 ## Local Mail Introspection Boundary
 

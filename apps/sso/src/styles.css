@@ -540,6 +540,76 @@ svg {
   margin: 34px 0 14px;
 }
 
+.auth-mode-switch {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 2px;
+  margin: 28px 0 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-control);
+  background: var(--surface-soft);
+  padding: 3px;
+}
+
+.auth-mode-switch button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.auth-mode-switch button[aria-pressed="true"] {
+  background: var(--surface);
+  box-shadow: var(--shadow-inset-top);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.registration-prerequisites {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 18px;
+  border-bottom: 1px solid var(--border);
+  padding: 0 0 18px;
+}
+
+.registration-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.registration-check input {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  margin: 1px 0 0;
+  accent-color: var(--accent);
+}
+
+.registration-check a {
+  margin-left: 4px;
+  color: var(--accent);
+}
+
+.registration-version {
+  color: var(--text-faint);
+  overflow-wrap: anywhere;
+}
+
+.turnstile-slot {
+  width: 100%;
+  min-height: 65px;
+  overflow: hidden;
+}
+
 .invite-note {
   display: flex;
   align-items: center;

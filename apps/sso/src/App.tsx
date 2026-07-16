@@ -68,6 +68,40 @@ interface ConsentClientResponse {
   client?: ConsentClientInfo;
 }
 
+interface PublicRegistrationOptions {
+  privacyVersion: string;
+  siteKey: string;
+  termsVersion: string;
+}
+
+interface RegistrationConfig {
+  mode: "invite" | "public";
+  publicRegistration: PublicRegistrationOptions | null;
+}
+
+interface TurnstileApi {
+  remove(widgetId: string): void;
+  render(
+    container: HTMLElement,
+    options: {
+      action: string;
+      callback(token: string): void;
+      "error-callback"(): void;
+      "expired-callback"(): void;
+      sitekey: string;
+      size: "flexible";
+      theme: "auto";
+    },
+  ): string;
+  reset(widgetId: string): void;
+}
+
+declare global {
+  interface Window {
+    turnstile?: TurnstileApi;
+  }
+}
+
 interface AuthorizedApplication {
   id: string;
   clientId: string;
@@ -76,6 +110,159 @@ interface AuthorizedApplication {
   scopes: string[];
   createdAt: string;
   updatedAt: string;
+}
+
+const TURNSTILE_SCRIPT_ID = "pgid-turnstile-api";
+const TURNSTILE_REGISTRATION_ACTION = "pgid_public_registration";
+let turnstileLoadPromise: Promise<TurnstileApi> | null = null;
+
+function loadTurnstile(): Promise<TurnstileApi> {
+  if (window.turnstile) return Promise.resolve(window.turnstile);
+  if (turnstileLoadPromise) return turnstileLoadPromise;
+
+  turnstileLoadPromise = new Promise<TurnstileApi>((resolve, reject) => {
+    const failed = () => {
+      document.getElementById(TURNSTILE_SCRIPT_ID)?.remove();
+      turnstileLoadPromise = null;
+      reject(new Error("Turnstile API failed to load"));
+    };
+    const ready = () => {
+      if (window.turnstile) resolve(window.turnstile);
+      else failed();
+    };
+    const existing = document.getElementById(TURNSTILE_SCRIPT_ID);
+    if (existing) {
+      existing.addEventListener("load", ready, { once: true });
+      existing.addEventListener("error", failed, { once: true });
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.id = TURNSTILE_SCRIPT_ID;
+    script.src =
+      "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+    script.async = true;
+    script.defer = true;
+    script.addEventListener("load", ready, { once: true });
+    script.addEventListener("error", failed, { once: true });
+    document.head.appendChild(script);
+  });
+  return turnstileLoadPromise;
+}
+
+export function RegistrationTurnstile({
+  onError,
+  onToken,
+  resetKey,
+  siteKey,
+}: {
+  onError(): void;
+  onToken(token: string | null): void;
+  resetKey: number;
+  siteKey: string;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const widgetRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const container = containerRef.current;
+    if (!container) return;
+
+    void loadTurnstile()
+      .then((turnstile) => {
+        if (cancelled || !containerRef.current) return;
+        widgetRef.current = turnstile.render(containerRef.current, {
+          action: TURNSTILE_REGISTRATION_ACTION,
+          callback: (token) => onToken(token),
+          "error-callback": () => {
+            onToken(null);
+            onError();
+          },
+          "expired-callback": () => onToken(null),
+          sitekey: siteKey,
+          size: "flexible",
+          theme: "auto",
+        });
+      })
+      .catch(() => {
+        if (!cancelled) onError();
+      });
+
+    return () => {
+      cancelled = true;
+      if (widgetRef.current && window.turnstile) {
+        window.turnstile.remove(widgetRef.current);
+      }
+      widgetRef.current = null;
+      container.replaceChildren();
+    };
+  }, [onError, onToken, siteKey]);
+
+  useEffect(() => {
+    if (widgetRef.current && window.turnstile) {
+      window.turnstile.reset(widgetRef.current);
+    }
+  }, [resetKey]);
+
+  return <div className="turnstile-slot" ref={containerRef} />;
+}
+
+export function RegistrationPrerequisites({
+  onPrivacyAccepted,
+  onTermsAccepted,
+  onTurnstileError,
+  onTurnstileToken,
+  privacyAccepted,
+  privacyVersion,
+  resetKey,
+  siteKey,
+  termsAccepted,
+  termsVersion,
+}: {
+  onPrivacyAccepted(accepted: boolean): void;
+  onTermsAccepted(accepted: boolean): void;
+  onTurnstileError(): void;
+  onTurnstileToken(token: string | null): void;
+  privacyAccepted: boolean;
+  privacyVersion: string;
+  resetKey: number;
+  siteKey: string;
+  termsAccepted: boolean;
+  termsVersion: string;
+}) {
+  return (
+    <div className="registration-prerequisites">
+      <label className="registration-check">
+        <input
+          type="checkbox"
+          checked={termsAccepted}
+          onChange={(event) => onTermsAccepted(event.target.checked)}
+        />
+        <span>
+          我已閱讀並同意<a href="/tos">服務條款</a>
+          <span className="registration-version">（版本 {termsVersion}）</span>
+        </span>
+      </label>
+      <label className="registration-check">
+        <input
+          type="checkbox"
+          checked={privacyAccepted}
+          onChange={(event) => onPrivacyAccepted(event.target.checked)}
+        />
+        <span>
+          我已閱讀並同意<a href="/pp">隱私權政策</a>
+          <span className="registration-version">（版本 {privacyVersion}）</span>
+        </span>
+      </label>
+      <RegistrationTurnstile
+        onError={onTurnstileError}
+        onToken={onTurnstileToken}
+        resetKey={resetKey}
+        siteKey={siteKey}
+      />
+    </div>
+  );
 }
 
 interface AuthorizationsResponse {
@@ -532,7 +719,16 @@ function TelegramLogin({
 export function SignInView({ pending }: { pending: boolean }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [entryMode, setEntryMode] = useState<"register" | "sign-in">(
+    "sign-in",
+  );
   const [enabledSocial, setEnabledSocial] = useState<string[] | null>(null);
+  const [registrationConfig, setRegistrationConfig] =
+    useState<RegistrationConfig | null>(null);
+  const [privacyAccepted, setPrivacyAccepted] = useState(false);
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const [turnstileResetKey, setTurnstileResetKey] = useState(0);
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
   const [telegramConfig, setTelegramConfig] = useState<TelegramConfig | null>(
     null,
   );
@@ -548,6 +744,29 @@ export function SignInView({ pending }: { pending: boolean }) {
       })
       .catch(() => {
         if (!cancelled) setEnabledSocial([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/registration/config", {
+      headers: { accept: "application/json" },
+    })
+      .then((response) =>
+        response.ok
+          ? response.json()
+          : { mode: "invite", publicRegistration: null },
+      )
+      .then((config: RegistrationConfig) => {
+        if (!cancelled) setRegistrationConfig(config);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRegistrationConfig({ mode: "invite", publicRegistration: null });
+        }
       });
     return () => {
       cancelled = true;
@@ -581,16 +800,88 @@ export function SignInView({ pending }: { pending: boolean }) {
     ? SOCIAL_SIGN_IN_PROVIDERS.filter((p) => enabledSocial.includes(p.id))
     : [];
   const telegramEnabled = telegramConfig?.enabled === true;
+  const publicRegistration =
+    registrationConfig?.mode === "public"
+      ? registrationConfig.publicRegistration
+      : null;
+  const registering = entryMode === "register" && publicRegistration !== null;
+  const registrationReady =
+    !registering ||
+    (privacyAccepted && termsAccepted && turnstileToken !== null);
   // Hide the divider + grid entirely when nothing in the section is available.
   const showSocialSection =
-    socialConfigReady && (visibleSocial.length > 0 || telegramEnabled);
+    socialConfigReady &&
+    (visibleSocial.length > 0 || (!registering && telegramEnabled));
+
+  const resetRegistrationChallenge = () => {
+    setTurnstileToken(null);
+    setTurnstileResetKey((value) => value + 1);
+  };
+
+  const changeEntryMode = (mode: "register" | "sign-in") => {
+    setEntryMode(mode);
+    setError(null);
+    resetRegistrationChallenge();
+  };
 
   const socialSignIn = async (provider: string, label: string) => {
     setBusy(provider);
     setError(null);
+    let registrationIntentId: string | undefined;
+    if (registering && publicRegistration) {
+      if (!registrationReady || !turnstileToken) {
+        setError("請完成驗證並同意目前的服務條款與隱私權政策。");
+        setBusy(null);
+        return;
+      }
+      try {
+        const response = await fetch("/api/registration/intent", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            acceptPrivacy: privacyAccepted,
+            acceptTerms: termsAccepted,
+            privacyVersion: publicRegistration.privacyVersion,
+            termsVersion: publicRegistration.termsVersion,
+            turnstileToken,
+          }),
+        });
+        const payload: unknown = await response.json();
+        registrationIntentId =
+          payload &&
+          typeof payload === "object" &&
+          "intentId" in payload &&
+          typeof payload.intentId === "string"
+            ? payload.intentId
+            : undefined;
+        if (!response.ok || !registrationIntentId) {
+          setError(
+            response.status === 503
+              ? "註冊驗證暫時無法使用，請稍後再試。"
+              : "註冊驗證未通過，請重新完成驗證。",
+          );
+          resetRegistrationChallenge();
+          setBusy(null);
+          return;
+        }
+      } catch {
+        setError("註冊驗證暫時無法使用，請稍後再試。");
+        resetRegistrationChallenge();
+        setBusy(null);
+        return;
+      }
+    }
     const result = await authClient.signIn.social({
       provider: provider as SocialProviderId,
       callbackURL: window.location.href,
+      ...(registrationIntentId
+        ? {
+            additionalData: {
+              pgidRegistrationIntent: registrationIntentId,
+            },
+            requestSignUp: true,
+          }
+        : {}),
     });
     if (result?.error) {
       setError(messageFrom(result.error, `${label} 登入失敗，請稍後再試。`));
@@ -599,6 +890,15 @@ export function SignInView({ pending }: { pending: boolean }) {
   };
 
   const googleSignIn = () => void socialSignIn("google", "Google");
+
+  const turnstileError = useCallback(() => {
+    setError("無法載入註冊驗證，請稍後再試。");
+  }, []);
+
+  const receiveTurnstileToken = useCallback((token: string | null) => {
+    setTurnstileToken(token);
+    if (token) setError(null);
+  }, []);
 
   const passkeySignIn = async () => {
     setBusy("passkey");
@@ -618,28 +918,72 @@ export function SignInView({ pending }: { pending: boolean }) {
           <Brand />
           <span className="eyebrow">Secure account</span>
           <h1>{oauthQuery ? "繼續登入" : "登入 PGID"}</h1>
-          <p>{PUBLIC_PRODUCT_COPY.signIn}</p>
+          <p>
+            {publicRegistration
+              ? PUBLIC_PRODUCT_COPY.publicRegistration
+              : PUBLIC_PRODUCT_COPY.signIn}
+          </p>
         </div>
+
+        {publicRegistration ? (
+          <div className="auth-mode-switch" role="group" aria-label="帳號流程">
+            <button
+              type="button"
+              aria-pressed={!registering}
+              onClick={() => changeEntryMode("sign-in")}
+            >
+              登入既有帳號
+            </button>
+            <button
+              type="button"
+              aria-pressed={registering}
+              onClick={() => changeEntryMode("register")}
+            >
+              建立新帳號
+            </button>
+          </div>
+        ) : null}
+
+        {registering && publicRegistration ? (
+          <RegistrationPrerequisites
+            onPrivacyAccepted={setPrivacyAccepted}
+            onTermsAccepted={setTermsAccepted}
+            onTurnstileError={turnstileError}
+            onTurnstileToken={receiveTurnstileToken}
+            privacyAccepted={privacyAccepted}
+            privacyVersion={publicRegistration.privacyVersion}
+            resetKey={turnstileResetKey}
+            siteKey={publicRegistration.siteKey}
+            termsAccepted={termsAccepted}
+            termsVersion={publicRegistration.termsVersion}
+          />
+        ) : null}
 
         <div className="auth-actions" aria-busy={pending || busy !== null}>
           <button
             className="button button-primary button-wide"
             type="button"
             onClick={googleSignIn}
-            disabled={pending || busy !== null}
+            disabled={pending || busy !== null || !registrationReady}
           >
             <LogIn aria-hidden="true" />
-            {busy === "google" ? "正在連線..." : "使用 Google 繼續"}
+            {busy === "google"
+              ? "正在連線..."
+              : registering
+                ? "使用 Google 建立帳號"
+                : "使用 Google 繼續"}
           </button>
-          <button
-            className="button button-secondary button-wide"
-            type="button"
-            onClick={passkeySignIn}
-            disabled={pending || busy !== null}
-          >
-            <KeyRound aria-hidden="true" />
-            {busy === "passkey" ? "等待驗證..." : "使用 Passkey"}
-          </button>
+          {!registering ? (
+            <button
+              className="button button-secondary button-wide"
+              type="button"
+              onClick={passkeySignIn}
+              disabled={pending || busy !== null}
+            >
+              <KeyRound aria-hidden="true" />
+              {busy === "passkey" ? "等待驗證..." : "使用 Passkey"}
+            </button>
+          ) : null}
         </div>
 
         {showSocialSection ? (
@@ -654,13 +998,13 @@ export function SignInView({ pending }: { pending: boolean }) {
                   key={provider.id}
                   className="button button-secondary"
                   type="button"
-                  disabled={pending || busy !== null}
+                  disabled={pending || busy !== null || !registrationReady}
                   onClick={() => void socialSignIn(provider.id, provider.label)}
                 >
                   {busy === provider.id ? "正在連線..." : provider.label}
                 </button>
               ))}
-              {telegramEnabled && telegramConfig ? (
+              {!registering && telegramEnabled && telegramConfig ? (
                 <TelegramLogin
                   config={telegramConfig}
                   disabled={pending || busy !== null}

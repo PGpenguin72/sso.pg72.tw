@@ -1,6 +1,8 @@
 export const PUBLIC_PRODUCT_COPY = {
   signIn:
     "使用 Google、Passkey 或其他已啟用的社群帳號登入。PGID 目前是邀請制 beta；首次建立帳號需先取得邀請，Passkey 僅供既有帳號使用。",
+  publicRegistration:
+    "登入既有 PGID 帳號，或在完成防濫用驗證並同意目前政策後建立新帳號。Passkey 僅供既有帳號使用。",
   aboutLead: "一組帳號，安全登入支援 PGID 的服務。",
   aboutOverview:
     "PGID 是 PG72 自建的單一登入（SSO）與身分中心，讓你使用一組 PGID 帳號登入已接入 PGID 的服務，不必在每個參與服務重複建立身分。",

@@ -18,6 +18,18 @@ interface PublicViews {
     passkey: Passkey;
   }>;
   LegalPage: ComponentType<{ kind: "pp" | "tos" }>;
+  RegistrationPrerequisites: ComponentType<{
+    onPrivacyAccepted: (accepted: boolean) => void;
+    onTermsAccepted: (accepted: boolean) => void;
+    onTurnstileError: () => void;
+    onTurnstileToken: (token: string | null) => void;
+    privacyAccepted: boolean;
+    privacyVersion: string;
+    resetKey: number;
+    siteKey: string;
+    termsAccepted: boolean;
+    termsVersion: string;
+  }>;
   SignInView: ComponentType<{ pending: boolean }>;
 }
 
@@ -112,6 +124,30 @@ describe("rendered public product copy", () => {
     expect(dialog).toContain("刪除後無法再用這把 Passkey 登入");
     expect(dialog).toContain("尚未提供自助帳號復原流程");
     expect(dialog).toContain("請保留至少一種可用的登入方式");
+  });
+
+  it("renders explicit legal acceptance and a stable Turnstile slot", () => {
+    const prerequisites = renderToStaticMarkup(
+      createElement(publicViews.RegistrationPrerequisites, {
+        onPrivacyAccepted: () => undefined,
+        onTermsAccepted: () => undefined,
+        onTurnstileError: () => undefined,
+        onTurnstileToken: () => undefined,
+        privacyAccepted: false,
+        privacyVersion: "2026-07-17.privacy",
+        resetKey: 0,
+        siteKey: "test-site-key",
+        termsAccepted: false,
+        termsVersion: "2026-07-17.terms",
+      }),
+    );
+
+    expect(prerequisites.match(/type="checkbox"/g)).toHaveLength(2);
+    expect(prerequisites).toContain('href="/tos"');
+    expect(prerequisites).toContain('href="/pp"');
+    expect(prerequisites).toContain('class="turnstile-slot"');
+    expect(prerequisites).toContain("2026-07-17.terms");
+    expect(prerequisites).toContain("2026-07-17.privacy");
   });
 });
 

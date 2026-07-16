@@ -1,17 +1,32 @@
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { readRuntimeConfig } from "../worker/config";
+import worker from "../worker/index";
 import {
   assertSessionUserActive,
   authorizeRegistration,
 } from "../worker/registration";
+import {
+  issuePublicRegistrationIntent,
+  PUBLIC_REGISTRATION_STATE_KEY,
+  publicRegistrationRoutes,
+  registrationIntentIdFromOAuthState,
+  TURNSTILE_REGISTRATION_ACTION,
+  verifyTurnstileRegistrationToken,
+} from "../worker/public-registration";
 import { createAuthenticatedUser } from "./helpers";
 
 const publicEnv = { ...env, REGISTRATION_MODE: "public" } as Env;
 const inviteEnv = { ...env, REGISTRATION_MODE: "invite" } as Env;
 const publicConfig = readRuntimeConfig(publicEnv);
 const inviteConfig = readRuntimeConfig(inviteEnv);
+
+function testExecutionContext(): ExecutionContext {
+  return {
+    waitUntil: () => undefined,
+  } as unknown as ExecutionContext;
+}
 
 let ipCounter = 0;
 function uniqueIp(): string {
@@ -21,6 +36,61 @@ function uniqueIp(): string {
 
 function randomEmail(): string {
   return `${crypto.randomUUID()}@example.com`;
+}
+
+function base64UrlJson(value: unknown): string {
+  return btoa(JSON.stringify(value))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/, "");
+}
+
+function testGoogleIdToken(email: string): string {
+  const now = Math.floor(Date.now() / 1000);
+  return [
+    base64UrlJson({ alg: "none", typ: "JWT" }),
+    base64UrlJson({
+      aud: publicEnv.GOOGLE_CLIENT_ID,
+      email,
+      email_verified: true,
+      exp: now + 300,
+      iat: now,
+      iss: "https://accounts.google.com",
+      name: "Public registration test",
+      sub: crypto.randomUUID(),
+    }),
+    "test-signature",
+  ].join(".");
+}
+
+const verifiedTurnstileFetch: typeof fetch = async (_input, init) => {
+  const form = init?.body;
+  expect(form).toBeInstanceOf(FormData);
+  expect((form as FormData).get("secret")).toBe(
+    publicConfig.publicRegistration?.turnstileSecretKey,
+  );
+  return Response.json({
+    action: TURNSTILE_REGISTRATION_ACTION,
+    hostname: "localhost",
+    success: true,
+  });
+};
+
+async function createPublicRegistrationIntent(clientIp = uniqueIp()) {
+  return issuePublicRegistrationIntent(
+    publicEnv,
+    publicConfig,
+    {
+      acceptPrivacy: true,
+      acceptTerms: true,
+      privacyVersion: publicConfig.publicRegistration?.privacyVersion,
+      termsVersion: publicConfig.publicRegistration?.termsVersion,
+      turnstileToken: `test-turnstile-${crypto.randomUUID()}`,
+    },
+    clientIp,
+    undefined,
+    verifiedTurnstileFetch,
+  );
 }
 
 async function createInvitation(
@@ -43,14 +113,254 @@ async function createInvitation(
 }
 
 describe("registration policy", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("reads only the opaque registration intent from OAuth state", () => {
+    const intentId = "A".repeat(43);
+    expect(
+      registrationIntentIdFromOAuthState({
+        [PUBLIC_REGISTRATION_STATE_KEY]: intentId,
+      }),
+    ).toBe(intentId);
+    expect(registrationIntentIdFromOAuthState(null)).toBeUndefined();
+    expect(
+      registrationIntentIdFromOAuthState({
+        [PUBLIC_REGISTRATION_STATE_KEY]: 42,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("requires all public-registration bindings only in public mode", () => {
+    expect(
+      readRuntimeConfig({
+        ...inviteEnv,
+        PRIVACY_VERSION: undefined,
+        TERMS_VERSION: undefined,
+        TURNSTILE_SECRET_KEY: undefined,
+        TURNSTILE_SITE_KEY: undefined,
+      }).publicRegistration,
+    ).toBeNull();
+    for (const binding of [
+      "PRIVACY_VERSION",
+      "TERMS_VERSION",
+      "TURNSTILE_SECRET_KEY",
+      "TURNSTILE_SITE_KEY",
+    ] as const) {
+      expect(() =>
+        readRuntimeConfig({ ...publicEnv, [binding]: "" }),
+      ).toThrow(`Missing required binding: ${binding}`);
+    }
+  });
+
+  it("exposes only public registration configuration", async () => {
+    const inviteResponse = await publicRegistrationRoutes.request(
+      "/api/registration/config",
+      undefined,
+      inviteEnv,
+    );
+    expect(await inviteResponse.json()).toEqual({
+      mode: "invite",
+      publicRegistration: null,
+    });
+
+    const publicResponse = await publicRegistrationRoutes.request(
+      "/api/registration/config",
+      undefined,
+      publicEnv,
+    );
+    const body = (await publicResponse.json()) as Record<string, unknown>;
+    expect(body).toEqual({
+      mode: "public",
+      publicRegistration: {
+        privacyVersion: "2026-07-17.test",
+        siteKey: "test-only-turnstile-site-key",
+        termsVersion: "2026-07-17.test",
+      },
+    });
+    expect(JSON.stringify(body)).not.toContain("turnstileSecretKey");
+  });
+
+  it("enforces exact origin and issues an intent through the HTTP route", async () => {
+    vi.stubGlobal("fetch", verifiedTurnstileFetch);
+    const requestBody = JSON.stringify({
+      acceptPrivacy: true,
+      acceptTerms: true,
+      privacyVersion: "2026-07-17.test",
+      termsVersion: "2026-07-17.test",
+      turnstileToken: "test-route-token",
+    });
+    const wrongOrigin = await publicRegistrationRoutes.request(
+      "/api/registration/intent",
+      {
+        body: requestBody,
+        headers: {
+          "content-type": "application/json",
+          origin: "https://example.test",
+        },
+        method: "POST",
+      },
+      publicEnv,
+      testExecutionContext(),
+    );
+    expect(wrongOrigin.status).toBe(403);
+    expect(await wrongOrigin.json()).toEqual({ error: "invalid_origin" });
+
+    const response = await publicRegistrationRoutes.request(
+      "/api/registration/intent",
+      {
+        body: requestBody,
+        headers: {
+          "cf-connecting-ip": uniqueIp(),
+          "content-type": "application/json",
+          origin: publicConfig.authBaseUrl,
+        },
+        method: "POST",
+      },
+      publicEnv,
+      testExecutionContext(),
+    );
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      expiresAt: expect.any(String),
+      intentId: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+    });
+  });
+
+  it("carries the intent through protected OAuth state into the user hook", async () => {
+    const email = randomEmail();
+    const intent = await createPublicRegistrationIntent();
+    const signInResponse = await worker.fetch(
+      new Request("http://localhost:5173/sign-in/social", {
+        body: JSON.stringify({
+          additionalData: {
+            [PUBLIC_REGISTRATION_STATE_KEY]: intent.intentId,
+          },
+          callbackURL: "http://localhost:5173/",
+          provider: "google",
+          requestSignUp: true,
+        }),
+        headers: {
+          "cf-connecting-ip": uniqueIp(),
+          "content-type": "application/json",
+          origin: "http://localhost:5173",
+        },
+        method: "POST",
+      }),
+      publicEnv,
+      testExecutionContext(),
+    );
+    expect(signInResponse.status).toBe(200);
+    const signIn = (await signInResponse.json()) as { url: string };
+    const state = new URL(signIn.url).searchParams.get("state");
+    const stateCookie = signInResponse.headers.get("set-cookie")?.split(";", 1)[0];
+    expect(state).toBeTruthy();
+    expect(stateCookie).toBeTruthy();
+
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe("https://oauth2.googleapis.com/token");
+      return Response.json({
+        access_token: "test-google-access-token",
+        expires_in: 300,
+        id_token: testGoogleIdToken(email),
+        token_type: "Bearer",
+      });
+    });
+    const callbackResponse = await worker.fetch(
+      new Request(
+        `http://localhost:5173/callback/google?code=test-code&state=${encodeURIComponent(state ?? "")}`,
+        {
+          headers: {
+            "cf-connecting-ip": uniqueIp(),
+            cookie: stateCookie ?? "",
+          },
+        },
+      ),
+      publicEnv,
+      testExecutionContext(),
+    );
+    expect(callbackResponse.status).toBe(302);
+    expect(callbackResponse.headers.get("location")).toBe(
+      "http://localhost:5173/",
+    );
+
+    const user = await env.PG72_ID_DB.prepare(
+      `SELECT id, termsAcceptedVersion, privacyAcceptedVersion, legalAcceptedAt
+         FROM user
+        WHERE email = ?`,
+    )
+      .bind(email)
+      .first<{
+        id: string;
+        legalAcceptedAt: string;
+        privacyAcceptedVersion: string;
+        termsAcceptedVersion: string;
+      }>();
+    expect(user).toMatchObject({
+      privacyAcceptedVersion: "2026-07-17.test",
+      termsAcceptedVersion: "2026-07-17.test",
+    });
+    expect(Date.parse(user?.legalAcceptedAt ?? "")).not.toBeNaN();
+    const acceptance = await env.PG72_ID_DB.prepare(
+      "SELECT COUNT(*) AS count FROM legal_acceptance WHERE user_id = ?",
+    )
+      .bind(user?.id)
+      .first<{ count: number }>();
+    expect(acceptance?.count).toBe(1);
+  });
+
+  it("widens CSP for Turnstile only in public mode", async () => {
+    const inviteResponse = await worker.fetch(
+      new Request("http://localhost:5173/health"),
+      inviteEnv,
+      testExecutionContext(),
+    );
+    expect(inviteResponse.headers.get("content-security-policy")).not.toContain(
+      "challenges.cloudflare.com",
+    );
+
+    const publicResponse = await worker.fetch(
+      new Request("http://localhost:5173/health"),
+      publicEnv,
+      testExecutionContext(),
+    );
+    const csp = publicResponse.headers.get("content-security-policy");
+    expect(csp).toContain(
+      "script-src 'self' 'nonce-cGc3Mi12aXRlLWRldg==' https://telegram.org https://challenges.cloudflare.com",
+    );
+    expect(csp).toContain("frame-src https://oauth.telegram.org https://challenges.cloudflare.com");
+  });
+
   it("public mode registers a new verified email without an invitation", async () => {
+    const intent = await createPublicRegistrationIntent();
     const grant = await authorizeRegistration(publicEnv, publicConfig, {
       email: randomEmail(),
       emailVerified: true,
       clientIp: uniqueIp(),
+      registrationIntentId: intent.intentId,
     });
 
-    expect(grant).toEqual({ role: "user", status: "active" });
+    expect(grant).toMatchObject({
+      privacyAcceptedVersion: "2026-07-17.test",
+      role: "user",
+      status: "active",
+      termsAcceptedVersion: "2026-07-17.test",
+    });
+    expect(grant.legalAcceptedAt).toBeInstanceOf(Date);
+  });
+
+  it("public mode requires a one-time registration intent", async () => {
+    await expect(
+      authorizeRegistration(publicEnv, publicConfig, {
+        email: randomEmail(),
+        emailVerified: true,
+        clientIp: uniqueIp(),
+      }),
+    ).rejects.toMatchObject({
+      body: { code: "REGISTRATION_PREREQUISITE_REQUIRED" },
+      statusCode: 403,
+    });
   });
 
   it("public mode rejects unverified emails", async () => {
@@ -69,24 +379,75 @@ describe("registration policy", () => {
   it("public mode still honors a pending invitation's role", async () => {
     const email = randomEmail();
     await createInvitation(email, "admin");
+    const intent = await createPublicRegistrationIntent();
 
     const grant = await authorizeRegistration(publicEnv, publicConfig, {
       email,
       emailVerified: true,
       clientIp: uniqueIp(),
+      registrationIntentId: intent.intentId,
     });
 
-    expect(grant).toEqual({ role: "admin", status: "active" });
+    expect(grant).toMatchObject({ role: "admin", status: "active" });
   });
 
   it("public mode grants the bootstrap administrator the bootadmin role", async () => {
+    const intent = await createPublicRegistrationIntent();
     const grant = await authorizeRegistration(publicEnv, publicConfig, {
       email: env.BOOTSTRAP_ADMIN_EMAIL,
       emailVerified: true,
       clientIp: uniqueIp(),
+      registrationIntentId: intent.intentId,
     });
 
-    expect(grant).toEqual({ role: "bootadmin", status: "active" });
+    expect(grant).toMatchObject({ role: "bootadmin", status: "active" });
+  });
+
+  it("rejects a replayed public registration intent", async () => {
+    const intent = await createPublicRegistrationIntent();
+    await authorizeRegistration(publicEnv, publicConfig, {
+      email: randomEmail(),
+      emailVerified: true,
+      clientIp: uniqueIp(),
+      registrationIntentId: intent.intentId,
+    });
+
+    await expect(
+      authorizeRegistration(publicEnv, publicConfig, {
+        email: randomEmail(),
+        emailVerified: true,
+        clientIp: uniqueIp(),
+        registrationIntentId: intent.intentId,
+      }),
+    ).rejects.toMatchObject({
+      body: { code: "REGISTRATION_PREREQUISITE_REQUIRED" },
+    });
+  });
+
+  it("rejects an expired public registration intent", async () => {
+    const intent = await createPublicRegistrationIntent();
+    await env.PG72_ID_DB.prepare(
+      `UPDATE public_registration_intent
+          SET created_at = ?, expires_at = ?
+        WHERE id = ?`,
+    )
+      .bind(
+        new Date(Date.now() - 2000).toISOString(),
+        new Date(Date.now() - 1000).toISOString(),
+        intent.intentId,
+      )
+      .run();
+
+    await expect(
+      authorizeRegistration(publicEnv, publicConfig, {
+        email: randomEmail(),
+        emailVerified: true,
+        clientIp: uniqueIp(),
+        registrationIntentId: intent.intentId,
+      }),
+    ).rejects.toMatchObject({
+      body: { code: "REGISTRATION_PREREQUISITE_REQUIRED" },
+    });
   });
 
   it("invite mode still denies uninvited emails", async () => {
@@ -132,18 +493,22 @@ describe("registration policy", () => {
     const clientIp = `203.0.113.${(ipCounter += 1)}`;
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
+      const intent = await createPublicRegistrationIntent(clientIp);
       await authorizeRegistration(publicEnv, publicConfig, {
         email: randomEmail(),
         emailVerified: true,
         clientIp,
+        registrationIntentId: intent.intentId,
       });
     }
 
+    const intent = await createPublicRegistrationIntent(clientIp);
     await expect(
       authorizeRegistration(publicEnv, publicConfig, {
         email: randomEmail(),
         emailVerified: true,
         clientIp,
+        registrationIntentId: intent.intentId,
       }),
     ).rejects.toMatchObject({
       body: { code: "REGISTRATION_RATE_LIMITED" },
@@ -160,10 +525,12 @@ describe("registration policy", () => {
   it("does not let a rate-limited IP spam invitation lookups or audit denials", async () => {
     const clientIp = `203.0.113.${(ipCounter += 1)}`;
     for (let attempt = 0; attempt < 5; attempt += 1) {
+      const intent = await createPublicRegistrationIntent(clientIp);
       await authorizeRegistration(publicEnv, publicConfig, {
         email: randomEmail(),
         emailVerified: true,
         clientIp,
+        registrationIntentId: intent.intentId,
       });
     }
 
@@ -203,6 +570,123 @@ describe("registration policy", () => {
       body: { code: "ACCOUNT_SUSPENDED" },
       statusCode: 403,
     });
+  });
+
+  it("fails closed on wrong legal versions before Turnstile verification", async () => {
+    let fetched = false;
+    await expect(
+      issuePublicRegistrationIntent(
+        publicEnv,
+        publicConfig,
+        {
+          acceptPrivacy: true,
+          acceptTerms: true,
+          privacyVersion: "stale",
+          termsVersion: "stale",
+          turnstileToken: "not-used",
+        },
+        uniqueIp(),
+        undefined,
+        async () => {
+          fetched = true;
+          return Response.json({ success: true });
+        },
+      ),
+    ).rejects.toMatchObject({ code: "invalid_registration_intent" });
+    expect(fetched).toBe(false);
+  });
+
+  it("rejects Turnstile hostname and action mismatches", async () => {
+    for (const payload of [
+      {
+        action: TURNSTILE_REGISTRATION_ACTION,
+        hostname: "example.test",
+        success: true,
+      },
+      { action: "wrong_action", hostname: "localhost", success: true },
+      {
+        action: TURNSTILE_REGISTRATION_ACTION,
+        hostname: "localhost",
+        success: false,
+      },
+    ]) {
+      await expect(
+        verifyTurnstileRegistrationToken(
+          publicConfig,
+          "test-token",
+          uniqueIp(),
+          async () => Response.json(payload),
+        ),
+      ).resolves.toEqual({ status: "rejected" });
+    }
+  });
+
+  it("fails closed when Turnstile verification is unavailable", async () => {
+    await expect(
+      verifyTurnstileRegistrationToken(
+        publicConfig,
+        "test-token",
+        uniqueIp(),
+        async () => {
+          throw new Error("network unavailable");
+        },
+      ),
+    ).resolves.toEqual({ status: "unavailable" });
+  });
+
+  it("persists immutable public-registration legal acceptance history", async () => {
+    const intent = await createPublicRegistrationIntent();
+    const grant = await authorizeRegistration(publicEnv, publicConfig, {
+      email: randomEmail(),
+      emailVerified: true,
+      clientIp: uniqueIp(),
+      registrationIntentId: intent.intentId,
+    });
+    const userId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    await env.PG72_ID_DB.prepare(
+      `INSERT INTO user
+        (id, name, email, emailVerified, role, status, createdAt, updatedAt,
+         termsAcceptedVersion, privacyAcceptedVersion, legalAcceptedAt)
+       VALUES (?, 'Public user', ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        userId,
+        randomEmail(),
+        grant.role,
+        grant.status,
+        now,
+        now,
+        grant.termsAcceptedVersion,
+        grant.privacyAcceptedVersion,
+        grant.legalAcceptedAt?.toISOString(),
+      )
+      .run();
+
+    const acceptance = await env.PG72_ID_DB.prepare(
+      `SELECT terms_version, privacy_version, source
+         FROM legal_acceptance
+        WHERE user_id = ?`,
+    )
+      .bind(userId)
+      .first<{
+        privacy_version: string;
+        source: string;
+        terms_version: string;
+      }>();
+    expect(acceptance).toEqual({
+      privacy_version: "2026-07-17.test",
+      source: "public_registration",
+      terms_version: "2026-07-17.test",
+    });
+
+    await expect(
+      env.PG72_ID_DB.prepare(
+        "UPDATE user SET termsAcceptedVersion = 'changed' WHERE id = ?",
+      )
+        .bind(userId)
+        .run(),
+    ).rejects.toThrow();
   });
 
   it("blocks deleted (missing) users from creating a session", async () => {

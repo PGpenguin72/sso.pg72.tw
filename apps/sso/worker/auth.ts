@@ -1,4 +1,4 @@
-import { APIError } from "better-auth/api";
+import { APIError, getOAuthState } from "better-auth/api";
 import { betterAuth } from "better-auth";
 import { jwt } from "better-auth/plugins";
 import { oauthProvider } from "@better-auth/oauth-provider";
@@ -18,6 +18,7 @@ import {
   assertSessionUserActive,
   authorizeRegistration,
 } from "./registration";
+import { registrationIntentIdFromOAuthState } from "./public-registration";
 import { effectivePlatformRole, hasPermission } from "./roles";
 import { recordLoginAudit, type AuthHookContext } from "./security-activity";
 
@@ -107,6 +108,24 @@ export function createAuth(
           required: false,
           defaultValue: "active",
           input: false,
+        },
+        legalAcceptedAt: {
+          type: "date",
+          required: false,
+          input: false,
+          returned: false,
+        },
+        privacyAcceptedVersion: {
+          type: "string",
+          required: false,
+          input: false,
+          returned: false,
+        },
+        termsAcceptedVersion: {
+          type: "string",
+          required: false,
+          input: false,
+          returned: false,
         },
       },
       deleteUser: {
@@ -220,6 +239,10 @@ export function createAuth(
                 email: user.email,
                 emailVerified: user.emailVerified === true,
                 clientIp,
+                registrationIntentId:
+                  config.registrationMode === "public" && ctx?.request
+                    ? registrationIntentIdFromOAuthState(await getOAuthState())
+                    : undefined,
               },
               executionCtx,
             );
@@ -237,6 +260,14 @@ export function createAuth(
               .bind(new Date().toISOString(), user.id, email)
               .run();
             const role = typeof user.role === "string" ? user.role : "user";
+            const termsVersion =
+              typeof user.termsAcceptedVersion === "string"
+                ? user.termsAcceptedVersion
+                : undefined;
+            const privacyVersion =
+              typeof user.privacyAcceptedVersion === "string"
+                ? user.privacyAcceptedVersion
+                : undefined;
             await recordAudit(
               env,
               {
@@ -247,6 +278,9 @@ export function createAuth(
                   role,
                   roleSource:
                     consumed.meta.changes > 0 ? "invitation" : "default",
+                  ...(termsVersion && privacyVersion
+                    ? { privacyVersion, termsVersion }
+                    : {}),
                 },
               },
               executionCtx,

@@ -34,6 +34,7 @@ import {
   oauthReportRoutes,
 } from "./oauth-reports";
 import { passkeyStepUpRoutes } from "./passkey-step-up";
+import { publicRegistrationRoutes } from "./public-registration";
 import { ASSIGNABLE_ROLES, isPlatformRole } from "./roles";
 import {
   ACTIVITY_AUDIT_PATHS,
@@ -486,6 +487,8 @@ app.use("*", async (c, next) => {
   // Telegram is actually configured, so the auth origin's CSP is not widened
   // otherwise. Everything else stays 'self'.
   const telegramEnabled = Boolean(c.env.TELEGRAM_BOT_TOKEN);
+  const turnstileEnabled =
+    c.env.REGISTRATION_MODE === "public" && Boolean(c.env.TURNSTILE_SITE_KEY);
   const scriptBase =
     c.env.ENVIRONMENT === "development"
       ? `script-src 'self' 'nonce-${DEV_CSP_NONCE}'`
@@ -493,6 +496,9 @@ app.use("*", async (c, next) => {
   const scriptSource = telegramEnabled
     ? `${scriptBase} https://telegram.org`
     : scriptBase;
+  const registrationScriptSource = turnstileEnabled
+    ? `${scriptSource} https://challenges.cloudflare.com`
+    : scriptSource;
   const styleSource =
     c.env.ENVIRONMENT === "development"
       ? `style-src 'self' 'nonce-${DEV_CSP_NONCE}'`
@@ -504,10 +510,12 @@ app.use("*", async (c, next) => {
     "font-src 'self'",
     "form-action 'self' https://accounts.google.com",
     "frame-ancestors 'none'",
-    telegramEnabled ? "frame-src https://oauth.telegram.org" : "frame-src 'none'",
+    telegramEnabled || turnstileEnabled
+      ? `frame-src${telegramEnabled ? " https://oauth.telegram.org" : ""}${turnstileEnabled ? " https://challenges.cloudflare.com" : ""}`
+      : "frame-src 'none'",
     "img-src 'self' data: https://lh3.googleusercontent.com",
     "object-src 'none'",
-    scriptSource,
+    registrationScriptSource,
     styleSource,
   ].join("; "));
   c.header("Permissions-Policy", "publickey-credentials-create=(self), publickey-credentials-get=(self)");
@@ -593,6 +601,7 @@ app.route("/", passkeyStepUpRoutes);
 app.route("/", accountRoutes);
 app.route("/", oauthReportRoutes);
 app.route("/", telegramRoutes);
+app.route("/", publicRegistrationRoutes);
 
 app.use("/oauth2/introspect", async (c, next) => {
   const ip = c.req.header("cf-connecting-ip") ?? "local";

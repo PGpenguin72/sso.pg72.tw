@@ -9,6 +9,13 @@ GOOGLE_CLIENT_ID="replace-with-google-oauth-client-id"
 GOOGLE_CLIENT_SECRET="replace-with-google-oauth-client-secret"
 BOOTSTRAP_ADMIN_EMAIL="you@example.com"
 
+# Required only when REGISTRATION_MODE="public". Use a Turnstile widget scoped
+# to the local/Preview hostname; never reuse production credentials locally.
+TURNSTILE_SITE_KEY="replace-with-turnstile-site-key"
+TURNSTILE_SECRET_KEY="replace-with-turnstile-secret-key"
+TERMS_VERSION="replace-with-approved-terms-version"
+PRIVACY_VERSION="replace-with-approved-privacy-version"
+
 # --- Optional social login providers (disabled by default) ---
 # Empty values are intentional: copying this template must not enable a provider.
 # For local testing, set BOTH its id and secret only in the ignored .dev.vars.

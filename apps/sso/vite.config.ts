@@ -20,6 +20,10 @@ const OPTIONAL_LOCAL_PROVIDER_BINDINGS = {
   GITHUB_CLIENT_SECRET: "",
   TELEGRAM_BOT_TOKEN: "",
   TELEGRAM_BOT_USERNAME: "",
+  PRIVACY_VERSION: "",
+  TERMS_VERSION: "",
+  TURNSTILE_SECRET_KEY: "",
+  TURNSTILE_SITE_KEY: "",
 };
 
 export default defineConfig(({ command }) => ({

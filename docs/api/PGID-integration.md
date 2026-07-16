@@ -4,7 +4,7 @@
 > 對象：要把服務接上 PGID 的第一方 / 受管開發者
 > Issuer：`https://sso.pg72.tw`
 > 協議：OAuth 2.1 / OpenID Connect，Authorization Code + PKCE S256
-> 最後對照程式碼：`apps/sso/worker/auth.ts`、`apps/sso/worker/index.ts`、`apps/sso/worker/admin-clients.ts`、`apps/sso/worker/passkey-step-up.ts`、`apps/test-rp/worker/index.ts`
+> 最後對照程式碼：`apps/sso/worker/auth.ts`、`apps/sso/worker/index.ts`、`apps/sso/worker/admin-clients.ts`、`apps/sso/worker/passkey-step-up.ts`、`apps/sso/worker/public-registration.ts`、`apps/test-rp/worker/index.ts`
 
 本手冊是**精簡技術參考**：端點、scopes、claims、token 壽命、client 認證方式與可複製的串接範例。教學導向、逐步導覽與一般使用者說明在 [`wiki/`](../../wiki/SUMMARY.md)；完整架構規格與安全設計以 [`codex.md`](../../codex.md) 為準。若本文件與 `codex.md` 衝突，以 `codex.md` 為準並在同一變更修正本文件。
 
@@ -63,6 +63,8 @@ Discovery 目前回報的重點欄位（對照 `@better-auth/oauth-provider@1.6.
 | End Session | `https://sso.pg72.tw/oauth2/end-session` | RP-initiated logout（需 client 開啟 `enableEndSession`） |
 
 Google 社群登入的 callback（`https://sso.pg72.tw/callback/google`）是 **PGID 內部**與 Google 之間的路徑，RP 不會用到，也不應設定為自己的 redirect URI。
+
+`GET /api/registration/config` 與 `POST /api/registration/intent` 同樣是 PGID 第一方 UI 的內部註冊 prerequisite，不是 discovery 公布的 OIDC/RP contract，RP 不應呼叫或代理它們。Production 目前是 invite-only：config 回 `publicRegistration: null`，intent endpoint 拒絕建立。Local public path 只在 exact same-origin、目前政策版本皆明確接受且 Turnstile server-side 驗證成功後核發短效一次性 opaque intent；Turnstile secret 不會回給 browser。是否能建立帳號仍由 PGID callback 的 verified-email 與 registration policy 決定，RP 不可自行推論或繞過。
 
 ---
 

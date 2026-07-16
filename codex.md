@@ -1,17 +1,19 @@
 # PGID SSO 架構規格
 
 > 狀態：Canonical Architecture Baseline
-> 最後更新：2026-07-16
+> 最後更新：2026-07-17
 > 服務名稱：PGID
 > Issuer：`https://sso.pg72.tw`
 
 ## 0. Phase 0 實作狀態
 
-截至 2026-07-16，repository source 包含 SSO Worker、React 帳號中心、D1 migrations `0001`–`0015`、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理、ID-token central `sid` contract、Mail Path A introspection prerequisite、Passkey client-mutation step-up、Telegram verified-email enrollment boundary、全域 provider-identity 唯一 ownership，以及使用 `oauth4webapi` 的獨立 test RP。每個 release candidate 都必須重跑本 repository 的 typecheck、workerd suite、production build 與 test RP protocol gate；本地通過不得寫成遠端已部署。
+截至 2026-07-17，repository source 包含 SSO Worker、React 帳號中心、D1 migrations `0001`–`0016`、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理、ID-token central `sid` contract、Mail Path A introspection prerequisite、Passkey client-mutation step-up、Telegram verified-email enrollment boundary、全域 provider-identity 唯一 ownership、Turnstile-backed public-registration intent 與版本化法律同意紀錄，以及使用 `oauth4webapi` 的獨立 test RP。每個 release candidate 都必須重跑本 repository 的 typecheck、workerd suite、production build 與 test RP protocol gate；本地通過不得寫成遠端已部署。
 
 `0013_confidential_client_secret_post.sql` 將既有 confidential client metadata 正規化為 `client_secret_post`；它不旋轉 secret、不改 grant/token。`0014_passkey_step_up.sql` 新增 session step-up timestamp 與短效 challenge table。兩者都不代表 production 已套用；現有 deployment record 仍只確認 production D1 至 `0012`，必須由 owner 在維護窗口依序確認與執行。
 
 `0015_account_provider_identity_unique.sql` 以 `(providerId, accountId)` 全域唯一索引保證每個外部 provider identity 只有一個 PGID owner。套用前必須執行下列唯讀 duplicate preflight；若有任何結果就停止，不得由 migration 自動挑選或刪除 owner。依賴此 invariant 的 Worker 不得早於 `0015` 部署。
+
+`0016_public_registration_intent.sql` 新增短效、一次性 public-registration intent、user 初次法律同意欄位與不可變 history。新增欄位已納入 Better Auth user schema，因此任何含此變更的 Worker 都必須在部署前先套用 `0016`；migration 可在 `invite` 模式下先套用，且本身不會開啟公開註冊。
 
 ### 0.1 Provider Identity Migration Preflight
 
@@ -24,7 +26,7 @@ GROUP BY providerId, accountId
 HAVING COUNT(*) > 1;
 ```
 
-必須回傳零列。若有任何 duplicate，停止 rollout，獨立審查受影響的使用者與 audit evidence；不得自動刪除、重新指派或合併 identity owner。之後先建立 private backup / Time Travel checkpoint，於隔離 Preview 驗證後才依序套用 `0013`、`0014`、`0015`。
+必須回傳零列。若有任何 duplicate，停止 rollout，獨立審查受影響的使用者與 audit evidence；不得自動刪除、重新指派或合併 identity owner。之後先建立 private backup / Time Travel checkpoint，於隔離 Preview 驗證後才依序套用 `0013`、`0014`、`0015`、`0016`。
 
 既有公開部署紀錄顯示 `pg72-id` 已部署至 `https://sso.pg72.tw`，production D1 已套用至 `0012`，Copy 與 Link 也已切換 production traffic 至 PGID。這些紀錄建立了「已部署 invite beta」現況，但仍不是完整 Production GO：visited-client ledger、back-channel logout、DLQ 告警、完整復原演練與其他 §9.2 gate 尚未完成。任何 maintenance operation 前都必須由授權 operator 重新驗證實際遠端版本與 migration 狀態。
 
@@ -32,7 +34,7 @@ Preview 必須使用獨立 Cloudflare account、D1、queue、secret、domain、G
 
 SSO 的 Cloudflare Vite build 包含 post-build cleanup，production/preview artifact 不保留 plugin 為 `vite preview` 複製的 `.dev.vars*`。
 
-Production `REGISTRATION_MODE` 目前仍是 `invite`。`public` 程式路徑與 workerd regression tests 已備妥：所有新帳號都必須通過 verified-email enrollment gate，Google 首次登入要求 verified email，Telegram 因不提供 email 而只能登入已明確連結的既有帳號；邀請功能保留，新帳號建立使用獨立 per-IP `REGISTRATION_RATE_LIMITER`，suspended/deleted 使用者仍由 session 建立檢查擋下。完整安全 gate 尚未完成，未完成項目列於 §9.2；只有 owner 明確核准並部署設定變更後才算開啟公開註冊。
+Production `REGISTRATION_MODE` 目前仍是 `invite`。`public` 程式路徑與 workerd regression tests 已備妥：所有新帳號都必須通過 verified-email enrollment gate，Google 首次登入要求 verified email，Telegram 因不提供 email 而只能登入已明確連結的既有帳號；邀請功能保留，新帳號建立使用獨立 per-IP `REGISTRATION_RATE_LIMITER`，suspended/deleted 使用者仍由 session 建立檢查擋下。Local source 另要求 exact-hostname/action Turnstile 驗證與版本化 Terms/Privacy 明確同意，並以一次性 intent 將接受紀錄帶入 OAuth 建帳。完整安全 gate 尚未完成，未完成項目列於 §9.2；只有 owner 明確核准並部署設定變更後才算開啟公開註冊。
 
 Repository source 包含 Mail Path A 所需的 PGID introspection prerequisite。它只允許固定的 `pgid-mail-introspect` 查詢簽發給 `pg72-webmail` 的 opaque access token，且 token 必須保有 live central session、`email` scope，以及 active、verified-email user；完整契約見 §10.5。這項結果尚未部署、尚未 provision system client，也未經 production 驗證；Dovecot/Postfix/Roundcube 的 VPS cutover 仍須 owner 在場的維護窗口，不得因本地測試通過而直接套用。
 
@@ -305,6 +307,10 @@ invited -> active -> suspended -> deleted
 - 第一次 Google 登入直接建立帳號；Google 必須回傳已驗證 Email（`email_verified`），否則拒絕（`EMAIL_NOT_VERIFIED`），兩種模式皆強制。
 - Telegram Login Widget 不提供 Email，因此未綁定的 Telegram identity 在 invite/public 兩種模式都先消耗 registration limiter、寫入不含 Telegram ID 或其他 PII 的 `registration.denied`，再以相同泛化錯誤拒絕；不得建立 placeholder-email user 或 session。既有 Telegram identity 只能在 authenticated PGID session 中明確連結，連結後才可用 Telegram 登入。
 - Passkey 註冊仍需先有帳號與已登入 session；公開註冊不開放無帳號的 Passkey 註冊。
+- 前端把登入既有帳號與建立新帳號分開；只有新帳號路徑顯示目前 Terms/Privacy 的明確勾選與 Turnstile。Passkey 與 Telegram 不作 public 建帳入口。
+- `POST /api/registration/intent` 只接受 exact same-origin JSON，要求 client 回傳 Worker 公布的目前 Terms/Privacy version 並皆明確同意，再以 Turnstile Siteverify 驗證 `success`、exact issuer hostname 與固定 action `pgid_public_registration`；challenge 服務不可用時 fail closed。
+- 驗證成功後只核發 10 分鐘、Web Crypto 產生、D1 一次性消耗的 opaque intent ID。瀏覽器僅透過 Better Auth 保護的 OAuth state 帶入 ID，不保存或傳送 Turnstile secret；callback 建立 user 前必須原子消耗 intent，過期、重放、版本不符或缺少皆回泛化拒絕。
+- `0016` 將 server-side intent issuance time、Terms version 與 Privacy version 隨 user 建立寫入；D1 trigger 強制三欄全有或全無、禁止變更初次同意，並在同一 transaction 建立 `legal_acceptance` history。Invite-mode user 的三欄保持 `NULL`。
 - 新帳號建立有獨立、比登入更嚴的 per-IP rate limit（Workers Rate Limiting binding `REGISTRATION_RATE_LIMITER`，5 次/60 秒；登入面為 `AUTH_RATE_LIMITER` 30 次/60 秒）。限流檢查在任何 denial audit 寫入與邀請查詢之前消耗額度，避免被濫刷。
 - 觸發限流寫入 `registration.rate_limited` audit；所有 registration 拒絕訊息不洩漏帳號是否存在。
 - `suspended` 使用者不因公開模式繞過管制：session 建立前一律檢查中央 `user.status`，非 `active`（含已刪除、user row 不存在）一律拒絕。
@@ -312,8 +318,8 @@ invited -> active -> suspended -> deleted
 
 切換 production 至 public 前尚未完成的安全 gate：
 
-- [ ] Turnstile（或等效 bot challenge）於註冊/登入 flow。
-- [ ] Terms 與 Privacy Policy 同意、版本與時間記錄。
+- [ ] 將 local source 已實作的 Turnstile registration challenge 部署至隔離 Preview，配置 hostname-scoped site/secret key，完成獨立 review、bypass/失效/服務中斷測試與 production smoke；production secret 僅可存 Wrangler secrets / Secrets Store。
+- [ ] 由 owner 核准實際 Terms/Privacy 內容與 version identifiers，於隔離 Preview 驗證 `0016` 同意紀錄、rollback 與資料匯出，再部署並 smoke-test；local schema/UI/regression 通過不等同法務核准或 production 啟用。
 - [ ] 濫用偵測與封鎖流程（abuse response runbook）。
 - [ ] 獨立安全審查與 OIDC conformance/security testing。
 - [ ] DAST 覆蓋 auth、OIDC、admin、gateway 與 logout endpoints。
@@ -613,7 +619,7 @@ Audit metadata 不得包含 access token、refresh token、session token、autho
 - CORS 採 allowlist，不對 credentialed endpoints 使用 `*`。
 - 所有 state-changing endpoints 使用 CSRF 保護或不依賴 cookie 的等效防護。
 - 登入、callback、token、Passkey、邀請與管理 endpoints 具獨立 rate limits；新帳號建立另有更嚴的 per-IP `REGISTRATION_RATE_LIMITER`。
-- Turnstile、濫用偵測與封鎖流程尚未完成，屬 §9.2 的 public 啟用 gate 項目。
+- Turnstile 與版本化法律同意已在 local source 實作；Preview/production 配置、獨立 review、實機驗證，以及濫用偵測與封鎖流程仍未完成，皆屬 §9.2 的 public 啟用 gate。
 - Error response 不洩漏帳號是否存在、token 狀態、secret 或內部 exception。
 - 日誌與 telemetry 預設遮蔽 PII 與憑證。
 
@@ -814,9 +820,9 @@ Webmail 仍須分成兩個問題：
 
 ### Phase 4：公開註冊 gate
 
-`REGISTRATION_MODE = public` 的程式路徑已具備 verified-email 強制（含未綁定 Telegram 不可建帳）、per-IP 註冊限流、suspended/deleted 管制與 audit，但 production 仍維持 `invite`。切換前必須完成 §9.2 gate：
+`REGISTRATION_MODE = public` 的程式路徑已具備 verified-email 強制（含未綁定 Telegram 不可建帳）、per-IP 註冊限流、suspended/deleted 管制、audit、Turnstile-backed 一次性 intent 與版本化法律同意紀錄，但 production 仍維持 `invite`。切換前必須完成 §9.2 gate：
 
-- Terms/Privacy、Turnstile、abuse controls、新帳號限制狀態。
+- 核准實際 Terms/Privacy versions，部署、配置、獨立 review 並 smoke-test local Turnstile/legal slice；另完成 abuse controls 與新帳號限制狀態。
 - 獨立安全審查、DAST、負載測試、備份還原與事故演練。
 - 所有 high/critical findings 修正後，經 owner 明確核准與部署，才可宣稱公開註冊已啟用。
 

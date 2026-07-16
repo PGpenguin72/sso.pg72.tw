@@ -19,8 +19,10 @@ Production 目前是 **invite-only beta**。Google email 已驗證只是必要�
 3. 選擇「用 Google 登入」，並選擇邀請所對應、email 已驗證的 Google 帳號。
 4. PGID 同時確認有效邀請與 verified email 後，才會建立帳號並消耗邀請。
 
-> 公開註冊程式路徑已有測試，但 production 尚未啟用。未來即使經安全
-> gate 與 owner 核准切換至 public，Google 仍必須提供 verified email。
+> 公開註冊的 local source 已加入 Turnstile 驗證、目前服務條款/隱私權政策
+> 的明確同意與一次性註冊 intent，但 production 尚未套用 migration、配置或
+> 啟用。未來即使經完整安全 gate、獨立審查與 owner 核准切換至 public，
+> Google 仍必須提供 verified email；Passkey 與 Telegram 仍不能建立新帳號。
 
 註冊完成後，強烈建議立刻[設定一組 Passkey](passkey.md)，之後就能無密碼快速登入，也多一層安全保障。
 

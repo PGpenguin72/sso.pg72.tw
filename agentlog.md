@@ -83,3 +83,11 @@
 - 建立 `to_codex.md`:Claude→Codex 指揮通道。內容:指揮關係(Claude 為總管)、Codex ≤4 平行線、append 式 [MSG] 通訊協定、禁區清單(pgid-mail-docs、主 checkout docs、reskin 中的 4 repo、agentlog.md)、任務 A = Passkey step-up(production blocker)、backlog B、日誌寫 codexlog.md。
 - 開啟 persistent monitor 監控 `to_claude.md`(md5 輪詢 5s),Codex 寫入即通知。
 - reskin agent 回報:**ahsnccu-ann 完成**。6 個本地 commit(前 session 4 + 本次 187b9e0、14a532e),舊色全數清零,dashboard/結果頁/email 模板覆蓋,wrangler dry-run + 模板渲染 smoke 通過。未 push。可選後續:OG image 仍舊配色,待 owner 決定是否重生成。
+
+## 2026-07-16 — link.pg72.tw reskin 完成
+
+- reskin agent 回報:**link.pg72.tw 完成**。接手點 = 前次中斷的 AdminPage users table 半成品(檢視後可用,補完並 commit)。
+- 本次:AdminPage 收尾、QRModal(QR 白底保留供掃描)、NotFoundPage(太空人動畫刻意保留)、DESIGN-LOG.md 修正為實際狀態。
+- Commits:bf9ef57 / 80581fb / f36ec5f(前次 c08b3c8 / 6f5812b / d8d66d4);master 領先 origin 13 commits,未 push、未 deploy。
+- 驗證:npm run check 全綠(tsc app+worker、vitest 4 files/13 tests、build);src/api.ts 與 src-worker/ 零變更(auth/BFF/ClientSecretPost 未觸碰);無 slate/blue/purple 殘留。
+- 待 owner:實機看 Login/Dashboard/Admin/QRModal/404,決定 push + wrangler pages deploy 時機。

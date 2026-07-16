@@ -21,8 +21,9 @@ The canonical architecture and migration decisions are in [`codex.md`](./codex.m
 | Document | Purpose |
 | --- | --- |
 | [`codex.md`](./codex.md) | Canonical architecture and security baseline (single source of truth). |
+| [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Local contribution workflow, verification gate, and documentation sync rules. |
 | [`SECURITY.md`](./SECURITY.md) | Release gate and the accepted Phase 0 finding. |
-| [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) | License provenance for the exact Better Auth packages used by PGID. |
+| [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) | License provenance for Better Auth, Inter, VitePress, and other distributed third-party components. |
 | [`docs/about-PGID.md`](./docs/about-PGID.md) | Product introduction; what PGID is and why. Also used by the frontend `/about` page. |
 | [`docs/api/PGID-integration.md`](./docs/api/PGID-integration.md) | Concise integration reference: endpoints, scopes, claims, token lifetimes, client auth, and copyable `oauth4webapi`/generic examples. |
 | [`wiki/`](./wiki/SUMMARY.md) | GitBook-compatible tutorial site (content source for `wiki.sso.pg72.tw`): user guides and developer walkthroughs. |

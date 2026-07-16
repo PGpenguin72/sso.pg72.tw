@@ -14,6 +14,12 @@ pnpm audit --audit-level high
 
 The audit includes runtime, build, and development dependencies.
 
+The Wiki uses the [workspace settings](./README.md#workspace) as the single
+source for its local and Cloudflare Pages build configuration; do not duplicate
+that settings table here. `wiki/README.md` maps to `/`, while
+`wiki/SUMMARY.md` drives navigation and the content inventory. The root
+`pnpm check` gate validates these relationships.
+
 If a change affects protocol behavior, endpoints, claims, or parameters, update
 [`docs/api/PGID-integration.md`](./docs/api/PGID-integration.md) and the relevant
 `wiki/` pages in the same pull request. Keep user documentation in sync with

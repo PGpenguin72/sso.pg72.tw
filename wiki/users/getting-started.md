@@ -23,11 +23,14 @@ Production 目前是 **invite-only beta**。Google email 已驗證只是必要�
 > 的明確同意與一次性註冊 intent，但 production 尚未套用 migration、配置或
 > 啟用。未來即使經完整安全 gate、獨立審查與 owner 核准切換至 public，
 > Google 仍必須提供 verified email，而且是唯一的公開建帳 provider；Passkey、Telegram
-> 與其他可選社群登入都不能建立新帳號，只能用於符合各自綁定規則的既有帳號。
+> 與其他可選社群登入都不能建立新帳號。未受邀公開建立的帳號會先是「受限」：
+> 一般登入、帳號設定、Passkey 與服務的 OIDC 登入仍可使用，但不能新增其他
+> provider、建立 OAuth client 或使用 PGID 管理功能；只有管理員明確審核提升後
+> 才會成為標準帳號。這個 restricted path 目前也只是 local source，尚未部署。
 
 註冊完成後，強烈建議立刻[設定一組 Passkey](passkey.md)，之後就能無密碼快速登入，也多一層安全保障。
 
-Telegram 不提供 verified email，所以不能用來建立新 PGID 帳號。Telegram identity 只有在既有帳號的 authenticated session 中明確連結後，才可用來登入同一個帳號。
+Telegram 不提供 verified email，所以不能用來建立新 PGID 帳號。Telegram identity 只有在 standard 既有帳號的 authenticated session 中明確連結後，才可用來登入同一個帳號；帳號之後若受限，既有 Telegram link 仍可用於普通登入。
 
 ## 邀請
 

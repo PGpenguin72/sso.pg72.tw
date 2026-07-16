@@ -17,6 +17,12 @@ Email 可以更換，但你的帳號 ID 永遠不變——已接入 PGID 的服�
 
 系統會確保你至少保留一種可登入的方式。
 
+Local source 為未來公開註冊加入「受限」存取層級。受限不是停權：一般登入、
+個人資料、Passkey、已授權應用與普通服務登入仍可使用，但不能再連結其他登入
+provider，也不能使用 PGID 的 developer/admin/client 管理功能。管理員提升帳號
+後不會自動恢復舊角色；若帳號另有停權，仍需分開解除。Production 目前是
+invite-only，尚未部署這個 restricted path。
+
 ## 裝置 Session
 
 「裝置 / sessions」列出你目前登入中的裝置。你可以：

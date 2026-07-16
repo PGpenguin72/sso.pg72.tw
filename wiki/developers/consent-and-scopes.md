@@ -43,7 +43,7 @@ email email_verified name picture
 
 ### 重要：平台角色 ≠ 你服務的角色
 
-`https://pg72.tw/role` 是使用者在 PGID **平台**的角色，**不代表**他在你服務裡是管理員。你服務的業務授權（例如誰能管理你服務的內容）必須由你自己維護，例如以 `sub` 對應你資料庫裡的 app 角色。不要把平台 `role` claim 當成你服務的管理權限來源，避免單一 claim 過度授權。
+`https://pg72.tw/role` 是使用者在 PGID **平台**的角色，**不代表**他在你服務裡是管理員。你服務的業務授權（例如誰能管理你服務的內容）必須由你自己維護，例如以 `sub` 對應你資料庫裡的 app 角色。不要把平台 `role` claim 當成你服務的管理權限來源，避免單一 claim 過度授權。Local restricted account 的這個 claim 固定為 `user`，但普通 OIDC 仍可用；RP 不應因此拒絕登入，也不應把它當 lifecycle status。
 
 ## 用 sub，不用 email
 

@@ -4,7 +4,7 @@
 > 對象：要把服務接上 PGID 的第一方 / 受管開發者
 > Issuer：`https://sso.pg72.tw`
 > 協議：OAuth 2.1 / OpenID Connect，Authorization Code + PKCE S256
-> 最後對照程式碼：`apps/sso/worker/auth.ts`、`apps/sso/worker/index.ts`、`apps/sso/worker/admin-clients.ts`、`apps/sso/worker/passkey-step-up.ts`、`apps/sso/worker/public-registration.ts`、`apps/test-rp/worker/index.ts`
+> 最後對照程式碼：`apps/sso/worker/auth.ts`、`apps/sso/worker/index.ts`、`apps/sso/worker/account-access.ts`、`apps/sso/worker/admin-users.ts`、`apps/sso/worker/admin-clients.ts`、`apps/sso/worker/passkey-step-up.ts`、`apps/sso/worker/public-registration.ts`、`apps/test-rp/worker/index.ts`
 
 本手冊是**精簡技術參考**：端點、scopes、claims、token 壽命、client 認證方式與可複製的串接範例。教學導向、逐步導覽與一般使用者說明在 [`wiki/`](../../wiki/SUMMARY.md)；完整架構規格與安全設計以 [`codex.md`](../../codex.md) 為準。若本文件與 `codex.md` 衝突，以 `codex.md` 為準並在同一變更修正本文件。
 
@@ -64,7 +64,7 @@ Discovery 目前回報的重點欄位（對照 `@better-auth/oauth-provider@1.6.
 
 Google 社群登入的 callback（`https://sso.pg72.tw/callback/google`）是 **PGID 內部**與 Google 之間的路徑，RP 不會用到，也不應設定為自己的 redirect URI。
 
-`GET /api/registration/config`、`POST /api/registration/intent` 與 `POST /api/registration/social-start` 同樣是 PGID 第一方 UI 的內部註冊 prerequisite，不是 discovery 公布的 OIDC/RP contract，RP 不應呼叫或代理它們。Production 目前是 invite-only：config 回 `publicRegistration: null`，兩個 POST endpoint 拒絕建立。Local public path 只在 exact same-origin、目前政策版本皆明確接受且 Turnstile server-side 驗證成功後核發短效一次性 opaque intent；D1 只存 raw intent 的 SHA-256 digest。`social-start` 只啟動 Google，將 raw intent 換成獨立 reference，並在 server 綁定 Better Auth 實際 OAuth state；raw intent 不寫入 Better Auth verification value。Turnstile secret 不會回給 browser。是否能建立帳號仍由 PGID callback 的 Google verified-email 與 registration policy 決定，RP 不可自行推論或繞過。
+`GET /api/registration/config`、`POST /api/registration/intent` 與 `POST /api/registration/social-start` 同樣是 PGID 第一方 UI 的內部註冊 prerequisite，不是 discovery 公布的 OIDC/RP contract，RP 不應呼叫或代理它們。Production 目前是 invite-only：config 回 `publicRegistration: null`，兩個 POST endpoint 拒絕建立。Local public path 只在 exact same-origin、目前政策版本皆明確接受且 Turnstile server-side 驗證成功後核發短效一次性 opaque intent；D1 只存 raw intent 的 SHA-256 digest。`social-start` 只啟動 Google，將 raw intent 換成獨立 reference，並在 server 綁定 Better Auth 實際 OAuth state；raw intent 不寫入 Better Auth verification value。Turnstile secret 不會回給 browser。是否能建立帳號仍由 PGID callback 的 Google verified-email 與 registration policy 決定，RP 不可自行推論或繞過。未受邀 public-created 帳號在 local source 會持久化為 `restricted`；它仍可完成普通 Authorization Code + PKCE、consent、token exchange 與 UserInfo，但不能新增 provider link 或使用 PGID 的 developer/admin/client-management 功能。Production 尚未套用 `0017` 或部署此行為。
 
 ---
 
@@ -88,6 +88,8 @@ Google 社群登入的 callback（`https://sso.pg72.tw/callback/google`）是 **
 | `https://pg72.tw/role` | 平台角色：`bootadmin` / `admin` / `developer` / `user`。 | ID token 與 UserInfo |
 
 `https://pg72.tw/role` 是**平台**角色，代表在 PGID 本身的權限，**不等於**你服務內的 app 角色。各服務的業務授權（例如 `link:admin`、`status:operator`）由服務自行維護，不要把平台 `role` claim 當成你服務的管理權限來源。
+
+Restricted account 的平台 role claim 固定為 `user`。這不代表 RP 應拒絕該使用者，也不是 RP 可依賴的 account-lifecycle signal；ordinary OIDC 對 restricted account 仍可用。RP 的業務權限照常只以不可變 `sub` 對應自己的 grants。
 
 ### email_verified 檢查（必做）
 
@@ -127,7 +129,7 @@ Access token 是 **opaque**（非 JWT），要判斷有效性請用 introspectio
 
 ### 5.1 Client 由管理員 / developer 建立（無 dynamic registration）
 
-Dynamic client registration **關閉**。Client、redirect URI、scopes、grant types 由 PGID 管理員或具 `developer`/`clients.manage` 權限者透過受驗證的 admin API 明確建立。RP 不能自助註冊。
+Dynamic client registration **關閉**。Client、redirect URI、scopes、grant types 由 PGID 管理員或具 `developer`/`clients.manage` 權限的 standard account 透過受驗證的 admin API 明確建立。Restricted account 即使持有 stale session 也會在 request-scoped D1 guard 被拒絕，且不能新建或接管 client。Restrict 不會自動停用既有 owned RP。RP 不能自助註冊。
 
 Client 建立時的實際契約（對照 `apps/sso/worker/admin-clients.ts`）：
 

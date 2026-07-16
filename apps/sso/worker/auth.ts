@@ -279,6 +279,7 @@ export function createAuth(
               .bind(new Date().toISOString(), user.id, email)
               .run();
             const role = typeof user.role === "string" ? user.role : "user";
+            const accessLevel = accountAccessLevel(user.accessLevel);
             const termsVersion =
               typeof user.termsAcceptedVersion === "string"
                 ? user.termsAcceptedVersion
@@ -294,6 +295,7 @@ export function createAuth(
                 outcome: "success",
                 subjectId: user.id,
                 metadata: {
+                  accessLevel,
                   role,
                   roleSource:
                     consumed.meta.changes > 0 ? "invitation" : "default",

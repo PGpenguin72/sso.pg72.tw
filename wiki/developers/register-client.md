@@ -1,6 +1,6 @@
 # 建立 OAuth Client
 
-PGID **不開放動態自助註冊**。每個 client 由 PGID 管理員或具 `developer` 權限的開發者透過受驗證的 admin 操作明確建立。這一頁說明你要提供哪些資訊，以及建立後會拿到什麼。
+PGID **不開放動態自助註冊**。每個 client 由 standard access 的 PGID 管理員或具 `developer` 權限的開發者透過受驗證的 admin 操作明確建立。Restricted account 即使 session 中有 stale role 也會被 server 重新讀取 D1 後拒絕，且不能新建或接管 client；restrict 不會自動停用既有 owned RP。Production 目前仍是 invite-only，restricted path 尚未部署。這一頁說明你要提供哪些資訊，以及建立後會拿到什麼。
 
 ## 建立 client 前要決定的事
 

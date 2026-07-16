@@ -23,10 +23,13 @@ A：可以，但需要剛登入（fresh session）。Bootstrap 管理員帳號�
 **Q：為什麼登入某服務時要在 PGID 按「允許」？**
 A：那是授權畫面，讓你確認要把哪些基本資料提供給該服務。首次授權或請求新權限時一定會出現，無法略過。
 
+**Q：受限帳號是不是不能登入？**
+A：不是。這是尚未部署、為未來公開註冊準備的 local access level。受限帳號仍可登入 PGID、設定 Passkey、管理一般帳號資料並登入已接入的服務；限制的是新增 provider、OAuth client 與 PGID developer/admin 管理功能。停權是另一個狀態，才會阻止登入。
+
 ## 開發者
 
 **Q：我可以自己註冊 OAuth client 嗎？**
-A：不行。PGID 關閉動態註冊，client 由管理員 / developer 明確建立。見[建立 OAuth Client](developers/register-client.md)。
+A：不行。PGID 關閉動態註冊，client 由 standard 管理員 / developer 明確建立；restricted account 不能建立、接管或管理 client。見[建立 OAuth Client](developers/register-client.md)。
 
 **Q：接 PGID 還要自己接 Google 嗎？**
 A：不用。PGID 代替你處理 Google 與 Passkey，你只接 PGID 一家標準 OIDC。見[社群登入說明](developers/social-login.md)。

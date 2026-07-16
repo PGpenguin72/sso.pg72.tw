@@ -23,9 +23,9 @@ PGID v1 的日常登入主力是：
 * **Google**：`openid email profile` 最小授權；只在 email 已驗證時建立帳號。
 * **Passkey**：WebAuthn 無密碼登入，RP ID 固定為 `sso.pg72.tw`。
 
-另外可設定 Discord、GitHub、Facebook、Apple 與 Telegram 作為額外登入方式；未設定相應 secret 時按鈕自動隱藏,不影響 Google/Passkey。公開新帳號只可由 Google verified-email flow 建立；其他 provider 只供既有帳號登入或 authenticated session 中明確連結。v1 **不提供**密碼、Email OTP 或 TOTP 登入。
+另外可設定 Discord、GitHub、Facebook、Apple 與 Telegram 作為額外登入方式；未設定相應 secret 時按鈕自動隱藏,不影響 Google/Passkey。公開新帳號只可由 Google verified-email flow 建立；既有 linked provider 可繼續登入,但只有 standard account 能在 authenticated session 中新增明確連結。Restricted path 目前只在 local source,尚未部署。v1 **不提供**密碼、Email OTP 或 TOTP 登入。
 
-Telegram 使用 Login Widget 而不是 OAuth/OIDC,而且 Telegram 不提供 verified email。因此未綁定的 Telegram identity 在 invite/public 兩種 registration mode 都不能建立 PGID 帳號；它只能在 active authenticated PGID session 中明確連結,之後用來登入同一個既有 `sub`。PGID 不會為 Telegram 建立 placeholder-email 帳號。
+Telegram 使用 Login Widget 而不是 OAuth/OIDC,而且 Telegram 不提供 verified email。因此未綁定的 Telegram identity 在 invite/public 兩種 registration mode 都不能建立 PGID 帳號；它只能在 active standard authenticated PGID session 中明確連結,之後用來登入同一個既有 `sub`。帳號日後受限不會移除既有 Telegram link。PGID 不會為 Telegram 建立 placeholder-email 帳號。
 
 ## 對你服務的意義
 

@@ -7,13 +7,15 @@
 
 ## 0. Phase 0 實作狀態
 
-截至 2026-07-17，repository source 包含 SSO Worker、React 帳號中心、D1 migrations `0001`–`0016`、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理、ID-token central `sid` contract、Mail Path A introspection prerequisite、Passkey client-mutation step-up、Telegram verified-email enrollment boundary、全域 provider-identity 唯一 ownership、Turnstile-backed public-registration intent 與版本化法律同意紀錄，以及使用 `oauth4webapi` 的獨立 test RP。每個 release candidate 都必須重跑本 repository 的 typecheck、workerd suite、production build 與 test RP protocol gate；本地通過不得寫成遠端已部署。
+截至 2026-07-17，repository source 包含 SSO Worker、React 帳號中心、D1 migrations `0001`–`0017`、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理、ID-token central `sid` contract、Mail Path A introspection prerequisite、Passkey client-mutation step-up、Telegram verified-email enrollment boundary、全域 provider-identity 唯一 ownership、Turnstile-backed public-registration intent、版本化法律同意紀錄、公開新帳號 restricted access 與 abuse-response runbook，以及使用 `oauth4webapi` 的獨立 test RP。每個 release candidate 都必須重跑本 repository 的 typecheck、workerd suite、production build 與 test RP protocol gate；本地通過不得寫成遠端已部署。
 
 `0013_confidential_client_secret_post.sql` 將既有 confidential client metadata 正規化為 `client_secret_post`；它不旋轉 secret、不改 grant/token。`0014_passkey_step_up.sql` 新增 session step-up timestamp 與短效 challenge table。兩者都不代表 production 已套用；現有 deployment record 仍只確認 production D1 至 `0012`，必須由 owner 在維護窗口依序確認與執行。
 
 `0015_account_provider_identity_unique.sql` 以 `(providerId, accountId)` 全域唯一索引保證每個外部 provider identity 只有一個 PGID owner。套用前必須執行下列唯讀 duplicate preflight；若有任何結果就停止，不得由 migration 自動挑選或刪除 owner。依賴此 invariant 的 Worker 不得早於 `0015` 部署。
 
 `0016_public_registration_intent.sql` 新增短效、一次性 public-registration intent、user 初次法律同意欄位與不可變 history。新增欄位已納入 Better Auth user schema，因此任何含此變更的 Worker 都必須在部署前先套用 `0016`；migration 可在 `invite` 模式下先套用，且本身不會開啟公開註冊。
+
+`0017_restricted_account_access.sql` 新增獨立於 lifecycle status 的 `user.accessLevel`、既有資料 `standard` default/backfill，以及 restricted role/provider-link/client-owner D1 guards。任何含 restricted request guard 的 Worker 都必須在部署前先套用 `0017`；migration 可在 `invite` 模式下先套用且不會改變現有 production 註冊模式。Production 尚未套用 `0017` 或部署此 Worker。
 
 ### 0.1 Provider Identity Migration Preflight
 
@@ -26,7 +28,7 @@ GROUP BY providerId, accountId
 HAVING COUNT(*) > 1;
 ```
 
-必須回傳零列。若有任何 duplicate，停止 rollout，獨立審查受影響的使用者與 audit evidence；不得自動刪除、重新指派或合併 identity owner。之後先建立 private backup / Time Travel checkpoint，於隔離 Preview 驗證後才依序套用 `0013`、`0014`、`0015`、`0016`。
+必須回傳零列。若有任何 duplicate，停止 rollout，獨立審查受影響的使用者與 audit evidence；不得自動刪除、重新指派或合併 identity owner。之後先建立 private backup / Time Travel checkpoint，於隔離 Preview 驗證後才依序套用 `0013`、`0014`、`0015`、`0016`、`0017`。
 
 既有公開部署紀錄顯示 `pg72-id` 已部署至 `https://sso.pg72.tw`，production D1 已套用至 `0012`，Copy 與 Link 也已切換 production traffic 至 PGID。這些紀錄建立了「已部署 invite beta」現況，但仍不是完整 Production GO：visited-client ledger、back-channel logout、DLQ 告警、完整復原演練與其他 §9.2 gate 尚未完成。任何 maintenance operation 前都必須由授權 operator 重新驗證實際遠端版本與 migration 狀態。
 
@@ -34,7 +36,7 @@ Preview 必須使用獨立 Cloudflare account、D1、queue、secret、domain、G
 
 SSO 的 Cloudflare Vite build 包含 post-build cleanup，production/preview artifact 不保留 plugin 為 `vite preview` 複製的 `.dev.vars*`。
 
-Production `REGISTRATION_MODE` 目前仍是 `invite`。`public` 程式路徑與 workerd regression tests 已備妥：所有新帳號都必須通過 verified-email enrollment gate，Google 首次登入要求 verified email，Telegram 因不提供 email 而只能登入已明確連結的既有帳號；邀請功能保留，新帳號建立使用獨立 per-IP `REGISTRATION_RATE_LIMITER`，suspended/deleted 使用者仍由 session 建立檢查擋下。Local source 另要求 exact-hostname/action Turnstile 驗證與版本化 Terms/Privacy 明確同意，並以一次性 intent 將接受紀錄帶入 OAuth 建帳。完整安全 gate 尚未完成，未完成項目列於 §9.2；只有 owner 明確核准並部署設定變更後才算開啟公開註冊。
+Production `REGISTRATION_MODE` 目前仍是 `invite`。`public` 程式路徑與 workerd regression tests 已備妥：所有新帳號都必須通過 verified-email enrollment gate，Google 首次登入要求 verified email，Telegram 因不提供 email 而只能登入已明確連結的既有帳號；邀請功能保留，新帳號建立使用獨立 per-IP `REGISTRATION_RATE_LIMITER`，suspended/deleted 使用者仍由 session 建立檢查擋下。Local source 另要求 exact-hostname/action Turnstile 驗證、版本化 Terms/Privacy 明確同意、一次性 intent，以及公開新帳號持久化 `restricted` access。受限帳號保留普通登入、帳號與 OIDC 使用，但 provider linking 與 PGID developer/admin/client management 皆 fail closed。完整安全 gate 尚未完成，未完成項目列於 §9.2；只有 owner 明確核准並部署設定變更後才算開啟公開註冊。
 
 Repository source 包含 Mail Path A 所需的 PGID introspection prerequisite。它只允許固定的 `pgid-mail-introspect` 查詢簽發給 `pg72-webmail` 的 opaque access token，且 token 必須保有 live central session、`email` scope，以及 active、verified-email user；完整契約見 §10.5。這項結果尚未部署、尚未 provision system client，也未經 production 驗證；Dovecot/Postfix/Roundcube 的 VPS cutover 仍須 owner 在場的維護窗口，不得因本地測試通過而直接套用。
 
@@ -270,16 +272,19 @@ Auth Gateway 僅用於無法原生支援 OIDC 的 HTTP 應用程式。
 ### 8.2 使用者狀態
 
 ```text
-invited -> active -> suspended -> deleted
-              |           |
-              +-----------+
-                admin action
+registration: invited -> user row created
+lifecycle:                 active <-> suspended -> deleted
+access:                  standard <-> restricted
 ```
 
 - `invited`：已有邀請但尚未完成初次登入。
 - `active`：可正常登入與授權。
 - `suspended`：所有 session/token 撤銷，不可重新登入。
 - `deleted`：完成保留期後移除或匿名化個資，稽核事件保留必要識別摘要。
+- `user.status` 只表示 lifecycle；`user.accessLevel` 是正交的敏感功能邊界，不得以 `restricted` 代替停權。
+- `standard`：可依平台角色使用 PGID developer/admin/client-management 功能，仍受角色、fresh session、Passkey step-up 與 rate limit 約束。
+- `restricted`：仍可登入、查看/維護一般帳號資料、使用 Passkey、完成 consent 與 ordinary OIDC；effective 平台角色固定為 `user`，不可新增 provider link、持有 elevated role、新建/接管 OAuth client，或進入任何 PGID developer/admin/system-client 管理面。Restrict 不會隱含停用既有 owned RP；事故需要時由 operator 另行處理 client containment。
+- 未受邀的 public-created user 初始為 `restricted`；invited/bootstrap user 與 migration `0017` 前既有 row 為 `standard`。Admin 可在 hierarchy 內顯式 restrict/promote；restrict 會降為 `user` 並撤銷中央 sessions/tokens，promote 不會復權 suspended 帳號或恢復舊角色。
 
 ### 8.3 角色與權限
 
@@ -297,15 +302,15 @@ invited -> active -> suspended -> deleted
 
 - 未受邀 Email 拒絕建立帳號，回傳 `INVITATION_REQUIRED`，並寫入 `registration.denied` audit；bootstrap administrator 依既定保護規則例外處理。
 - 管理員以 Email 建立有時效且單次使用的邀請。
-- 有未消耗邀請的 Email 完成首次登入時，帳號取得邀請指定的角色（例如 `admin`），邀請立即標記為已消耗。
+- 有未消耗邀請的 Email 完成首次登入時，帳號以 `standard` access 取得邀請指定的角色（例如 `admin`），邀請立即標記為已消耗。
 - 邀請功能在未來 public 模式仍保留，與公開註冊不衝突。
 
 ### 9.2 公開註冊路徑與啟用 gate（未部署）
 
 已實作且有 regression coverage 的 `REGISTRATION_MODE=public` 行為：
 
-- 公開新帳號只能由第一次 Google 登入建立；Google 必須回傳已驗證 Email（`email_verified`），否則拒絕（`EMAIL_NOT_VERIFIED`），兩種模式皆強制。Discord、GitHub、Facebook、Apple 等可選 provider 只供既有帳號登入或 authenticated session 中的明確連結，不得成為 public 建帳入口。
-- Telegram Login Widget 不提供 Email，因此未綁定的 Telegram identity 在 invite/public 兩種模式都先消耗 registration limiter、寫入不含 Telegram ID 或其他 PII 的 `registration.denied`，再以相同泛化錯誤拒絕；不得建立 placeholder-email user 或 session。既有 Telegram identity 只能在 authenticated PGID session 中明確連結，連結後才可用 Telegram 登入。
+- 公開新帳號只能由第一次 Google 登入建立；Google 必須回傳已驗證 Email（`email_verified`），否則拒絕（`EMAIL_NOT_VERIFIED`），兩種模式皆強制。Discord、GitHub、Facebook、Apple 等可選 provider 的既有 linked identity 可繼續 ordinary login；只有 standard account 可在 authenticated session 中新增明確連結，且它們不得成為 public 建帳入口。
+- Telegram Login Widget 不提供 Email，因此未綁定的 Telegram identity 在 invite/public 兩種模式都先消耗 registration limiter、寫入不含 Telegram ID 或其他 PII 的 `registration.denied`，再以相同泛化錯誤拒絕；不得建立 placeholder-email user 或 session。Telegram identity 只能在 standard authenticated PGID session 中明確連結；帳號之後被 restrict 不會移除既有 link，仍可作 ordinary login method。
 - Passkey 註冊仍需先有帳號與已登入 session；公開註冊不開放無帳號的 Passkey 註冊。
 - 前端把登入既有帳號與建立新帳號分開；只有新帳號路徑顯示目前 Terms/Privacy 的明確勾選與 Turnstile。Google 是唯一 public 建帳入口；Passkey、Telegram 與其他可選社群 provider 均不顯示為建帳選項。
 - `POST /api/registration/intent` 只接受 exact same-origin JSON，要求 client 回傳 Worker 公布的目前 Terms/Privacy version 並皆明確同意，再以 Turnstile Siteverify 驗證 `success`、exact issuer hostname 與固定 action `pgid_public_registration`；challenge 服務不可用時 fail closed。
@@ -315,17 +320,23 @@ invited -> active -> suspended -> deleted
 - 觸發限流寫入 `registration.rate_limited` audit；所有 registration 拒絕訊息不洩漏帳號是否存在。
 - `suspended` 使用者不因公開模式繞過管制：session 建立前一律檢查中央 `user.status`，非 `active`（含已刪除、user row 不存在）一律拒絕。
 - 已刪除帳號重新註冊會取得全新的 `sub`；RP 視其為新使用者，不會繼承舊資料。
+- 未受邀、非 bootstrap 的 public-created user 持久化為 `accessLevel=restricted`；邀請與 bootstrap 建帳為 `standard`，`0017` 套用前既有 rows 由 default/backfill 保持 `standard`。Restricted user 保留 basic login、account view/mutation、Passkey 與 ordinary OIDC；ID token/UserInfo 平台 role claim 固定為 `user`。
+- Restricted user 不可新增 Google/Telegram/其他 optional provider link，不可取得 elevated platform role，不可新建或接管 OAuth client，也不可使用 developer/admin/system-client management。Initial public Google account 是 migration trigger 的唯一窄例外；request guard 每次重讀 D1，D1 trigger 決定 provider/client/role race winner。既有 owned client 不因 restrict 自動停用，若 incident 涉及該 RP 必須由 operator 另作 client containment 決策。
+- 管理後台可依 `standard`/`restricted` filter，並在 role hierarchy 內執行 restrict/promote/suspend/reactivate。Restrict 同批 demote 至 `user`、撤銷 sessions/access tokens/refresh tokens 並插入 success audit；promote 不 re-activate、不還原舊 role。Guarded snapshot 不符時回 `user_state_changed` 且不留下假 success audit。
+- Restricted sensitive denial 寫入 `account.restricted_action_denied`，metadata 只有固定 `surface`；`user.created` 另記 `accessLevel` enum，讓 promotion/deletion 不會改寫歷史 volume。Registration limiter/denial 與管理狀態轉換事件同樣避免 email/IP/token。初始人工 review threshold、triage、containment、false-positive 與 invite-mode rollback 見 [`docs/runbooks/public-registration-abuse.md`](./docs/runbooks/public-registration-abuse.md)。Repository 尚無外部 dashboard/paging/自動 suspension，runbook 不等同 operational monitoring。
 
 切換 production 至 public 前尚未完成的安全 gate：
 
 - [ ] 將 local source 已實作的 Turnstile registration challenge 部署至隔離 Preview，配置 hostname-scoped site/secret key，完成獨立 review、bypass/失效/服務中斷測試與 production smoke；production secret 僅可存 Wrangler secrets / Secrets Store。
 - [ ] 由 owner 核准實際 Terms/Privacy 內容與 version identifiers，於隔離 Preview 驗證 `0016` 同意紀錄、rollback 與資料匯出，再部署並 smoke-test；local schema/UI/regression 通過不等同法務核准或 production 啟用。
-- [ ] 濫用偵測與封鎖流程（abuse response runbook）。
+- [x] Repository abuse response runbook：以現有 redacted D1 events 提供人工查詢、具體 threshold、triage、restrict/promote/suspend、false-positive 與 rollback；不宣稱外部監控已存在。
+- [ ] 在隔離 Preview 以核准負載驗證/調整 runbook threshold，指定 operator/response channel，並實作及測試外部 aggregation 與 alert delivery。
 - [ ] 獨立安全審查與 OIDC conformance/security testing。
 - [ ] DAST 覆蓋 auth、OIDC、admin、gateway 與 logout endpoints。
 - [ ] SAST、secret scan、IaC/config scan 自動化 gate。
 - [ ] 負載測試、備份還原演練、key rotation 與 Queue retry/DLQ 演練。
-- [ ] 新帳號限制狀態（限縮敏感功能）機制。
+- [x] Local source 的 persistent restricted-account state、request guards、D1 race guards、admin controls 與 workerd regression。
+- [ ] 套用 `0017`、部署 restricted-account Worker 至隔離 Preview，完成獨立 review、race/rollback/ordinary-OIDC smoke，再納入 production rollout；不得因 local gate 通過而宣稱已部署。
 - [ ] Back-channel logout 全面上線與 DLQ 告警。
 - [ ] 將 local source 已實作的 Passkey step-up 與 migration `0014` 部署至 production，完成獨立 review 與實機 smoke；10 分鐘 session-age freshness 仍是額外條件，不能替代重新驗證。
 
@@ -505,7 +516,7 @@ D1 marks central session inactive
 
 ### 12.2 管理後台
 
-- 使用者搜尋、邀請、停權、解除停權與刪除。
+- 使用者搜尋、`standard`/`restricted` filter、邀請、restrict/promote、停權、解除停權與刪除。
 - 平台角色與 client-specific roles。
 - OIDC clients、redirect URIs、scopes、backchannel logout URI。
 - Session 與 token 強制撤銷。
@@ -529,6 +540,7 @@ D1 marks central session inactive
 
 - `bootadmin` 不可被指派；它由設定推導，非授予。
 - 邀請可帶角色（`user`/`developer`/`admin`），可指派範圍與直接角色變更相同。邀請既有帳號時立即套用角色（不留待日後生效的 pending grant），audit 記錄來源為 invitation。
+- Restricted account 不可取得 `developer`/`admin`/`bootadmin`；admin 不能 restrict peer admin，只有 bootadmin 可依 hierarchy 將另一位 admin restrict 並 demote 至 `user`。Restrict/promote 與 suspend/reactivate 是分離的原子 audited transitions，role assignment 仍是第三個分離操作。
 - OAuth client 擁有者被刪除時，client 保留但立即停用、tokens 撤銷、轉為無主（admin 管理）；`ownerUserId` 為 NULL 的既有 client 一律視為 admin 管理。
 - 所有管理操作寫入 audit（actor、target、redacted metadata，不含 PII 全文）。
 
@@ -548,6 +560,8 @@ D1 marks central session inactive
 - `oauth_access_tokens`
 - `oauth_refresh_tokens`
 - `oauth_consents`
+
+本 repository 的實際 Better Auth `user` table 另有 PGID additional fields：`role`、`status`、`accessLevel`、初次 Terms/Privacy version 與 `legalAcceptedAt`。`accessLevel` 只接受 `standard`/`restricted`，migration `0017` 對既有 rows default/backfill `standard`。
 
 ### 13.2 PG72 application tables
 
@@ -595,7 +609,8 @@ Audit metadata 不得包含 access token、refresh token、session token、autho
 - Consent 建立與撤銷。
 - OAuth client、redirect URI、scope 與 secret 變更。
 - Token refresh、revocation 與異常重複使用。
-- 使用者停權、角色變更與刪除。
+- 使用者 restrict/promote、停權/復權、角色變更與刪除。
+- Restricted account 嘗試 provider linking 或 developer/admin/client-management sensitive surface 的 denied event（固定 surface enum，不含 PII）。
 - Recovery codes 建立與使用。
 - Signing key 建立、啟用、停用與移除。
 - Back-channel logout 發送、成功、重試與永久失敗。
@@ -619,7 +634,8 @@ Audit metadata 不得包含 access token、refresh token、session token、autho
 - CORS 採 allowlist，不對 credentialed endpoints 使用 `*`。
 - 所有 state-changing endpoints 使用 CSRF 保護或不依賴 cookie 的等效防護。
 - 登入、callback、token、Passkey、邀請與管理 endpoints 具獨立 rate limits；新帳號建立另有更嚴的 per-IP `REGISTRATION_RATE_LIMITER`。
-- Turnstile 與版本化法律同意已在 local source 實作；Preview/production 配置、獨立 review、實機驗證，以及濫用偵測與封鎖流程仍未完成，皆屬 §9.2 的 public 啟用 gate。
+- Turnstile、版本化法律同意與 restricted account 已在 local source 實作。受限帳號的 sensitive request guard 必須重讀 D1，成功 restrict/promote/suspend transition 與 audit 必須同批 commit；D1 trigger 覆蓋 role、provider insert 與 client owner 的 check/use race。
+- Abuse runbook 已以現有 redacted D1 evidence 定義 manual threshold/triage/containment/rollback；Preview/production 配置、獨立 review、實機驗證、threshold baseline、operator assignment 與外部 aggregation/alert delivery 仍未完成，皆屬 §9.2 的 public 啟用 gate。
 - Error response 不洩漏帳號是否存在、token 狀態、secret 或內部 exception。
 - 日誌與 telemetry 預設遮蔽 PII 與憑證。
 
@@ -654,8 +670,11 @@ Better Auth 曾出現 OAuth/OIDC 與 account linking 相關安全公告。因此
 - Token refresh 重用或異常撤銷。
 - 管理員登入、角色變更與大量匯出。
 - Signing key 即將過期或 JWKS 不一致。
+- Public registration rate-limit/denial、新 restricted-account volume、restricted sensitive denial 與管理員 restrict/promote/suspend transitions。
 
 告警不得直接包含完整 Email、IP、token、authorization code 或 credential ID。
+
+本清單是目標，不代表 repository 已配置外部 dashboard、paging 或自動封鎖。Local source 目前的持久 evidence 與人工初始門檻見 [`docs/runbooks/public-registration-abuse.md`](./docs/runbooks/public-registration-abuse.md)；在隔離 Preview 驗證門檻、指派 operator 並測試 alert delivery 前，不得把 runbook 寫成 operational monitoring 已完成。
 
 ## 18. Service Integration Patterns
 
@@ -762,6 +781,8 @@ Webmail 仍須分成兩個問題：
 - Passkey 註冊、登入、移除、重複 credential 與錯誤 challenge。
 - 邀請不存在、已用、過期、Email 不符與競態條件。
 - 使用者停權後無法登入，既有 session 全部失效。
+- Public user persistent restricted default；invited/bootstrap/existing user standard default/backfill。
+- Restricted user basic account/OIDC success，provider linking、role elevation與 developer/admin/client management fail closed；restrict/promote/suspend hierarchy、session/token revoke、D1 audit atomicity 與 stale-snapshot race/replay。
 - 管理員 step-up 與 recovery flow。
 
 ### 19.3 Global logout tests
@@ -820,9 +841,9 @@ Webmail 仍須分成兩個問題：
 
 ### Phase 4：公開註冊 gate
 
-`REGISTRATION_MODE = public` 的程式路徑已具備 verified-email 強制（含未綁定 Telegram 不可建帳）、per-IP 註冊限流、suspended/deleted 管制、audit、Turnstile-backed 一次性 intent 與版本化法律同意紀錄，但 production 仍維持 `invite`。切換前必須完成 §9.2 gate：
+`REGISTRATION_MODE = public` 的程式路徑已具備 verified-email 強制（含未綁定 Telegram 不可建帳）、per-IP 註冊限流、suspended/deleted 管制、audit、Turnstile-backed 一次性 intent、版本化法律同意紀錄、persistent restricted access 與 manual abuse-response runbook，但 production 仍維持 `invite`。切換前必須完成 §9.2 gate：
 
-- 核准實際 Terms/Privacy versions，部署、配置、獨立 review 並 smoke-test local Turnstile/legal slice；另完成 abuse controls 與新帳號限制狀態。
+- 核准實際 Terms/Privacy versions，部署、配置、獨立 review 並 smoke-test local Turnstile/legal/restricted slice；在隔離 Preview 驗證 threshold，指定 operator 並測試外部 alert delivery。
 - 獨立安全審查、DAST、負載測試、備份還原與事故演練。
 - 所有 high/critical findings 修正後，經 owner 明確核准與部署，才可宣稱公開註冊已啟用。
 
@@ -836,7 +857,7 @@ Webmail 仍須分成兩個問題：
 ├── apps/
 │   ├── sso/                  # PGID Worker, frontend, tests, D1 migrations
 │   └── test-rp/              # Independent OIDC protocol RP
-├── docs/                     # Architecture-adjacent public documentation
+├── docs/                     # Public references and local operator runbooks
 ├── wiki/                     # GitBook-compatible user/developer guides
 └── patches/                  # Audited exact-version dependency patches
 ```

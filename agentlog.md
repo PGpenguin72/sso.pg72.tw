@@ -267,3 +267,40 @@
   `agentlog.md`變更外乾淨。main checkout仍只保留owner原有的
   `M to_claude.md`、`M to_codex.md`、`?? morden_dark.txt`。
 - 未執行push、deploy、remote/production mutation或main integration。
+
+## 2026-07-16 19:57 CST — Parallel delivery boundaries and docs follow-up
+
+- 本輪三個平行交付均已在各自 branch 完成，但都**尚未整合至本 branch 或
+  local `main`，尚未 push/deploy，也不是 production 現況**：
+  - `f5ea1870fda374f93ca5a1720a375c717876118f`（branch
+    `codex/completion-hermetic-gates`）使 SSO/test-RP checks 自行產生 binding
+    types、使用 deterministic test-only bindings，並讓 test-RP `check` 包含
+    protocol tests；整合前仍需 review 與 combined gate。
+  - `dba865dce1f54b72a7fc3ff106ad05dc9fb21799`（branch
+    `codex/test-rp-negative-coverage`）加入真實 WebCrypto Ed25519/JWKS fixture、
+    wrong-audience fail-closed、caller-controlled `resource` 不傳播與
+    `invalid_target` rejection coverage；該 branch 回報 test-RP 14/14、
+    typecheck與Wrangler dry-run通過。
+  - `5ad9798efc0212219cd2ba26c345011dd0fab601`（branch
+    `codex/completion-public-copy`）修正 public PGID product copy並加入對應
+    regression；它也尚未整合，不得把 UI copy 寫成已部署。
+- 獨立唯讀 docs/security review 以 `af73ce41` 為review target，完整核對
+  AGENTS/codex/CLAUDE authority、main/delivery/production truth、Roundcube
+  opaque token/JWKS、invite-only、Passkey/recovery/global logout、log授權與
+  PII/secret redaction。Review確認既有historical banners、SECURITY deadline、
+  redaction及links/headings正確，並找出五個剩餘問題：Roundcube rollout漏
+  duplicate preflight/`0015`、canonical access-token型態錯誤、平行交付log
+  邊界不完整、兩處「所有服務」過度宣稱、design governance仍指向closed
+  `msg.md`。
+- Follow-up在新的`/private/tmp/codex-completion-doc-truth-followup`、branch
+  `codex/completion-doc-truth-followup`，從`af73ce41`建立。Content commit
+  `b669821a2459aa513ea90fc3ba0131419e9096a7`（`Align canonical and rollout
+  documentation`）修完上述五項；只改
+  `SECURITY.md`、`codex.md`、Roundcube/design docs與兩個wiki頁面，沒有碰
+  runtime、package、tests、dirty main通訊檔或未追蹤`0016`。
+- Content verification：`git diff --check` pass；新增relative links存在；
+  headings inventory正常；known PII/secret-value patterns無命中；舊的
+  ID/access-JWKS、0013/0014-only、all-services與closed-`msg.md`指令掃描無命中。
+  純文件變更依AGENTS不執行runtime tests。
+- 未執行push、deploy、remote D1、Cloudflare/VPS/secret-store/production
+  mutation或main integration；本筆將以獨立log-only commit提交。

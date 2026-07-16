@@ -24,19 +24,58 @@ Changes to the deployed invite beta require:
 
 - strict TypeScript, workerd tests, production builds, dependency audit, and secret scan appropriate to the change;
 - no open Critical or High finding;
-- every Medium finding recorded with an owner, compensating control, and target date;
+- every accepted Moderate finding recorded with an owner, compensating control, and expiry;
 - affected Google, Passkey, OIDC negative/replay, revoke, and request-abort checks;
 - an explicit rollback path and post-release smoke checks.
 
 Passing this narrower gate permits an invite-beta release only. It does not authorize public registration or a full Production GO claim.
+
+## Automated Source Assurance
+
+Run the tracked local gates from a frozen install:
+
+```bash
+pnpm check
+pnpm security:check
+pnpm dast:local
+```
+
+`pnpm security:check` combines type-aware Worker Promise analysis, Gitleaks
+history scanning (or the pinned Secretlint fallback when the native tool is not
+installed), actionlint plus deterministic workflow checks, Wrangler JSON Schema
+and production-binding checks, exact dependency-advisory reconciliation, a
+production Worker dry-run artifact scan, and a dependency/license inventory.
+The artifact gate rejects source maps, private machine paths, secret patterns,
+unexpected files, binding/config drift, and size-limit regressions. CI installs
+actionlint and Gitleaks from checksum-pinned upstream release archives and keeps
+the redacted inventories for seven days.
+
+`pnpm dast:local` starts only ephemeral loopback Workers with synthetic values
+and fresh local D1 state. Its credential-free probes cover health/readiness,
+discovery, JWKS public-key shape, OIDC error surfaces, resource-indicator
+rejection, dynamic-registration denial, logout/admin unauthenticated behavior,
+security/cache headers, and a cross-Origin mutation denial. This baseline does
+not cover real login, consent, authenticated admin/gateway/logout behavior,
+abuse/load testing, or an independent review.
+
+The separate `Isolated Preview DAST` workflow is manual and targets only the
+exact origin configured in the protected `isolated-preview` environment. It
+also requires an explicit owner opt-in and a fixed
+`pg72-id-preview.<account-subdomain>.workers.dev` hostname. The scanner rejects
+the production origin, custom domains, arbitrary targets, credentials, and URL
+paths before making a request. This workflow has not been run or treated as
+Preview evidence by this source change. See
+[`docs/runbooks/release-security.md`](./docs/runbooks/release-security.md).
 
 ## Full Production GO and Public Registration Gate
 
 Before enabling `REGISTRATION_MODE=public` or declaring full Production GO, complete and record:
 
 - independent security review and OIDC conformance/security testing;
-- DAST across auth, OIDC, admin, gateway, and logout endpoints;
-- automated SAST, dependency, secret, and IaC/config scanning;
+- authenticated DAST across auth, OIDC, admin, gateway, and logout endpoints in
+  an isolated Preview, in addition to the credential-free local baseline;
+- run and retain the automated SAST, dependency, secret, workflow/IaC/config,
+  and dry-run artifact gates for the exact release candidate;
 - a central visited-client ledger, replay-safe back-channel logout, retry/DLQ alerting, and RP logout verification;
 - recovery-code/break-glass, signing-key rotation, D1 restore, and Queue retry/DLQ drills;
 - deploy, configure, independently review, and smoke-test the locally implemented Turnstile, versioned Terms/Privacy acceptance, and restricted-account paths after applying migrations `0016` and `0017`; the owner must approve the exact live policy versions, validate the initial abuse thresholds in Preview, assign an operator, and test external alert delivery;
@@ -91,7 +130,7 @@ Vite 8 dependency and does not add Vite as a direct Wiki dependency.
 - Compatibility control: Vite 6.4.3 is outside VitePress 1.6.4's declared
   range. Every lockfile change must run a frozen install, the complete Wiki
   parser/build/link/asset/header gate, the Chrome desktop/mobile dark/light
-  crawl, and `pnpm audit --audit-level high`. An audit ignore is not allowed.
+  crawl, and `pnpm security:audit`. An audit ignore is not allowed.
 - Exit condition: remove this override when an audited stable VitePress release
   used by PGID officially supports a Vite version patched for this advisory;
   exact-pin that release and rerun the same compatibility and browser gates.
@@ -99,6 +138,13 @@ Vite 8 dependency and does not add Vite as a direct Wiki dependency.
 ## Accepted Phase 0 Finding
 
 `GHSA-p2fr-6hmx-4528` affects `@better-auth/oauth-provider@1.6.23`. The stable `1.6.x` line has no patched release; the current fix is pre-release only.
+
+The canonical machine-readable acceptance is
+[`security/accepted-advisories.json`](./security/accepted-advisories.json). CI
+requires the live `pnpm audit --json` result to match every recorded advisory
+field and installed version exactly; stale, changed, expired, or unrecorded
+findings fail. The maximum waiver duration is 180 days, and High/Critical
+findings are never accepted by this mechanism.
 
 - Severity: Moderate.
 - Owner: PGID maintainer.

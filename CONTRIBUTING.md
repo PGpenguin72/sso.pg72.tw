@@ -9,10 +9,15 @@ canonical repository gate before opening a pull request:
 
 ```bash
 pnpm check
-pnpm audit --audit-level high
+pnpm security:check
+pnpm dast:local
 ```
 
-The audit includes runtime, build, and development dependencies.
+The security gate includes runtime, build, and development dependencies and
+requires every observed advisory to match the expiring machine-readable record.
+The DAST command is loopback-only and uses temporary synthetic D1 state. See the
+[release-security runbook](./docs/runbooks/release-security.md) for gate scope,
+artifacts, tool fallbacks, and the separately protected Preview workflow.
 
 The Wiki uses the [workspace settings](./README.md#workspace) as the single
 source for its local and Cloudflare Pages build configuration; do not duplicate

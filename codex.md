@@ -332,8 +332,8 @@ access:                  standard <-> restricted
 - [x] Repository abuse response runbook：以現有 redacted D1 events 提供人工查詢、具體 threshold、triage、restrict/promote/suspend、false-positive 與 rollback；不宣稱外部監控已存在。
 - [ ] 在隔離 Preview 以核准負載驗證/調整 runbook threshold，指定 operator/response channel，並實作及測試外部 aggregation 與 alert delivery。
 - [ ] 獨立安全審查與 OIDC conformance/security testing。
-- [ ] DAST 覆蓋 auth、OIDC、admin、gateway 與 logout endpoints。
-- [ ] SAST、secret scan、IaC/config scan 自動化 gate。
+- [ ] 在隔離 Preview 完成 authenticated DAST，覆蓋 auth、OIDC、admin、gateway 與 logout endpoints；repository 現有 `pnpm dast:local` 只跑 ephemeral loopback Worker/test RP 的無憑證 public/error/header/CSRF baseline，受保護的 manual Preview workflow 尚未執行，不能取代完整 gate。
+- [x] Repository source 已有 `pnpm security:check` 自動化 gate：type-aware Worker Promise SAST、完整 Git history secret scan（native tool 不可用時有 pinned fallback）、GitHub workflow/action SHA 與 Wrangler schema/binding validation、exact advisory reconciliation、production Worker dry-run artifact/source-map/private-path/secret/size scan，以及 dependency/license inventory；每個 release candidate 仍必須實際跑完並保存結果。
 - [ ] 負載測試、備份還原演練、key rotation 與 Queue retry/DLQ 演練。
 - [x] Local source 的 persistent restricted-account state、request guards、D1 race guards、admin controls 與 workerd regression。
 - [ ] 套用 `0017`、部署 restricted-account Worker 至隔離 Preview，完成獨立 review、race/rollback/ordinary-OIDC smoke，再納入 production rollout；不得因 local gate 通過而宣稱已部署。
@@ -802,10 +802,12 @@ Webmail 仍須分成兩個問題：
 - Account linking 與相同 Email takeover scenarios。
 - Rate limit、Turnstile bypass 與帳號列舉。
 - 管理權限 escalation 與 audit tampering。
-- Dependency audit、secret scanning 與 production source map 檢查。
+- `security/accepted-advisories.json` 與即時 dependency audit 精確比對 package/version/severity/range；stale、changed、expired、unrecorded advisory 皆 fail，High/Critical 不可 waiver。
+- Gitleaks history/Secretlint fallback、production dry-run artifact 的 secret/private-path/source-map/unexpected-file/size 檢查。
+- GitHub Actions immutable SHA/least permissions/concurrency/retention 與 Wrangler JSON Schema/config/binding drift 檢查。
 - Worker request abort、isolate reuse、併發初始化與 hanging promise regression。
 - 使用 `@cloudflare/vitest-pool-workers` 在 workerd 環境測 D1、Queue、cookies 與 bindings，不只在 Node.js mock 測試。
-- DAST 對 login、authorize、token、userinfo、introspection、revocation、logout、admin 與 gateway endpoints 全部覆蓋。
+- Local credential-free DAST 對 health/readiness/discovery/JWKS、authorize/token/userinfo/introspection/revocation/logout/admin errors、resource rejection、headers/CSRF 與 localhost test RP 覆蓋；isolated Preview 的 authenticated login/consent/admin/gateway/logout 完整 DAST 仍是未完成 gate。
 - SAST/secret scan/dependency scan 無未處理的 Critical 或 High finding；Medium 必須有書面接受期限與補救措施。
 
 ## 20. 導入階段

@@ -27,6 +27,7 @@ The canonical architecture and migration decisions are in [`codex.md`](./codex.m
 | [`docs/about-PGID.md`](./docs/about-PGID.md) | Product introduction; what PGID is and why. Also used by the frontend `/about` page. |
 | [`docs/api/PGID-integration.md`](./docs/api/PGID-integration.md) | Concise integration reference: endpoints, scopes, claims, token lifetimes, client auth, and copyable `oauth4webapi`/generic examples. |
 | [`docs/runbooks/public-registration-abuse.md`](./docs/runbooks/public-registration-abuse.md) | Local public-registration abuse thresholds, triage, account containment, false-positive handling, and rollback. |
+| [`docs/runbooks/release-security.md`](./docs/runbooks/release-security.md) | Reproducible source, advisory, dry-run artifact, inventory, and safe DAST release gates. |
 | [`wiki/`](./wiki/SUMMARY.md) | GitBook-compatible tutorial site (content source for `wiki.sso.pg72.tw`): user guides and developer walkthroughs. |
 
 ## Registration Policy
@@ -46,7 +47,7 @@ Current safeguards in public mode:
 - Suspended accounts and deleted (missing) users are blocked at session creation, so public mode does not bypass suspension. A deleted user who re-registers receives a brand-new `sub`.
 - Registration denials never reveal whether an account exists.
 
-Known-incomplete gates that block opening registration (tracked in `codex.md` §9.2): production deployment/configuration and independent review of the local Turnstile/legal-acceptance and restricted-account slices, owner approval of the live policy version identifiers, Preview validation of the documented abuse thresholds plus an assigned operator and external alert delivery, OIDC conformance/security testing, DAST, SAST/secret/IaC scan gates, load testing, backup-restore and key-rotation drills, and full back-channel logout rollout. The local runbook and manual redacted D1 queries do not claim operational monitoring exists.
+Known-incomplete gates that block opening registration (tracked in `codex.md` §9.2): production deployment/configuration and independent review of the local Turnstile/legal-acceptance and restricted-account slices, owner approval of the live policy version identifiers, Preview validation of the documented abuse thresholds plus an assigned operator and external alert delivery, OIDC conformance/security testing, authenticated and isolated-Preview DAST, load testing, backup-restore and key-rotation drills, and full back-channel logout rollout. Automated SAST, secret, dependency, workflow/Wrangler config, artifact, and localhost public-surface DAST gates now exist, but they do not prove those remaining operational gates. The local runbook and manual redacted D1 queries do not claim operational monitoring exists.
 
 ## Workspace
 
@@ -138,7 +139,8 @@ The local test RP is a public client. It has no client secret; its transaction s
 
 ```bash
 pnpm check
-pnpm audit --audit-level high
+pnpm security:check
+pnpm dast:local
 ```
 
 `pnpm check` is the canonical repository gate. It runs the clean-build-output
@@ -146,13 +148,30 @@ regression and workspace package checks, covering type checks, workerd and
 relying-party protocol tests, Wiki route/link/header validation, and production
 and static builds.
 
-The audit covers runtime, build, and development dependencies so tooling
-advisories cannot bypass the High or Critical release gate.
+`pnpm security:check` runs type-aware Promise analysis over both Workers,
+secret scanning, GitHub workflow and Wrangler-schema validation, the exact
+dependency advisory policy, a production `wrangler deploy --dry-run --outdir`
+artifact gate, a path-free dependency/license inventory, and negative tests for
+the automation itself. The audit covers runtime, build, and development
+dependencies so tooling advisories cannot bypass the gate.
 
-The audit currently reports the accepted Moderate `GHSA-p2fr-6hmx-4528`. Its constrained exposure and temporary controls are documented in [`SECURITY.md`](./SECURITY.md). A High or Critical advisory fails the release gate.
+The audit currently reports the accepted Moderate `GHSA-p2fr-6hmx-4528`.
+[`security/accepted-advisories.json`](./security/accepted-advisories.json)
+records its exact package/version, rationale, controls, owner, expiry, and
+review command. The gate fails if the advisory changes, disappears while its
+waiver remains, expires, or is joined by any unrecorded finding. High and
+Critical advisories cannot be waived by this file.
+
+`pnpm dast:local` creates fresh temporary local D1 state, starts ephemeral PGID
+and test-RP Workers on loopback, and runs credential-free public/error probes.
+It terminates both process groups and deletes the synthetic state afterward.
+The protected manual Preview path and its limitations are documented in the
+[release-security runbook](./docs/runbooks/release-security.md); it has not been
+run by this source change.
 
 These commands verify local source only. They do not deploy, migrate remote D1,
-provision clients, or provide a production smoke-test record.
+provision clients, exercise authenticated Preview/production flows, or provide
+a production smoke-test record.
 
 ## Cloudflare Provisioning
 

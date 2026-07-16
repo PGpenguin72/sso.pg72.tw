@@ -21,6 +21,8 @@ PGID 帳號是你在所有 PG72 服務共用的身分。你不需要為每個服
 
 註冊完成後，強烈建議立刻[設定一組 Passkey](passkey.md)，之後就能無密碼快速登入，也多一層安全保障。
 
+Telegram 不提供 verified email，所以不能用來建立新 PGID 帳號。Telegram identity 只有在既有帳號的 authenticated session 中明確連結後，才可用來登入同一個帳號。
+
 ## 邀請
 
 除了公開註冊，PGID 也保留**邀請**機制。如果管理員以你的 email 發了邀請，你第一次登入時會自動取得邀請指定的角色（例如管理權限）。邀請是一次性的，用過即失效。

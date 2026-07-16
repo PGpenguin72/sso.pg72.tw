@@ -43,6 +43,8 @@ Before enabling `REGISTRATION_MODE=public` or declaring full Production GO, comp
 
 The canonical checklist is [`codex.md`](./codex.md) §9.2. The deployed configuration remains `invite` until that gate passes and the owner explicitly approves and deploys the switch.
 
+The verified-email enrollment boundary applies to every new account. Telegram Login Widget payloads contain no email, so an unmatched Telegram identity is rate-limited, audited without its Telegram ID or other PII, and rejected in both `invite` and `public` modes. Telegram may authenticate only an active account to which that provider identity was explicitly linked from an authenticated PGID session; no placeholder-email account is created.
+
 ## Local Mail Introspection Boundary
 
 The only delegated introspection relationship is the fixed confidential client `pgid-mail-introspect` inspecting opaque access tokens issued to `pg72-webmail`. Authorization requires a live central session, the `email` scope, and an active user with a verified email. JWTs, refresh tokens, every other client pair, and tokens missing any required state must be reported as RFC 7662 inactive.

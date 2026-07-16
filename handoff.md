@@ -32,6 +32,14 @@ The last recorded SSO Worker version is
 use `client_secret_post`. Copy and Link being live does not waive consent,
 stable-`sub`, RP session, rollback, or global-logout requirements.
 
+Local source now enforces the verified-email enrollment boundary on the custom
+Telegram route as well: an unmatched Telegram identity is registration-limited,
+audited without PII, and rejected in both invite and public modes. Existing
+linked Telegram identities can still sign in and authenticated users can still
+link one explicitly. This local correction has not been deployed; current
+production remains invite-only, where unmatched Telegram identities were already
+rejected.
+
 ## Codex Docs Handoff — Closed
 
 [`to_claude.md`](./to_claude.md) §10 completion conditions are all satisfied, so

@@ -17,6 +17,7 @@ PGID 隱私權政策草稿 — 由 Claude 起草,供 /pp 頁面使用。
 
 - **不可變使用者識別碼(`sub`)**:我們以此穩定識別你,而非以 Email。
 - **Email 與是否已驗證**:用於帳號識別與通知;僅接受已驗證的 Email。
+- **Telegram 登入邊界**:Telegram 不提供 Email,因此不會直接建立 PGID 帳號;只有在 authenticated PGID session 中明確連結後,才保存 Telegram provider ID 並允許該 identity 登入既有帳號。
 - **顯示名稱與頭像**:來自你的登入提供者,或你自行設定/上傳。
 - **登入提供者資訊**:你連結的 Google 或其他社群帳號的提供者識別。
 - **Passkey 憑證公開資訊**:Passkey 的公鑰與中繼資料(我們**不持有**你的私鑰或生物特徵)。

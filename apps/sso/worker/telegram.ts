@@ -4,7 +4,6 @@ import { makeSignature } from "better-auth/crypto";
 
 import { recordAudit } from "./audit";
 import { createAuth } from "./auth";
-import { normalizeDisplayName } from "./account";
 import { readRuntimeConfig, type RuntimeConfig } from "./config";
 import { recordLoginAudit } from "./security-activity";
 
@@ -26,17 +25,15 @@ type AppEnv = { Bindings: Env };
  * numeric user id is the immutable identity (mapped to provider `telegram`,
  * accountId = telegram id); the display name is derived from the profile.
  *
- * Design decision — no email: Telegram never provides an email. PGID keeps the
- * immutable `sub` (user.id) as the identity and email is not a primary key, so
- * a pure Telegram sign-up gets a non-deliverable, unverified placeholder email
- * `tg_<id>@telegram.invalid` (emailVerified = 0). Such accounts therefore never
- * satisfy any "verified email" requirement (e.g. they cannot be used to claim a
- * Google account by email); linking Telegram to an existing account still
- * requires an authenticated session (no implicit linking), matching CLAUDE.md.
+ * Design decision — no email: Telegram never provides an email, so it cannot
+ * satisfy PGID's verified-email enrollment boundary. A Telegram identity may
+ * sign in only after it has been explicitly linked from an authenticated PGID
+ * session. An unmatched identity is rate-limited, audited without PII, and
+ * rejected in both invite and public registration modes; no placeholder account
+ * is created.
  */
 
 const TELEGRAM_PROVIDER_ID = "telegram";
-const TELEGRAM_PLACEHOLDER_EMAIL_DOMAIN = "telegram.invalid";
 /** Widget payloads older than this (seconds) are rejected as replays. */
 const TELEGRAM_AUTH_MAX_AGE_SECONDS = 300;
 /** Small allowance for clock skew when the payload is "from the future". */
@@ -137,14 +134,6 @@ export async function verifyTelegramAuth(
       photoUrl: data.photo_url ?? null,
     },
   };
-}
-
-function telegramDisplayName(user: TelegramUser): string {
-  const parts = [user.firstName, user.lastName].filter(
-    (part): part is string => typeof part === "string" && part.length > 0,
-  );
-  const candidate = parts.join(" ") || user.username || `Telegram ${user.id}`;
-  return normalizeDisplayName(candidate) ?? `Telegram ${user.id}`;
 }
 
 /**
@@ -294,8 +283,9 @@ async function verifiedTelegramUser(
 
 /**
  * Login / sign-up via the Telegram Login Widget. No session is required: an
- * existing Telegram-linked account signs in, otherwise a new account is
- * created (subject to REGISTRATION_MODE).
+ * existing Telegram-linked account signs in. Telegram does not provide a
+ * verified email, so an unmatched identity cannot create a PGID account in
+ * either registration mode.
  */
 telegramRoutes.post("/api/auth/telegram", async (c) => {
   const verified = await verifiedTelegramUser(c);
@@ -332,12 +322,9 @@ telegramRoutes.post("/api/auth/telegram", async (c) => {
     return telegramCookieResponse({ signedIn: true }, 200, cookies);
   }
 
-  // New account. Invitations are keyed by email, which Telegram lacks, so
-  // invite mode cannot admit a pure Telegram sign-up.
-  if (config.registrationMode !== "public") {
-    return c.json({ error: "registration_closed" }, 403);
-  }
-
+  // Unmatched Telegram identities cannot satisfy the verified-email enrollment
+  // boundary. Consume the dedicated registration budget before writing the
+  // denial audit so this unauthenticated path cannot amplify D1 writes.
   const registrationLimit = await c.env.REGISTRATION_RATE_LIMITER.limit({
     key: c.req.header("cf-connecting-ip") ?? "local",
   });
@@ -350,70 +337,19 @@ telegramRoutes.post("/api/auth/telegram", async (c) => {
     return c.json({ error: "rate_limited" }, 429);
   }
 
-  const userId = crypto.randomUUID();
-  const accountRowId = crypto.randomUUID();
-  const now = new Date().toISOString();
-  const placeholderEmail = `tg_${verified.id}@${TELEGRAM_PLACEHOLDER_EMAIL_DOMAIN}`;
-
-  try {
-    await c.env.PG72_ID_DB.batch([
-      c.env.PG72_ID_DB.prepare(
-        `INSERT INTO user
-          (id, name, email, emailVerified, createdAt, updatedAt, role, status)
-         VALUES (?, ?, ?, 0, ?, ?, 'user', 'active')`,
-      ).bind(userId, telegramDisplayName(verified), placeholderEmail, now, now),
-      c.env.PG72_ID_DB.prepare(
-        `INSERT INTO account
-          (id, accountId, providerId, userId, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      ).bind(accountRowId, verified.id, TELEGRAM_PROVIDER_ID, userId, now, now),
-    ]);
-  } catch (error) {
-    // A concurrent request may have created the account (unique email); treat
-    // as a conflict rather than leaking details.
-    if (
-      error instanceof Error &&
-      error.message.includes("UNIQUE constraint failed")
-    ) {
-      return c.json({ error: "account_conflict" }, 409);
-    }
-    throw error;
-  }
-
   await recordAudit(
     c.env,
     {
-      eventType: "user.created",
-      outcome: "success",
-      subjectId: userId,
-      metadata: { role: "user", roleSource: "telegram" },
+      eventType: "registration.denied",
+      outcome: "denied",
+      metadata: {
+        provider: TELEGRAM_PROVIDER_ID,
+        reason: "verified_email_required",
+      },
     },
     c.executionCtx,
   );
-  await recordAudit(
-    c.env,
-    {
-      eventType: "account.linked",
-      outcome: "success",
-      subjectId: userId,
-      metadata: { provider: TELEGRAM_PROVIDER_ID },
-    },
-    c.executionCtx,
-  );
-
-  const cookies = await mintSessionCookies(
-    c.env,
-    config,
-    userId,
-    c.req.raw.headers,
-  );
-  await recordLoginAudit(
-    c.env,
-    userId,
-    { path: "/callback/telegram", request: { headers: c.req.raw.headers } },
-    c.executionCtx,
-  );
-  return telegramCookieResponse({ signedIn: true, created: true }, 200, cookies);
+  return c.json({ error: "registration_closed" }, 403);
 });
 
 /**

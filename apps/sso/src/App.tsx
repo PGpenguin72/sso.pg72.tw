@@ -1663,6 +1663,11 @@ function PrivacyContent() {
             <strong>Email 與是否已驗證</strong>：用於帳號識別與通知；僅接受已驗證的 Email。
           </li>
           <li>
+            <strong>Telegram 登入邊界</strong>：Telegram 不提供 Email，因此不會直接建立 PGID
+            帳號；只有在 authenticated PGID session 中明確連結後，才保存 Telegram provider ID
+            並允許該 identity 登入既有帳號。
+          </li>
+          <li>
             <strong>顯示名稱與頭像</strong>：來自你的登入提供者，或你自行設定／上傳。
           </li>
           <li>

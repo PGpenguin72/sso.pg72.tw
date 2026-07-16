@@ -1,10 +1,10 @@
 # 社群登入申請與設定教學(A4)
 
-PGID 已支援 Discord / GitHub / Facebook / Apple / Telegram 登入,但**目前都沒設定 secret,所以登入頁不會顯示這些按鈕**(自動隱藏,不影響 Google/Passkey)。你到各平台開發者後台申請後,把值交給我(或自己)進 secret store,按鈕就會出現且可用。
+PGID 已支援 Discord / GitHub / Facebook / Apple / Telegram 登入,但**目前都沒設定 secret,所以登入頁不會顯示這些按鈕**(自動隱藏,不影響 Google/Passkey)。Secret 值只能由 owner 直接寫入 Cloudflare secret store,不得交給 coding agent、貼到聊天或寫入檔案。Telegram 只可登入已從 authenticated PGID session 明確連結的既有帳號,不能在 invite 或 public mode 直接建立帳號。
 
 ## 共通:設定 secret 的方式
 
-在 `apps/sso/` 目錄用 Wrangler 設(值不會落地、不進 git):
+Production secret 設定是 owner 在維護窗口執行的 deployment action,coding agent 不得代跑。`wrangler secret put` 會建立新 Worker version 並立即部署;owner 只有在準備同步完成 smoke/rollback 時才可使用:
 
 ```bash
 cd /Users/pgpenguin72/sso.pg72.tw/apps/sso
@@ -12,7 +12,7 @@ cd /Users/pgpenguin72/sso.pg72.tw/apps/sso
 npx wrangler secret put <SECRET_NAME>
 ```
 
-設完**不需重新部署**(Worker secret 即時生效;若沒生效再 `wrangler deploy --config dist/pg72_id/wrangler.json`)。你也可以把值貼給我,我幫你進。
+若要先建立尚未部署的 version,owner 可使用 `wrangler versions secret put`,再依核准的 maintenance-window runbook 由 owner 控制 deployment。無論採哪一條路,值都只在 Wrangler 的互動式 secret prompt 由 owner 輸入,不進 shell history、source、log、issue 或聊天。
 
 各 provider 的 **callback / redirect URI 一律填**:
 ```
@@ -57,7 +57,7 @@ https://sso.pg72.tw/callback/<provider>
 2. 建一個 **App ID**(或 Services ID)作為 client:記下 **Services ID**（= `APPLE_CLIENT_ID`）。
 3. Services ID 設定 Sign in with Apple → 網域填 `sso.pg72.tw`、Return URL 填 `https://sso.pg72.tw/callback/apple`。
 4. 建一把 **Sign in with Apple 用的 Key**(.p8),記下 **Key ID** 與 **Team ID**,下載 .p8 私鑰。
-5. **`APPLE_CLIENT_SECRET` 是用 .p8 + Key ID + Team ID 產生的 ES256 JWT**(有效期最長 6 個月,到期要換)。這一步較複雜,把 .p8 內容、Key ID、Team ID、Services ID 給我,我可以幫你產生 JWT 並教你之後怎麼自動輪替。
+5. **`APPLE_CLIENT_SECRET` 是用 .p8 + Key ID + Team ID 產生的 ES256 JWT**(有效期最長 6 個月,到期要換)。Owner 應在受控環境以經審核的工具自行產生並規劃輪替;`.p8` 私鑰、產出的 JWT 與相關 secret 不得交給 coding agent 或貼到聊天。
 6. 設定 secret:
    - `APPLE_CLIENT_ID`（Services ID）
    - `APPLE_CLIENT_SECRET`（產生的 JWT）
@@ -71,11 +71,12 @@ https://sso.pg72.tw/callback/<provider>
    - `TELEGRAM_BOT_TOKEN`（bot token,secret）
    - `TELEGRAM_BOT_USERNAME`（bot 的 username,例如 `pgid_login_bot`;這個是公開的,登入頁 widget 需要)
 4. Telegram 不需要 `callback/telegram`;widget 驗證後會 POST 到 `/api/auth/telegram`(後端已做 HMAC 驗證)。
+5. Telegram 不提供 verified email,因此這個 endpoint 只會登入已從 authenticated PGID session 明確連結的既有帳號。未綁定 identity 在 invite/public 兩種 mode 都會被拒絕,不會建立 placeholder-email 帳號。
 
 ---
 
 ## 注意
 
 - 每個 provider **只有兩個(id+secret)都設好才會啟用**;沒設的就自動隱藏,不會壞。
-- 這些 secret 只放 Wrangler secret store,**不要**貼進 git、`wrangler.jsonc`、log 或聊天(給我進 store 可以,我不會寫進檔案)。
+- 這些 secret 只放 Wrangler secrets / Secrets Store,**不要**貼進 git、`wrangler.jsonc`、log、issue 或聊天,也不要交給 coding agent。
 - Google 與 Passkey 是主力登入,社群登入是額外選項。

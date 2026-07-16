@@ -18,17 +18,19 @@ PGID 是身分提供者，它**代替**你的服務處理 Google 登入與 Passk
 
 ## PGID 端的社群登入
 
-PGID v1 的日常登入方式是：
+PGID v1 的日常登入主力是：
 
 * **Google**：`openid email profile` 最小授權；只在 email 已驗證時建立帳號。
 * **Passkey**：WebAuthn 無密碼登入，RP ID 固定為 `sso.pg72.tw`。
 
-v1 **不提供**密碼、Email OTP、TOTP、GitHub 或 Discord 登入。
+另外可設定 Discord、GitHub、Facebook、Apple 與 Telegram 作為額外登入方式；未設定相應 secret 時按鈕自動隱藏,不影響 Google/Passkey。v1 **不提供**密碼、Email OTP 或 TOTP 登入。
+
+Telegram 使用 Login Widget 而不是 OAuth/OIDC,而且 Telegram 不提供 verified email。因此未綁定的 Telegram identity 在 invite/public 兩種 registration mode 都不能建立 PGID 帳號；它只能在 active authenticated PGID session 中明確連結,之後用來登入同一個既有 `sub`。PGID 不會為 Telegram 建立 placeholder-email 帳號。
 
 ## 對你服務的意義
 
 * 你拿到的使用者身分不分「Google 使用者」或「Passkey 使用者」——都是同一個 PGID 帳號，以同一個不可變 `sub` 呈現。
-* 使用者換登入方式（例如今天用 Google、明天用 Passkey）不影響 `sub`，你對應到的還是同一個帳號。
+* 使用者換登入方式（例如今天用 Google、明天用 Passkey 或已連結的 Telegram）不影響 `sub`，你對應到的還是同一個帳號。
 * 你不會、也不需要拿到使用者的 Google token。
 
 ## 帳號連結

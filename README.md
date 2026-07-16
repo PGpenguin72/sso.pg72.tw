@@ -34,6 +34,7 @@ The deployed `REGISTRATION_MODE` in `apps/sso/wrangler.jsonc` is currently `"inv
 Current safeguards in public mode:
 
 - A first Google sign-in creates the account only when Google asserts a verified email; unverified emails are rejected in both modes.
+- Telegram does not provide an email, so it never creates a PGID account in either mode. It can sign in only after that Telegram identity was explicitly linked from an authenticated PGID session.
 - Passkey registration still requires an existing account and an authenticated session.
 - New-account creation has its own per-IP Workers Rate Limiting budget (`REGISTRATION_RATE_LIMITER`, 5/min), stricter than the sign-in limiter (30/min). The budget is consumed before any denial audit write or invitation lookup so those cannot be spammed.
 - Suspended accounts and deleted (missing) users are blocked at session creation, so public mode does not bypass suspension. A deleted user who re-registers receives a brand-new `sub`.

@@ -17,7 +17,7 @@
 
 Status 上游原始碼曾包含硬編碼 Telegram bot credential；目前兩個 seed path 都已改為 disabled empty configuration，source secret scan 不再命中。既有調查指出該 credential 屬上游作者而非 PG72 owner；PG72 不使用它，也不宣稱能代替上游旋轉。SSO 的 Cloudflare Vite build 已加入 post-build cleanup，production/preview artifact 不再保留 plugin 為 `vite preview` 複製的 `.dev.vars*`。
 
-Production `REGISTRATION_MODE` 目前仍是 `invite`。`public` 程式路徑與 workerd regression tests 已備妥：Google 首次登入要求 verified email、邀請功能保留、新帳號建立使用獨立 per-IP `REGISTRATION_RATE_LIMITER`，suspended/deleted 使用者仍由 session 建立檢查擋下。完整安全 gate 尚未完成，未完成項目列於 §9.2；只有 owner 明確核准並部署設定變更後才算開啟公開註冊。
+Production `REGISTRATION_MODE` 目前仍是 `invite`。`public` 程式路徑與 workerd regression tests 已備妥：所有新帳號都必須通過 verified-email enrollment gate，Google 首次登入要求 verified email，Telegram 因不提供 email 而只能登入已明確連結的既有帳號；邀請功能保留，新帳號建立使用獨立 per-IP `REGISTRATION_RATE_LIMITER`，suspended/deleted 使用者仍由 session 建立檢查擋下。完整安全 gate 尚未完成，未完成項目列於 §9.2；只有 owner 明確核准並部署設定變更後才算開啟公開註冊。
 
 Mail Path A 所需的 PGID introspection prerequisite 已合併至本地 `main` 並納入上述完整 gate。它只允許固定的 `pgid-mail-introspect` 查詢簽發給 `pg72-webmail` 的 opaque access token，且 token 必須保有 live central session、`email` scope，以及 active、verified-email user；完整契約見 §10.5。這項結果尚未部署、尚未 provision system client，也未經 production 驗證；Dovecot/Postfix/Roundcube 的 VPS cutover 仍須 owner 在場的維護窗口，不得因本地測試通過而直接套用。
 
@@ -287,6 +287,7 @@ invited -> active -> suspended -> deleted
 已實作且有 regression coverage 的 `REGISTRATION_MODE=public` 行為：
 
 - 第一次 Google 登入直接建立帳號；Google 必須回傳已驗證 Email（`email_verified`），否則拒絕（`EMAIL_NOT_VERIFIED`），兩種模式皆強制。
+- Telegram Login Widget 不提供 Email，因此未綁定的 Telegram identity 在 invite/public 兩種模式都先消耗 registration limiter、寫入不含 Telegram ID 或其他 PII 的 `registration.denied`，再以相同泛化錯誤拒絕；不得建立 placeholder-email user 或 session。既有 Telegram identity 只能在 authenticated PGID session 中明確連結，連結後才可用 Telegram 登入。
 - Passkey 註冊仍需先有帳號與已登入 session；公開註冊不開放無帳號的 Passkey 註冊。
 - 新帳號建立有獨立、比登入更嚴的 per-IP rate limit（Workers Rate Limiting binding `REGISTRATION_RATE_LIMITER`，5 次/60 秒；登入面為 `AUTH_RATE_LIMITER` 30 次/60 秒）。限流檢查在任何 denial audit 寫入與邀請查詢之前消耗額度，避免被濫刷。
 - 觸發限流寫入 `registration.rate_limited` audit；所有 registration 拒絕訊息不洩漏帳號是否存在。
@@ -328,6 +329,13 @@ invited -> active -> suspended -> deleted
 - 沒有 Passkey 的帳號一律回 `PASSKEY_ENROLLMENT_REQUIRED`，包含 `bootadmin`，沒有 runtime bypass。首次 bootstrap 以既有 Google fresh session 註冊 Passkey 後再 step-up。若 Google 與所有 Passkey 都遺失，目前沒有可用的自助 recovery/break-glass flow；其設計、審核與演練仍是 full Production GO gate，不能以 client API bypass 代替。
 - 以上行為已在 local source 以真實 P-256 assertion、replay、cross-session、expiry、missing-Passkey 與 UV regression 驗證；production 尚未套用 `0014` 或部署，不能宣稱遠端 blocker 已關閉。
 - Recovery code 尚未實作；未來只能供一次性帳號復原，不作為日常登入方式。
+
+### 9.5 Telegram
+
+- Telegram Login Widget payload 必須以 bot token 衍生的 HMAC 驗證，並拒絕過期或未來時間超出容許範圍的 payload。
+- Telegram numeric user ID 只作 provider account identifier，不作 email、OIDC `sub` 或一般服務主鍵。
+- Telegram 不提供 verified email，因此不論 `REGISTRATION_MODE` 是 `invite` 或 `public`，未綁定 identity 都不能建立 PGID user、account 或 session。
+- Telegram 只能在 active authenticated PGID session 中明確連結；已連結且 user 仍為 active 時才可用 Telegram 登入。不得以 placeholder email、implicit linking 或 public mode 繞過 verified-email enrollment gate。
 
 ## 10. OIDC Client Contract
 
@@ -782,7 +790,7 @@ Webmail 仍須分成兩個問題：
 
 ### Phase 4：公開註冊 gate
 
-`REGISTRATION_MODE = public` 的程式路徑已具備 verified-email 強制、per-IP 註冊限流、suspended/deleted 管制與 audit，但 production 仍維持 `invite`。切換前必須完成 §9.2 gate：
+`REGISTRATION_MODE = public` 的程式路徑已具備 verified-email 強制（含未綁定 Telegram 不可建帳）、per-IP 註冊限流、suspended/deleted 管制與 audit，但 production 仍維持 `invite`。切換前必須完成 §9.2 gate：
 
 - Terms/Privacy、Turnstile、abuse controls、新帳號限制狀態。
 - 獨立安全審查、DAST、負載測試、備份還原與事故演練。

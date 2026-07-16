@@ -7,10 +7,10 @@
 - Issuer 固定為 `https://sso.pg72.tw`。
 - SSO 由 PG72 自行掌控，不使用 Cloudflare Access 作登入或授權層。
 - v1 日常登入主力是 Google 與 Passkey。
-- v1 程式另支援 Discord、GitHub、Facebook、Apple、Telegram 社群登入作為額外選項；只有設定對應 secret 的 provider 才會啟用，未設定時自動隱藏且不影響 Google/Passkey。
+- v1 程式另支援 Discord、GitHub、Facebook、Apple、Telegram 社群登入作為額外選項；只有設定對應 secret 的 provider 才會啟用，未設定時自動隱藏且不影響 Google/Passkey。Telegram 不提供 verified email，因此只能登入已從 authenticated PGID session 明確連結的既有帳號，不能在 invite 或 public mode 直接建立帳號。
 - v1 不提供密碼、Email OTP 或 TOTP 登入。
 - Production `REGISTRATION_MODE` 目前是 `invite`。公開註冊程式路徑與測試已備妥，但必須在 `codex.md` §9.2 的安全 gate 通過並由 owner 明確切換後才可開啟；邀請功能在兩種模式都保留。
-- Public path 的 Google 首次登入只接受 verified email；Passkey 註冊仍需先有帳號與已登入 session。文件不得把「程式已備妥」寫成「已公開」。
+- Public path 的所有新帳號都必須通過 verified-email enrollment gate；Google 首次登入只接受 verified email，Passkey 註冊仍需先有帳號與已登入 session，未綁定 Telegram identity 在兩種 registration mode 都拒絕。文件不得把「程式已備妥」寫成「已公開」。
 - 必須支援裝置 session、單一/全部撤銷、全域登出、audit 與管理員停權。
 - 不共用 `Domain=.pg72.tw` cookie。所有 app 使用 OIDC redirect 與自己的 host-only session。
 - Email 不是使用者主鍵；所有服務以不可變 OIDC `sub` 識別使用者。

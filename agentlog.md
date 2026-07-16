@@ -180,3 +180,19 @@
 - 執行:`worktree remove --force /private/tmp/pgid-mail-docs`(一次成功,無 lock 重試)→ `branch -D codex/mail-introspection-docs`(was 456b027)→ `worktree prune`。
 - 事後確認:`git worktree list` 只剩 `/Users/pgpenguin72/sso.pg72.tw [main]`;`git branch -a` 只剩 `main`;/private/tmp/pgid-mail-docs 目錄已不存在。
 - 未執行:push、deploy、remote D1、任何 production mutation。
+
+## 2026-07-16 — handoff.md 現行狀態區更新(任務 2)
+
+- 更新 handoff.md 開頭 current-state header(第 1 行到 `Mail Path A Rollback` 為止),歷史段落原文全數保留。
+- 修改的既有內容(僅 3 行,全在 header):reconciliation banner 補「owner 回歸後」範圍 + 接手者導讀;`Source baseline` 補 docs cherry-pick 8caf27e 與「無 remote、從未 push」;`Verification record` 改為本輪實測數字。
+- 新增區段:
+  - `Codex Docs Handoff — Closed`:to_claude.md §10 全數滿足;456b027 → main 8caf27e;§7 十項中實修 3 類 7 處(Queue 語意不再暗示 durable outbox/補送已存在、secret incident 順序 = disable→rotate→更新 secret store/Dovecot→維護窗口 re-enable→立即 smoke→失敗即 re-disable/rollback、provision body = 無 request 欄位且 4 KiB 內 body 被忽略),其餘 7 項列出確認正確。
+  - `Known Gotchas`:worker-configuration.d.ts git-ignored 且可能過舊(缺兩個 INTROSPECTION limiter binding)導致 typecheck 失敗 → `pnpm --filter @pg72/id cf-typegen`(純本地,不碰 remote)。
+  - `Reskin Status`:5 個目標表格(upload 31881ef/7bf9b0f/f32f452、ahsnccu-ann 187b9e0/14a532e、link bf9ef57/80581fb/f36ec5f、copy 81a3972/eafcffc/54830e7、diary 1c6fe6a/b10037c),全部本地 commit、未 push、未部署;註明 copy push 會觸發 Cloudflare Pages 自動部署。
+  - `Temp and Worktree Cleanup`:~1.8GB 已清、只剩主 checkout、保留 D1 備份 .sql、兩個未確認路徑待 owner 確認。
+  - `Claude / Codex Collaboration Protocol` + `Codex's Assigned Task`:調度關係、≤4 平行線、to_codex.md/to_claude.md [MSG]、codexlog.md vs agentlog.md 分流、persistent monitor、Codex 尚未上線;指派 Passkey step-up(spec 在 to_codex.md §3),Claude 端不碰 apps/sso auth。
+  - `Production State — Nothing Is Live From This Work`:無 push/deploy/remote D1、0013 未套用、pgid-mail-introspect 未 provision、Passkey step-up 未實作、mail VPS/Roundcube/Dovecot 未 cutover、production D1 只到 0012、REGISTRATION_MODE 仍 invite。
+  - `Remaining Work`:一般使用者 persona QA(另一 agent 進行中,勿碰)、owner 註冊社群登入 app(docs/social-login-setup.md)、ahsnccu-ann OG 圖待決、各 reskin 待實機確認。
+- 歷史段落處理:未改寫任何歷史行,只在 `2026-07-16 Claude Session Record (Historical)` 既有 banner 下 append 一則 supersession 註記(§3 worktree 敘述與 hash 已過期、§5 A2/A3 已完成、reskin 進度已被上方取代)。
+- 驗證:`git diff` 刪除行僅上述 3 行 header;`git diff --check` 通過;secret-pattern 掃描無真值;docs/social-login-setup.md、to_codex.md §3、to_claude.md §10 等交互引用皆存在。
+- 未執行:push、deploy、remote D1、任何 production/VPS mutation;未改 to_codex.md;未碰 原專案代碼/、~/ahsnccu-ann、~/diary.pg72.tw。

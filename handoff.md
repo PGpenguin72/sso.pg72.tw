@@ -1,16 +1,22 @@
 # PGID Engineering Handoff
 
-> Current-source reconciliation: 2026-07-16 (Asia/Taipei).
+> Current-source reconciliation: 2026-07-16 (Asia/Taipei), updated after the
+> owner returned (Codex docs handoff closed, five reskins finished, temp/worktree
+> cleanup done).
 > This header records local repository truth and the latest committed operational
 > records. No remote/production command was run during this reconciliation, so
 > version IDs and remote migration state below remain deployment records for the
 > owner to verify, not a fresh observation.
+>
+> **接手者請先讀本檔開頭到 `Mail Path A Rollback` 為止的所有段落。** 其後以
+> `# ... (Historical)` 開頭的段落是歷史 session record,保留原文不改寫;若與
+> 前段衝突,一律以前段與 [`codex.md`](./codex.md) 為準。
 
 ## Current Local Source State
 
 | Item | Reconciled state |
 | --- | --- |
-| Source baseline | Local `main` contains mail-introspection implementation commit `9efdece`; the later documentation reconciliation does not change runtime behavior. No Git remote is configured |
+| Source baseline | Local `main` contains mail-introspection implementation commit `9efdece` plus the docs reconciliation cherry-picked as `8caf27e`; neither changes runtime behavior. No Git remote is configured, so nothing in this repo has ever been pushed |
 | Registration | `apps/sso/wrangler.jsonc` sets production `REGISTRATION_MODE` to `invite`; the `public` path and regression tests exist but [`codex.md`](./codex.md) §9.2 and owner approval are still required |
 | SSO migrations | Integrated local source is versioned through `0013_confidential_client_secret_post.sql`, which normalizes existing confidential clients to `client_secret_post`. The latest deployment record says production D1 was applied only through `0012`; this reconciliation did not query or migrate remote D1 |
 | Login methods | Google and Passkey are the core methods; Discord, GitHub, Facebook, Apple, and Telegram are optional and remain hidden unless their credentials are configured |
@@ -18,12 +24,130 @@
 | Production RPs | Deployment records show Copy and Link live on PGID; Copy's six-digit guest code remains a separate identity path |
 | Mail Path A | Owner selected Dovecot introspection + XOAUTH2. Its PGID prerequisite is integrated locally at `9efdece`, but that code is not deployed, `pgid-mail-introspect` is not provisioned, and no VPS/Roundcube cutover has occurred |
 | Approval status | Deployed invite beta, not full Production GO; central `sid`, back-channel logout, recovery/rotation drills, DLQ operations, and independent security gates remain incomplete |
-| Verification record | Integrated commit `9efdece` passed the complete local gates: 166 SSO tests and 4 RP protocol tests. These results verify local source only; there is no production mail smoke record |
+| Verification record | Re-run on `main` after the docs cherry-pick: frozen offline install (`pnpm install --offline --frozen-lockfile`), `pnpm --filter @pg72/id check` = typecheck + 166/166 tests (13 files) + production build, `pnpm --filter @pg72/test-rp test` = 4/4, and `apps/sso/dist` contains no `.dev.vars*`. These results verify local source only; there is no production mail smoke record |
+| Worktrees | Only the main checkout remains. The `codex/mail-introspection-docs` worktree at `/private/tmp/pgid-mail-docs` was retired after its commit `456b027` landed on `main` as `8caf27e`; branch deleted and pruned |
 
 The last recorded SSO Worker version is
 `4d0c701a-c805-4254-ae2b-7c0df856b3c0`. Confidential first-party RPs currently
 use `client_secret_post`. Copy and Link being live does not waive consent,
 stable-`sub`, RP session, rollback, or global-logout requirements.
+
+## Codex Docs Handoff — Closed
+
+[`to_claude.md`](./to_claude.md) §10 completion conditions are all satisfied, so
+that Codex handoff is formally closed. The docs-only worktree commit `456b027`
+("Document scoped mail introspection rollout", 13 docs files) was cherry-picked
+onto local `main` as `8caf27e`.
+
+Of the ten review items in `to_claude.md` §7, **three classes / seven places**
+actually needed correction; the remaining seven were confirmed already correct
+in the original draft:
+
+1. **Queue semantics** — `codex.md` §7.3, `CLAUDE.md` Workers rules, and
+   `SECURITY.md` no longer imply a durable outbox or replay/alerting exists.
+   Security-event Queue failure currently produces only a redacted log; the
+   durable outbox, replayer, and alerting are unimplemented debt on the
+   Production GO gate.
+2. **Secret incident order** — `CLAUDE.md`, `codex.md` §10.5, and `SECURITY.md`
+   now all read: **disable → rotate → update secret store/Dovecot → re-enable in
+   a maintenance window → smoke immediately → re-disable/rollback on failure.**
+   A disabled client cannot pass a real introspection smoke, which is why the
+   old "rotate → verify → re-enable" order was wrong.
+3. **Provision body** — `wiki/developers/mail-introspection.md` no longer lists
+   an empty request body as a hard requirement. The endpoint has no request
+   fields; an empty body is recommended, and a body under 4 KiB is ignored.
+
+Confirmed-correct items: JWT/refresh `inactive` wording scoped to the mail
+delegated caller; wiki links/SUMMARY/API anchors (13 files, all OK); examples
+carry placeholders only and the allowlist excludes `token_type`/`sub`/`sid`;
+Passkey step-up documented as fresh session ≠ reauth and sequenced before
+deploy/provision; production truth consistently pinned at `0012`/not
+deployed/not provisioned/not cut over; historical `handoff.md` sections left
+verbatim under superseded banners; canonical files carry no short-lived hashes
+or test counts.
+
+## Known Gotchas
+
+- **`apps/sso/worker-configuration.d.ts` is git-ignored and can be stale.** A
+  checkout can carry an old copy missing the `INTROSPECTION_IP_RATE_LIMITER` and
+  `INTROSPECTION_CLIENT_RATE_LIMITER` bindings, which fails `pnpm --filter
+  @pg72/id check` at typecheck with confusing binding errors. Fix by
+  regenerating: `pnpm --filter @pg72/id cf-typegen`. This is a purely local
+  `wrangler types` run — it touches no remote resource. Run it first whenever
+  typecheck fails on bindings rather than editing `Env` by hand.
+- Do not hand-write `Env` or paper over binding errors with `any`/double casts;
+  see [`CLAUDE.md`](./CLAUDE.md) Workers rules.
+
+## Reskin Status (morden_dark) — All 5 Done, None Deployed
+
+All five targets are reskinned to the `morden_dark` theme. Every one is
+**committed locally only: not pushed, not deployed**, awaiting the owner's
+hands-on review and deployment decision. Each repo carries its own
+`DESIGN-LOG.md` recording deliberate exceptions.
+
+| Target | Local commits | Notes |
+| --- | --- | --- |
+| `原專案代碼/upload.pg72.tw` | `31881ef` / `7bf9b0f` / `f32f452` (branch `windows`) | Visual only; 13 tests pass |
+| `~/ahsnccu-ann` | `187b9e0` / `14a532e` (+ 4 from the prior session) | Dashboard/results/email templates covered; wrangler dry-run + template smoke pass. OG share image still uses the old palette |
+| `原專案代碼/link.pg72.tw` | `bf9ef57` / `80581fb` / `f36ec5f` (prior `c08b3c8` / `6f5812b` / `d8d66d4`) | `master` leads `origin` by 13 commits. `npm run check` green; `src/api.ts` and `src-worker/` untouched (auth/BFF/ClientSecretPost not touched). QR modal keeps a white background for scannability |
+| `原專案代碼/copy.pg72.tw` | `81a3972` / `eafcffc` / `54830e7` (prior `4f76851` / `aaeaa56`) | tsc + eslint + next build + `pages:build` pass. auth/OIDC/token vault/six-digit guest code/API untouched. **Pushing Copy triggers an automatic Cloudflare Pages deploy** — timing is the owner's call |
+| `~/diary.pg72.tw` | `1c6fe6a` / `b10037c` | `pnpm check` + build + 39/39 unit tests pass; zero `.tsx`/logic changes. Serif long-form type, per-entry colour bands, and coral/sky/gold semantic colours deliberately kept |
+
+## Temp and Worktree Cleanup
+
+- ~1.8 GB of `/private/tmp` QA leftovers, logs, tool directories, and merged or
+  abandoned Codex worktrees were removed. Agent worktrees under
+  `.claude/worktrees` were deleted only after verifying `main..<branch>` = 0 and
+  a clean status.
+- `git worktree list` now shows only the main checkout; `git branch -a` shows
+  only `main`.
+- **Kept on purpose:** the D1 backup
+  `/private/tmp/pg72-id-preview-before-copy-refresh-20260715.sql`.
+- **Kept pending owner confirmation** (not on any authorized delete list):
+  `/private/tmp/pgid-docs-diff.txt` and `/private/tmp/account-review-workers-types`.
+
+## Claude / Codex Collaboration Protocol
+
+- **Claude is the dispatcher/orchestrator.** Codex runs at most 4 parallel lines.
+- Claude → Codex: write [`to_codex.md`](./to_codex.md) (only root Claude writes
+  this file).
+- Codex → Claude: append `[MSG]` blocks to [`to_claude.md`](./to_claude.md).
+- Logs are kept separate to avoid write conflicts: Codex writes `codexlog.md`,
+  Claude writes `agentlog.md`.
+- A persistent monitor on the Claude side watches `to_claude.md` for new `[MSG]`
+  blocks.
+- **Codex is not online yet** — `to_claude.md` still has no `[MSG]` block.
+
+### Codex's Assigned Task
+
+**Passkey step-up** — a production blocker. Spec is in `to_codex.md` §3. To avoid
+collisions, Claude-side agents must not touch auth code under `apps/sso`.
+
+## Production State — Nothing Is Live From This Work
+
+Everything below is **not done**. Do not restate any of it as shipped:
+
+- No `git push` (no remote is configured), no `wrangler deploy`, no remote D1
+  command, no Cloudflare/VPS/secret-store mutation.
+- Migration `0013_confidential_client_secret_post.sql` is **not applied**;
+  production D1's latest record is only through `0012`.
+- `pgid-mail-introspect` is **not provisioned**.
+- Passkey step-up is **not implemented** (production blocker, assigned to Codex).
+- Mail VPS / Roundcube / Dovecot cutover has **not** happened.
+- `REGISTRATION_MODE` is still `invite`. This is a deployed invite beta, not
+  public registration and not full Production GO.
+
+## Remaining Work
+
+- **General-user persona QA** — already in progress with another agent; do not
+  pick this up.
+- **Owner must register the social login apps.** Step-by-step guide (Discord,
+  GitHub, Facebook, Apple, Telegram: callbacks, env names, wrangler commands) is
+  at [`docs/social-login-setup.md`](./docs/social-login-setup.md).
+- **`~/ahsnccu-ann` OG share image** still uses the old palette; owner decides
+  whether to regenerate it.
+- **Each reskin awaits the owner's hands-on review** and a deployment decision
+  (remember Copy's push auto-deploys).
 
 ## Mail Path A Owner Runbook (Not Executed)
 
@@ -97,6 +221,18 @@ secret-store, Roundcube, Dovecot, or VPS change.
 > cutover」仍成立。任何歷史 `client_secret_basic`/Basic 操作指示均已
 > 失效；目前 token client contract 是 `client_secret_post`，introspection
 > 更會直接拒絕 `Authorization`/Basic。
+>
+> **2026-07-16 owner 回歸後 supersession(原文保留,僅標註)：**
+> - §3「`.claude/worktrees/` 下可能還有已合併的 worktree,可清」與所有
+>   worktree 敘述已被取代:temp 清理與 `pgid-mail-docs` 退役均已完成,現在
+>   只剩主 checkout 與 `main` 一個 branch。§3 的最新 commit hash 也已過期,
+>   現況一律看上方 `Current Local Source State`。
+> - §5 的「Owner 已回覆但我尚未執行」A2(移除 `pg72-diary-dev`)、A3(清 Link
+>   舊 secret)已於當日完成:A2 查 production 時該 client 已不存在(另一分頁
+>   移除),無需動作;A3 已刪除 `ALLOWED_EMAIL`/`GOOGLE_CLIENT_ID`/
+>   `GOOGLE_CLIENT_SECRET`。詳見 `agentlog.md`。
+> - 下文所寫的 reskin 進度已被上方 `Reskin Status` 取代(5 個目標全數完成,
+>   皆本地 commit、未 push、未部署)。
 
 ## 0. 一句話現況
 

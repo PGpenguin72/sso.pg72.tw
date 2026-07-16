@@ -253,3 +253,17 @@
   `?? morden_dark.txt`；本branch未stage或修改三者。
 - 未執行:git push、merge/cherry-pick回main、deploy、remote D1、Cloudflare/VPS/
   secret-store/production mutation；未修改`原專案代碼/`或未追蹤`0016`。
+
+## 2026-07-16 19:40 CST — Completion docs commit verification
+
+- Content commit:`d4c1e500d9d1890886f1e5849ff83d9bbe044fef`
+  (`Reconcile completion documentation and policy`)，含本輪10個docs/policy檔案，
+  commit footer已包含指定的Claude co-author。
+- Post-commit validation:`git diff --check e35304a..d4c1e50`與
+  `git show --check d4c1e50`均pass；relative Markdown links、heading/code-fence、
+  PII與secret-value掃描結果維持pass。公開服務聯絡信箱、secret名稱/
+  placeholder及Git SHA不視為洩漏值。
+- 此紀錄將以獨立log-only commit提交；提交前worktree除本筆
+  `agentlog.md`變更外乾淨。main checkout仍只保留owner原有的
+  `M to_claude.md`、`M to_codex.md`、`?? morden_dark.txt`。
+- 未執行push、deploy、remote/production mutation或main integration。

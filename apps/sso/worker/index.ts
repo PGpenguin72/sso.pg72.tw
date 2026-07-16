@@ -6,6 +6,10 @@ import {
   readAccountAccessState,
   recordRestrictedActionDenied,
 } from "./account-access";
+import {
+  ADMIN_ACTOR_COMMIT_PREDICATE,
+  adminActorCommitBindings,
+} from "./admin-commit";
 import { adminClientRoutes } from "./admin-clients";
 import { requireAdminPermission } from "./admin-gate";
 import {
@@ -15,7 +19,10 @@ import {
   fetchTarget,
 } from "./admin-users";
 import {
+  auditInsertForExistingInvitationStatement,
   consumeSecurityEvents,
+  createAuditEvent,
+  enqueueSecurityEvent,
   recordAudit,
   type SecurityEvent,
 } from "./audit";
@@ -1215,6 +1222,19 @@ app.post("/api/admin/invitations", async (c) => {
     if (!target) {
       return c.json({ error: "user_not_found" }, 404);
     }
+    if (target.effectiveRole === role) {
+      const unchanged = await c.env.PG72_ID_DB.prepare(
+        "SELECT updatedAt FROM user WHERE id = ? LIMIT 1",
+      )
+        .bind(target.row.id)
+        .first<{ updatedAt: string }>();
+      return c.json({
+        applied: true,
+        userId: target.row.id,
+        role,
+        at: unchanged?.updatedAt ?? null,
+      });
+    }
     const denial = await deniedRoleChange(
       c,
       gate.actor,
@@ -1229,6 +1249,7 @@ app.post("/api/admin/invitations", async (c) => {
       return c.json({ error: denial }, 403);
     }
     const at = await applyRoleChange(c, gate.actor, target, role, "invitation");
+    if (!at) return c.json({ error: "user_state_changed" }, 409);
     return c.json({ applied: true, userId: target.row.id, role, at });
   }
 
@@ -1236,44 +1257,48 @@ app.post("/api/admin/invitations", async (c) => {
   const now = new Date();
   const expiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
 
-  const result = await c.env.PG72_ID_DB.prepare(
-    `INSERT INTO invitation
-      (id, email_normalized, role, created_by_user_id, expires_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(email_normalized) DO UPDATE SET
-       id = excluded.id,
-       role = excluded.role,
-       created_by_user_id = excluded.created_by_user_id,
-       expires_at = excluded.expires_at,
-       revoked_at = NULL,
-       created_at = excluded.created_at
-     WHERE invitation.consumed_at IS NULL`,
-  )
-    .bind(
+  const event = createAuditEvent({
+    eventType: "invitation.created",
+    outcome: "success",
+    actorUserId: gate.actor.userId,
+    subjectId: id,
+    metadata: { role },
+  });
+  const results = await c.env.PG72_ID_DB.batch([
+    c.env.PG72_ID_DB.prepare(
+      `INSERT INTO invitation
+        (id, email_normalized, role, created_by_user_id, expires_at, created_at)
+       SELECT ?, ?, ?, ?, ?, ?
+        WHERE ${ADMIN_ACTOR_COMMIT_PREDICATE}
+       ON CONFLICT(email_normalized) DO UPDATE SET
+         id = excluded.id,
+         role = excluded.role,
+         created_by_user_id = excluded.created_by_user_id,
+         expires_at = excluded.expires_at,
+         revoked_at = NULL,
+         created_at = excluded.created_at
+       WHERE invitation.consumed_at IS NULL`,
+    ).bind(
       id,
       email,
       role,
       gate.actor.userId,
       expiresAt.toISOString(),
       now.toISOString(),
-    )
-    .run();
+      ...adminActorCommitBindings(gate.actor.commitGuard),
+    ),
+    auditInsertForExistingInvitationStatement(c.env, event, {
+      actor: gate.actor.commitGuard,
+      email,
+      invitationId: id,
+      role,
+    }),
+  ]);
 
-  if (result.meta.changes !== 1) {
-    return c.json({ error: "invitation_already_consumed" }, 409);
+  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+    return c.json({ error: "management_state_changed" }, 409);
   }
-
-  await recordAudit(
-    c.env,
-    {
-      eventType: "invitation.created",
-      outcome: "success",
-      actorUserId: gate.actor.userId,
-      subjectId: id,
-      metadata: { role },
-    },
-    c.executionCtx,
-  );
+  await enqueueSecurityEvent(c.env, event, c.executionCtx);
 
   return c.json(
     { id, email, role, expiresAt: expiresAt.toISOString() },

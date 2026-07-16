@@ -10,6 +10,7 @@ import {
   createAuthenticatedUser,
   createBootstrapAdmin,
   createSessionFor,
+  interposeAfterD1First,
   sha256Base64Url,
 } from "./helpers";
 
@@ -594,5 +595,339 @@ describe("restricted account administration", () => {
       .bind(target.userId)
       .first<{ count: number }>();
     expect(audit?.count).toBe(0);
+  });
+
+  it("revalidates the actor before committing a system client", async () => {
+    const admin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
+      { passkeyStepUp: true },
+    );
+    const interposed = interposeAfterD1First(
+      "SELECT email, role, status, accessLevel",
+      async () => {
+      await env.PG72_ID_DB.prepare(
+        "UPDATE user SET accessLevel = 'restricted', role = 'user' WHERE id = ?",
+      )
+        .bind(admin.userId)
+        .run();
+      },
+    );
+    const ctx = createExecutionContext();
+    const response = await app.fetch(
+      new Request(`${CLIENTS_URL}/provision-mail-introspector`, {
+        method: "POST",
+        headers: admin.headers,
+      }),
+      { ...env, PG72_ID_DB: interposed.database } as Env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(interposed.wasIntercepted()).toBe(true);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "management_state_changed",
+    });
+    expect(
+      await env.PG72_ID_DB.prepare(
+        "SELECT clientId FROM oauthClient WHERE clientId = 'pgid-mail-introspect'",
+      ).first(),
+    ).toBeNull();
+    const audit = await env.PG72_ID_DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_event
+        WHERE event_type = 'oauth_client.created'
+          AND client_id = 'pgid-mail-introspect'
+          AND outcome = 'success'`,
+    ).first<{ count: number }>();
+    expect(audit?.count).toBe(0);
+  });
+
+  it("revalidates a developer before committing an owned-client update", async () => {
+    const developer = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "developer",
+      { passkeyStepUp: true },
+    );
+    const clientId = `commit-guard-${crypto.randomUUID()}`;
+    await insertPublicClient(
+      clientId,
+      "https://commit-guard.example/callback",
+      developer.userId,
+    );
+    const interposed = interposeAfterD1First(
+      "SELECT email, role, status, accessLevel",
+      async () => {
+      await env.PG72_ID_DB.prepare(
+        "UPDATE user SET accessLevel = 'restricted', role = 'user' WHERE id = ?",
+      )
+        .bind(developer.userId)
+        .run();
+      },
+    );
+    const ctx = createExecutionContext();
+    const response = await app.fetch(
+      new Request(`${CLIENTS_URL}/${clientId}`, {
+        method: "PATCH",
+        headers: developer.headers,
+        body: JSON.stringify({ developerName: "Updated Developer" }),
+      }),
+      { ...env, PG72_ID_DB: interposed.database } as Env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(interposed.wasIntercepted()).toBe(true);
+    expect(response.status).toBe(409);
+    const stored = await env.PG72_ID_DB.prepare(
+      "SELECT metadata FROM oauthClient WHERE clientId = ?",
+    )
+      .bind(clientId)
+      .first<{ metadata: string | null }>();
+    expect(stored?.metadata).toBeNull();
+    const audit = await env.PG72_ID_DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_event
+        WHERE event_type = 'oauth_client.trust_updated'
+          AND client_id = ? AND outcome = 'success'`,
+    )
+      .bind(clientId)
+      .first<{ count: number }>();
+    expect(audit?.count).toBe(0);
+  });
+
+  it("revalidates actor and target snapshots before a role change", async () => {
+    const admin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
+    );
+    const target = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "user",
+    );
+    const actorInterposed = interposeAfterD1First(
+      "SELECT email, role, status, accessLevel",
+      async () => {
+      await env.PG72_ID_DB.prepare(
+        "UPDATE user SET accessLevel = 'restricted', role = 'user' WHERE id = ?",
+      )
+        .bind(admin.userId)
+        .run();
+      },
+    );
+    const actorCtx = createExecutionContext();
+    const actorResponse = await app.fetch(
+      new Request(`${USERS_URL}/${target.userId}/role`, {
+        method: "POST",
+        headers: admin.headers,
+        body: JSON.stringify({ role: "developer" }),
+      }),
+      { ...env, PG72_ID_DB: actorInterposed.database } as Env,
+      actorCtx,
+    );
+    await waitOnExecutionContext(actorCtx);
+    expect(actorResponse.status).toBe(409);
+
+    const secondAdmin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
+    );
+    const targetInterposed = interposeAfterTargetLoad(async () => {
+      await env.PG72_ID_DB.prepare("UPDATE user SET role = 'admin' WHERE id = ?")
+        .bind(target.userId)
+        .run();
+    });
+    const targetCtx = createExecutionContext();
+    const targetResponse = await app.fetch(
+      new Request(`${USERS_URL}/${target.userId}/role`, {
+        method: "POST",
+        headers: secondAdmin.headers,
+        body: JSON.stringify({ role: "developer" }),
+      }),
+      { ...env, PG72_ID_DB: targetInterposed.database } as Env,
+      targetCtx,
+    );
+    await waitOnExecutionContext(targetCtx);
+    expect(targetResponse.status).toBe(409);
+
+    const stored = await env.PG72_ID_DB.prepare(
+      "SELECT role FROM user WHERE id = ?",
+    )
+      .bind(target.userId)
+      .first<{ role: string }>();
+    expect(stored?.role).toBe("admin");
+    const audit = await env.PG72_ID_DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_event
+        WHERE event_type = 'user.role_changed'
+          AND subject_id = ? AND outcome = 'success'`,
+    )
+      .bind(target.userId)
+      .first<{ count: number }>();
+    expect(audit?.count).toBe(0);
+  });
+
+  it("revalidates the actor before committing an invitation", async () => {
+    const admin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
+    );
+    const invitedEmail = `${crypto.randomUUID()}@example.com`;
+    const interposed = interposeAfterD1First(
+      "SELECT email, role, status, accessLevel",
+      async () => {
+        await env.PG72_ID_DB.prepare(
+          "UPDATE user SET accessLevel = 'restricted', role = 'user' WHERE id = ?",
+        )
+          .bind(admin.userId)
+          .run();
+      },
+    );
+    const ctx = createExecutionContext();
+    const response = await app.fetch(
+      new Request(`${BASE_URL}/api/admin/invitations`, {
+        method: "POST",
+        headers: admin.headers,
+        body: JSON.stringify({ email: invitedEmail, role: "developer" }),
+      }),
+      { ...env, PG72_ID_DB: interposed.database } as Env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(interposed.wasIntercepted()).toBe(true);
+    expect(response.status).toBe(409);
+    expect(
+      await env.PG72_ID_DB.prepare(
+        "SELECT id FROM invitation WHERE email_normalized = ?",
+      )
+        .bind(invitedEmail)
+        .first(),
+    ).toBeNull();
+    const audit = await env.PG72_ID_DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_event
+        WHERE event_type = 'invitation.created'
+          AND actor_user_id = ? AND outcome = 'success'`,
+    )
+      .bind(admin.userId)
+      .first<{ count: number }>();
+    expect(audit?.count).toBe(0);
+  });
+
+  it("keeps revoke and delete batches unchanged when the actor state changes", async () => {
+    const revokeAdmin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
+    );
+    const revokeTarget = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "user",
+    );
+    const revokeInterposed = interposeAfterD1First(
+      "SELECT email, role, status, accessLevel",
+      async () => {
+        await env.PG72_ID_DB.prepare(
+          "UPDATE user SET accessLevel = 'restricted', role = 'user' WHERE id = ?",
+        )
+          .bind(revokeAdmin.userId)
+          .run();
+      },
+    );
+    const revokeCtx = createExecutionContext();
+    const revoke = await app.fetch(
+      new Request(`${USERS_URL}/${revokeTarget.userId}/revoke-sessions`, {
+        method: "POST",
+        headers: revokeAdmin.headers,
+      }),
+      { ...env, PG72_ID_DB: revokeInterposed.database } as Env,
+      revokeCtx,
+    );
+    await waitOnExecutionContext(revokeCtx);
+    expect(revoke.status).toBe(409);
+    expect(
+      await env.PG72_ID_DB.prepare(
+        "SELECT id FROM session WHERE userId = ? LIMIT 1",
+      )
+        .bind(revokeTarget.userId)
+        .first(),
+    ).not.toBeNull();
+
+    const deleteAdmin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
+    );
+    const deleteTarget = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "user",
+    );
+    const clientId = `delete-guard-${crypto.randomUUID()}`;
+    await insertPublicClient(
+      clientId,
+      "https://delete-guard.example/callback",
+      deleteTarget.userId,
+    );
+    const deleteInterposed = interposeAfterD1First(
+      "SELECT email, role, status, accessLevel",
+      async () => {
+        await env.PG72_ID_DB.prepare(
+          "UPDATE user SET accessLevel = 'restricted', role = 'user' WHERE id = ?",
+        )
+          .bind(deleteAdmin.userId)
+          .run();
+      },
+    );
+    const deleteCtx = createExecutionContext();
+    const deletion = await app.fetch(
+      new Request(`${USERS_URL}/${deleteTarget.userId}`, {
+        method: "DELETE",
+        headers: deleteAdmin.headers,
+      }),
+      { ...env, PG72_ID_DB: deleteInterposed.database } as Env,
+      deleteCtx,
+    );
+    await waitOnExecutionContext(deleteCtx);
+    expect(deletion.status).toBe(409);
+    expect(
+      await env.PG72_ID_DB.prepare("SELECT id FROM user WHERE id = ?")
+        .bind(deleteTarget.userId)
+        .first(),
+    ).not.toBeNull();
+    const client = await env.PG72_ID_DB.prepare(
+      "SELECT disabled, ownerUserId FROM oauthClient WHERE clientId = ?",
+    )
+      .bind(clientId)
+      .first<{ disabled: number; ownerUserId: string | null }>();
+    expect(client).toEqual({ disabled: 0, ownerUserId: deleteTarget.userId });
+
+    const audit = await env.PG72_ID_DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_event
+        WHERE event_type IN ('user.sessions_revoked', 'user.deleted')
+          AND subject_id IN (?, ?) AND outcome = 'success'`,
+    )
+      .bind(revokeTarget.userId, deleteTarget.userId)
+      .first<{ count: number }>();
+    expect(audit?.count).toBe(0);
+  });
+
+  it("does not audit a repeated access transition as a new success", async () => {
+    const admin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
+    );
+    const target = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "user",
+    );
+
+    expect((await setAccess(admin.headers, target.userId, true)).status).toBe(200);
+    const repeated = await setAccess(admin.headers, target.userId, true);
+    expect(repeated.status).toBe(409);
+    expect(await repeated.json()).toEqual({ error: "user_state_unchanged" });
+    const audit = await env.PG72_ID_DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_event
+        WHERE event_type = 'user.access_restricted'
+          AND subject_id = ? AND outcome = 'success'`,
+    )
+      .bind(target.userId)
+      .first<{ count: number }>();
+    expect(audit?.count).toBe(1);
   });
 });

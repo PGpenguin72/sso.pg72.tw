@@ -178,8 +178,12 @@ async function deniedRoleChange(
   return finalDenial;
 }
 
-function transitionGuard(target: ResolvedTarget): ExistingUserAuditGuard {
+function transitionGuard(
+  target: ResolvedTarget,
+  actor: AdminActor,
+): ExistingUserAuditGuard {
   return {
+    actor: actor.commitGuard,
     expectedAccessLevel: target.row.accessLevel,
     expectedRole: target.row.role,
     expectedStatus: target.row.status,
@@ -240,21 +244,32 @@ async function applyRoleChange(
   target: ResolvedTarget,
   nextRole: PlatformRole,
   via: "admin" | "invitation",
-): Promise<string> {
+): Promise<string | null> {
   const now = new Date().toISOString();
-  await c.env.PG72_ID_DB.prepare(
-    "UPDATE user SET role = ?, updatedAt = ? WHERE id = ?",
-  )
-    .bind(nextRole, now, target.row.id)
-    .run();
-
-  await auditUserAdmin(c, {
+  const event = createAuditEvent({
     eventType: "user.role_changed",
     outcome: "success",
     actorUserId: actor.userId,
     subjectId: target.row.id,
     metadata: { from: target.effectiveRole, to: nextRole, via },
   });
+  const results = await c.env.PG72_ID_DB.batch([
+    auditInsertForExistingUserStatement(
+      c.env,
+      event,
+      transitionGuard(target, actor),
+    ),
+    guardedUserTransitionUpdate(c, event.eventId, target, {
+      accessLevel: target.row.accessLevel,
+      role: nextRole,
+      status: target.row.status,
+      updatedAt: now,
+    }),
+  ]);
+  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+    return null;
+  }
+  await enqueueSecurityEvent(c.env, event, c.executionCtx);
   return now;
 }
 
@@ -370,10 +385,15 @@ adminUserRoutes.post("/:userId/role", async (c) => {
     return c.json({ error: "user_not_found" }, 404);
   }
 
+  if (target.effectiveRole === input.role) {
+    return c.json({ error: "user_state_unchanged" }, 409);
+  }
+
   const denial = await deniedRoleChange(c, gate.actor, target, input.role, "admin");
   if (denial) return denialResponse(c, denial);
 
   const at = await applyRoleChange(c, gate.actor, target, input.role, "admin");
+  if (!at) return c.json({ error: "user_state_changed" }, 409);
   return c.json({ userId, role: input.role, at });
 });
 
@@ -411,6 +431,11 @@ adminUserRoutes.post("/:userId/status", async (c) => {
   }
   if (denial) return denialResponse(c, denial);
 
+  const nextStatus = input.suspended ? "suspended" : "active";
+  if (target.row.status === nextStatus) {
+    return c.json({ error: "user_state_unchanged" }, 409);
+  }
+
   const now = new Date().toISOString();
   const event = createAuditEvent({
     eventType: input.suspended ? "user.suspended" : "user.reactivated",
@@ -420,11 +445,15 @@ adminUserRoutes.post("/:userId/status", async (c) => {
     metadata: { accessLevel: target.row.accessLevel },
   });
   const statements = [
-    auditInsertForExistingUserStatement(c.env, event, transitionGuard(target)),
+    auditInsertForExistingUserStatement(
+      c.env,
+      event,
+      transitionGuard(target, gate.actor),
+    ),
     guardedUserTransitionUpdate(c, event.eventId, target, {
       accessLevel: target.row.accessLevel,
       role: target.row.role,
-      status: input.suspended ? "suspended" : "active",
+      status: nextStatus,
       updatedAt: now,
     }),
   ];
@@ -511,6 +540,9 @@ adminUserRoutes.post("/:userId/access", async (c) => {
   const nextAccessLevel: AccountAccessLevel = input.restricted
     ? "restricted"
     : "standard";
+  if (target.row.accessLevel === nextAccessLevel) {
+    return c.json({ error: "user_state_unchanged" }, 409);
+  }
   const nextRole = input.restricted ? "user" : target.row.role;
   const now = new Date().toISOString();
   const event = createAuditEvent({
@@ -525,7 +557,11 @@ adminUserRoutes.post("/:userId/access", async (c) => {
     },
   });
   const statements = [
-    auditInsertForExistingUserStatement(c.env, event, transitionGuard(target)),
+    auditInsertForExistingUserStatement(
+      c.env,
+      event,
+      transitionGuard(target, gate.actor),
+    ),
     guardedUserTransitionUpdate(c, event.eventId, target, {
       accessLevel: nextAccessLevel,
       role: nextRole,
@@ -601,21 +637,31 @@ adminUserRoutes.post("/:userId/revoke-sessions", async (c) => {
   }
   if (denial) return denialResponse(c, denial);
 
-  const deletion = await c.env.PG72_ID_DB.prepare(
-    "DELETE FROM session WHERE userId = ?",
-  )
-    .bind(userId)
-    .run();
-
-  await auditUserAdmin(c, {
+  const event = createAuditEvent({
     eventType: "user.sessions_revoked",
     outcome: "success",
     actorUserId: gate.actor.userId,
     subjectId: userId,
-    metadata: { sessions: deletion.meta.changes },
   });
+  const results = await c.env.PG72_ID_DB.batch([
+    auditInsertForExistingUserStatement(
+      c.env,
+      event,
+      transitionGuard(target, gate.actor),
+    ),
+    guardedUserStatement(
+      c,
+      event.eventId,
+      "DELETE FROM session WHERE userId = ?",
+      userId,
+    ),
+  ]);
+  if (results[0]?.meta.changes !== 1) {
+    return c.json({ error: "user_state_changed" }, 409);
+  }
+  await enqueueSecurityEvent(c.env, event, c.executionCtx);
 
-  return c.json({ userId, revokedSessions: deletion.meta.changes });
+  return c.json({ userId, revokedSessions: results[1]?.meta.changes ?? 0 });
 });
 
 adminUserRoutes.delete("/:userId", async (c) => {
@@ -648,33 +694,50 @@ adminUserRoutes.delete("/:userId", async (c) => {
   if (denial) return denialResponse(c, denial);
 
   const now = new Date().toISOString();
-  // Owned OAuth clients are disabled and orphaned first; sessions,
-  // accounts, passkeys, tokens, and consents cascade with the user row.
-  // Pending authorization codes live in the verification table and are
-  // purged explicitly.
-  const results = await c.env.PG72_ID_DB.batch([
-    ...ownedClientShutdownStatements(c.env, userId, now),
-    c.env.PG72_ID_DB.prepare(
-      `DELETE FROM verification
-        WHERE CASE WHEN json_valid(value) THEN
-          json_extract(value, '$.type') = 'authorization_code'
-          AND json_extract(value, '$.userId') = ?
-        ELSE 0 END`,
-    ).bind(userId),
-    c.env.PG72_ID_DB.prepare("DELETE FROM user WHERE id = ?").bind(userId),
-  ]);
-  // meta.changes includes cascaded rows, so only zero means missing.
-  if (!results.at(-1)?.meta.changes) {
-    return c.json({ error: "user_not_found" }, 404);
-  }
-
-  await auditUserAdmin(c, {
+  const event = createAuditEvent({
     eventType: "user.deleted",
     outcome: "success",
     actorUserId: gate.actor.userId,
     subjectId: userId,
     metadata: { via: "admin" },
   });
+  // Owned OAuth clients are disabled and orphaned first; sessions,
+  // accounts, passkeys, tokens, and consents cascade with the user row.
+  // Pending authorization codes live in the verification table and are
+  // purged explicitly.
+  const results = await c.env.PG72_ID_DB.batch([
+    auditInsertForExistingUserStatement(
+      c.env,
+      event,
+      transitionGuard(target, gate.actor),
+    ),
+    ...ownedClientShutdownStatements(c.env, userId, now, event.eventId),
+    guardedUserStatement(
+      c,
+      event.eventId,
+      `DELETE FROM verification
+        WHERE CASE WHEN json_valid(value) THEN
+          json_extract(value, '$.type') = 'authorization_code'
+          AND json_extract(value, '$.userId') = ?
+        ELSE 0 END`,
+      userId,
+    ),
+    guardedUserStatement(
+      c,
+      event.eventId,
+      "DELETE FROM user WHERE id = ?",
+      userId,
+    ),
+  ]);
+  if (results[0]?.meta.changes !== 1) {
+    return c.json({ error: "user_state_changed" }, 409);
+  }
+  // meta.changes includes cascaded rows, so only zero means missing.
+  if (!results.at(-1)?.meta.changes) {
+    return c.json({ error: "user_state_changed" }, 409);
+  }
+
+  await enqueueSecurityEvent(c.env, event, c.executionCtx);
 
   return c.json({ deleted: true, userId });
 });

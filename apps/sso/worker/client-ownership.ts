@@ -14,29 +14,37 @@ export function ownedClientShutdownStatements(
   env: Env,
   ownerUserId: string,
   nowIso: string,
+  authorizationEventId?: string,
 ): D1PreparedStatement[] {
   const ownedClientIds =
     "SELECT clientId FROM oauthClient WHERE ownerUserId = ?";
+  const authorizationGuard = authorizationEventId
+    ? " AND EXISTS (SELECT 1 FROM audit_event WHERE id = ?)"
+    : "";
+  const authorizationBindings = authorizationEventId
+    ? [authorizationEventId]
+    : [];
 
   return [
     env.PG72_ID_DB.prepare(
-      `DELETE FROM oauthAccessToken WHERE clientId IN (${ownedClientIds})`,
-    ).bind(ownerUserId),
+      `DELETE FROM oauthAccessToken
+        WHERE clientId IN (${ownedClientIds})${authorizationGuard}`,
+    ).bind(ownerUserId, ...authorizationBindings),
     env.PG72_ID_DB.prepare(
       `UPDATE oauthRefreshToken SET revoked = ?
-        WHERE revoked IS NULL AND clientId IN (${ownedClientIds})`,
-    ).bind(nowIso, ownerUserId),
+        WHERE revoked IS NULL AND clientId IN (${ownedClientIds})${authorizationGuard}`,
+    ).bind(nowIso, ownerUserId, ...authorizationBindings),
     env.PG72_ID_DB.prepare(
       `DELETE FROM verification
         WHERE CASE WHEN json_valid(value) THEN
           json_extract(value, '$.type') = 'authorization_code'
           AND json_extract(value, '$.query.client_id') IN (${ownedClientIds})
-        ELSE 0 END`,
-    ).bind(ownerUserId),
+        ELSE 0 END${authorizationGuard}`,
+    ).bind(ownerUserId, ...authorizationBindings),
     env.PG72_ID_DB.prepare(
       `UPDATE oauthClient
           SET disabled = 1, ownerUserId = NULL, updatedAt = ?
-        WHERE ownerUserId = ?`,
-    ).bind(nowIso, ownerUserId),
+        WHERE ownerUserId = ?${authorizationGuard}`,
+    ).bind(nowIso, ownerUserId, ...authorizationBindings),
   ];
 }

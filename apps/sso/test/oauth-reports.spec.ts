@@ -1,7 +1,16 @@
 import { env, exports } from "cloudflare:workers";
+import {
+  createExecutionContext,
+  waitOnExecutionContext,
+} from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
-import { createAuthenticatedUser, createBootstrapAdmin } from "./helpers";
+import { app } from "../worker/index";
+import {
+  createAuthenticatedUser,
+  createBootstrapAdmin,
+  interposeAfterD1First,
+} from "./helpers";
 
 const BASE_URL = "http://localhost:5173";
 
@@ -196,14 +205,15 @@ describe("oauth client reports", () => {
     expect(resolve.status).toBe(200);
     expect(await resolve.json()).toMatchObject({ resolved: true, id: report?.id });
 
-    // Resolving an already-resolved report is a no-op 404.
+    // Resolving an already-resolved report is a state-conflict no-op.
     const again = await exports.default.fetch(
       new Request(`${BASE_URL}/api/admin/oauth-reports/${report?.id}/resolve`, {
         method: "POST",
         headers: admin.headers,
       }),
     );
-    expect(again.status).toBe(404);
+    expect(again.status).toBe(409);
+    expect(await again.json()).toEqual({ error: "management_state_changed" });
 
     const stored = await env.PG72_ID_DB.prepare(
       "SELECT status, resolved_by_user_id FROM oauth_client_report WHERE id = ?",
@@ -212,6 +222,60 @@ describe("oauth client reports", () => {
       .first<{ status: string; resolved_by_user_id: string }>();
     expect(stored?.status).toBe("resolved");
     expect(stored?.resolved_by_user_id).toBe(admin.userId);
+  });
+
+  it("revalidates the admin account before resolving a report", async () => {
+    const reportId = crypto.randomUUID();
+    const clientId = `report-commit-${crypto.randomUUID()}`;
+    const now = new Date().toISOString();
+    await env.PG72_ID_DB.prepare(
+      `INSERT INTO oauth_client_report
+        (id, reporter_user_id, client_id, reason, status, created_at)
+       VALUES (?, NULL, ?, 'other', 'open', ?)`,
+    )
+      .bind(reportId, clientId, now)
+      .run();
+    const admin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "admin",
+    );
+    const interposed = interposeAfterD1First(
+      "SELECT email, role, status, accessLevel",
+      async () => {
+        await env.PG72_ID_DB.prepare(
+          "UPDATE user SET accessLevel = 'restricted', role = 'user' WHERE id = ?",
+        )
+          .bind(admin.userId)
+          .run();
+      },
+    );
+    const ctx = createExecutionContext();
+    const response = await app.fetch(
+      new Request(`${BASE_URL}/api/admin/oauth-reports/${reportId}/resolve`, {
+        method: "POST",
+        headers: admin.headers,
+      }),
+      { ...env, PG72_ID_DB: interposed.database } as Env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(interposed.wasIntercepted()).toBe(true);
+    expect(response.status).toBe(409);
+    const report = await env.PG72_ID_DB.prepare(
+      "SELECT status, resolved_at FROM oauth_client_report WHERE id = ?",
+    )
+      .bind(reportId)
+      .first<{ resolved_at: string | null; status: string }>();
+    expect(report).toEqual({ status: "open", resolved_at: null });
+    const audit = await env.PG72_ID_DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_event
+        WHERE event_type = 'oauth_client.report_resolved'
+          AND subject_id = ? AND outcome = 'success'`,
+    )
+      .bind(reportId)
+      .first<{ count: number }>();
+    expect(audit?.count).toBe(0);
   });
 
   it("paginates reports with a keyset cursor", async () => {

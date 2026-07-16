@@ -1,9 +1,13 @@
 import { Hono, type Context } from "hono";
 
+import {
+  ADMIN_ACTOR_COMMIT_PREDICATE,
+  adminActorCommitBindings,
+  type AdminActorCommitGuard,
+} from "./admin-commit";
 import { requireAdminPermission, type AdminActor } from "./admin-gate";
 import {
   auditInsertForExistingClientStatement,
-  auditInsertStatement,
   createAuditEvent,
   enqueueSecurityEvent,
   type SecurityEvent,
@@ -97,6 +101,7 @@ interface ManagedClientRow {
 }
 
 interface ManagedClientGuard {
+  actor: AdminActorCommitGuard;
   clientId: string;
   clientRowId: string;
   expectedOwnerUserId?: string;
@@ -104,7 +109,8 @@ interface ManagedClientGuard {
 
 const MANAGED_CLIENT_PREDICATE = `id = ?
   AND clientId = ?
-  AND (? IS NULL OR ownerUserId = ?)`;
+  AND (? IS NULL OR ownerUserId = ?)
+  AND ${ADMIN_ACTOR_COMMIT_PREDICATE}`;
 
 function managedClientGuardBindings(guard: ManagedClientGuard): unknown[] {
   return [
@@ -112,6 +118,7 @@ function managedClientGuardBindings(guard: ManagedClientGuard): unknown[] {
     guard.clientId,
     guard.expectedOwnerUserId ?? null,
     guard.expectedOwnerUserId ?? null,
+    ...adminActorCommitBindings(guard.actor),
   ];
 }
 
@@ -325,6 +332,7 @@ function mutationGuard(
   client: ManagedClientRow,
 ): ManagedClientGuard {
   return {
+    actor: actor.commitGuard,
     clientId,
     clientRowId: client.id,
     // Developers must still own the exact row when the batch executes.
@@ -394,6 +402,7 @@ adminClientRoutes.post("/provision-mail-introspector", async (c) => {
 
   const clientSecretSuffix = generateClientSecretSuffix();
   const storedClientSecret = await hashClientSecretSuffix(clientSecretSuffix);
+  const clientRowId = crypto.randomUUID();
   const now = new Date().toISOString();
   const metadata = {
     [DEVELOPER_NAME_METADATA_KEY]: "PG72 Mail Infrastructure",
@@ -407,17 +416,18 @@ adminClientRoutes.post("/provision-mail-introspector", async (c) => {
   );
 
   try {
-    await c.env.PG72_ID_DB.batch([
+    const results = await c.env.PG72_ID_DB.batch([
       c.env.PG72_ID_DB.prepare(
         `INSERT INTO oauthClient (
           id, clientId, clientSecret, disabled, skipConsent, enableEndSession,
           subjectType, scopes, createdAt, updatedAt, name, redirectUris,
           postLogoutRedirectUris, tokenEndpointAuthMethod, grantTypes,
           responseTypes, public, type, requirePKCE, ownerUserId, metadata
-        ) VALUES (?, ?, ?, 0, 0, 0, 'public', '[]', ?, ?, ?, '[]', NULL,
-                  'client_secret_post', ?, '[]', 0, 'service', 1, ?, ?)`,
+        ) SELECT ?, ?, ?, 0, 0, 0, 'public', '[]', ?, ?, ?, '[]', NULL,
+                 'client_secret_post', ?, '[]', 0, 'service', 1, ?, ?
+            WHERE ${ADMIN_ACTOR_COMMIT_PREDICATE}`,
       ).bind(
-          crypto.randomUUID(),
+          clientRowId,
           MAIL_INTROSPECTION_CLIENT_ID,
           storedClientSecret,
           now,
@@ -426,9 +436,20 @@ adminClientRoutes.post("/provision-mail-introspector", async (c) => {
           JSON.stringify([INTROSPECTION_ONLY_GRANT]),
           null,
           JSON.stringify(metadata),
+          ...adminActorCommitBindings(gate.actor.commitGuard),
         ),
-      auditInsertStatement(c.env, auditEvent),
+      auditInsertForExistingClientStatement(c.env, auditEvent, {
+        actor: gate.actor.commitGuard,
+        clientId: MAIL_INTROSPECTION_CLIENT_ID,
+        clientRowId,
+      }),
     ]);
+    if (
+      results[0]?.meta.changes !== 1 ||
+      results[1]?.meta.changes !== 1
+    ) {
+      return c.json({ error: "management_state_changed" }, 409);
+    }
   } catch (error) {
     if (
       error instanceof Error &&
@@ -628,6 +649,7 @@ adminClientRoutes.post("/", async (c) => {
   const storedClientSecret = clientSecretSuffix
     ? await hashClientSecretSuffix(clientSecretSuffix)
     : null;
+  const clientRowId = crypto.randomUUID();
   const now = new Date().toISOString();
   const ownerUserId = SYSTEM_RESERVED_CLIENT_IDS.has(clientId)
     ? null
@@ -639,7 +661,7 @@ adminClientRoutes.post("/", async (c) => {
   );
 
   try {
-    await c.env.PG72_ID_DB.batch([
+    const results = await c.env.PG72_ID_DB.batch([
       c.env.PG72_ID_DB.prepare(
         `INSERT INTO oauthClient (
           id, clientId, clientSecret, disabled, skipConsent, enableEndSession,
@@ -647,9 +669,10 @@ adminClientRoutes.post("/", async (c) => {
           postLogoutRedirectUris, tokenEndpointAuthMethod, grantTypes,
           responseTypes, public, type, requirePKCE, ownerUserId, tos, policy,
           metadata
-        ) VALUES (?, ?, ?, 0, 0, ?, 'public', ?, ?, ?, ?, ?, ?, ?, ?, ?, '["code"]', ?, ?, 1, ?, ?, ?, ?)`,
+        ) SELECT ?, ?, ?, 0, 0, ?, 'public', ?, ?, ?, ?, ?, ?, ?, ?, ?, '["code"]', ?, ?, 1, ?, ?, ?, ?
+            WHERE ${ADMIN_ACTOR_COMMIT_PREDICATE}`,
       ).bind(
-          crypto.randomUUID(),
+          clientRowId,
           clientId,
           storedClientSecret,
           enableEndSession ? 1 : 0,
@@ -670,9 +693,21 @@ adminClientRoutes.post("/", async (c) => {
           termsOfService.url,
           privacyPolicy.url,
           JSON.stringify({ [DEVELOPER_NAME_METADATA_KEY]: developerName }),
+          ...adminActorCommitBindings(gate.actor.commitGuard),
         ),
-      auditInsertStatement(c.env, auditEvent),
+      auditInsertForExistingClientStatement(c.env, auditEvent, {
+        actor: gate.actor.commitGuard,
+        clientId,
+        clientRowId,
+        ...(ownerUserId ? { expectedOwnerUserId: ownerUserId } : {}),
+      }),
     ]);
+    if (
+      results[0]?.meta.changes !== 1 ||
+      results[1]?.meta.changes !== 1
+    ) {
+      return c.json({ error: "management_state_changed" }, 409);
+    }
   } catch (error) {
     if (
       error instanceof Error &&
@@ -805,7 +840,7 @@ adminClientRoutes.patch("/:clientId", async (c) => {
     results[0]?.meta.changes !== 1 ||
     results[1]?.meta.changes !== 1
   ) {
-    return c.json({ error: "client_not_found" }, 404);
+    return c.json({ error: "management_state_changed" }, 409);
   }
   await enqueueSecurityEvent(c.env, auditEvent, c.executionCtx);
 
@@ -863,7 +898,7 @@ adminClientRoutes.post("/:clientId/rotate-secret", async (c) => {
     results[0]?.meta.changes !== 1 ||
     results[1]?.meta.changes !== 1
   ) {
-    return c.json({ error: "client_not_found" }, 404);
+    return c.json({ error: "management_state_changed" }, 409);
   }
   await enqueueSecurityEvent(c.env, auditEvent, c.executionCtx);
 
@@ -951,7 +986,7 @@ adminClientRoutes.post("/:clientId/status", async (c) => {
     results[0]?.meta.changes !== 1 ||
     results[auditStatementIndex]?.meta.changes !== 1
   ) {
-    return c.json({ error: "client_not_found" }, 404);
+    return c.json({ error: "management_state_changed" }, 409);
   }
 
   await enqueueSecurityEvent(c.env, auditEvent, c.executionCtx);
@@ -1000,7 +1035,7 @@ adminClientRoutes.delete("/:clientId", async (c) => {
     results[1]?.meta.changes !== 1 ||
     !results[2]?.meta.changes
   ) {
-    return c.json({ error: "client_not_found" }, 404);
+    return c.json({ error: "management_state_changed" }, 409);
   }
 
   await enqueueSecurityEvent(c.env, auditEvent, c.executionCtx);

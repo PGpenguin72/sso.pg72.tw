@@ -1,6 +1,55 @@
 import { env } from "cloudflare:workers";
 import { makeSignature } from "better-auth/crypto";
 
+export function interposeAfterD1First(
+  queryFragment: string,
+  afterLoad: () => Promise<void>,
+): { database: D1Database; wasIntercepted: () => boolean } {
+  const realDatabase = env.PG72_ID_DB;
+  let intercepted = false;
+
+  const wrapSelect = (
+    statement: D1PreparedStatement,
+  ): D1PreparedStatement =>
+    new Proxy(statement, {
+      get(target, property) {
+        if (property === "bind") {
+          return (...values: unknown[]) => wrapSelect(target.bind(...values));
+        }
+        if (property === "first") {
+          return async (columnName?: string) => {
+            const result =
+              columnName === undefined
+                ? await target.first()
+                : await target.first(columnName);
+            if (!intercepted && result !== null) {
+              intercepted = true;
+              await afterLoad();
+            }
+            return result;
+          };
+        }
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+  const database = new Proxy(realDatabase, {
+    get(target, property) {
+      if (property === "prepare") {
+        return (query: string) => {
+          const statement = target.prepare(query);
+          return query.includes(queryFragment) ? wrapSelect(statement) : statement;
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+
+  return { database, wasIntercepted: () => intercepted };
+}
+
 export async function sha256Base64Url(value: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",

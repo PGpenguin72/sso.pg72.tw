@@ -999,7 +999,7 @@ describe("Mail introspection service client", () => {
         "DROP TRIGGER delete_client_before_rotation",
       ).run();
     }
-    expect(rotation.status).toBe(404);
+    expect(rotation.status).toBe(409);
 
     const after = await env.PG72_ID_DB.prepare(
       `SELECT COUNT(*) AS count FROM audit_event

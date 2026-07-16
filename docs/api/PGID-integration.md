@@ -129,7 +129,7 @@ Access token 是 **opaque**（非 JWT），要判斷有效性請用 introspectio
 
 ### 5.1 Client 由管理員 / developer 建立（無 dynamic registration）
 
-Dynamic client registration **關閉**。Client、redirect URI、scopes、grant types 由 PGID 管理員或具 `developer`/`clients.manage` 權限的 standard account 透過受驗證的 admin API 明確建立。Restricted account 即使持有 stale session 也會在 request-scoped D1 guard 被拒絕，且不能新建或接管 client。Restrict 不會自動停用既有 owned RP。RP 不能自助註冊。
+Dynamic client registration **關閉**。Client、redirect URI、scopes、grant types 由 PGID 管理員或具 `developer`/`clients.manage` 權限的 standard account 透過受驗證的 admin API 明確建立。Restricted account 即使持有 stale session 也會在 request-scoped D1 guard 被拒絕；client mutation 的 committing D1 batch 還會重驗 actor session 仍 live、帳號仍為 active、standard 且 permission-relevant snapshot 未變，否則不寫 client 或 success audit。Restrict 不會自動停用既有 owned RP。RP 不能自助註冊。
 
 Client 建立時的實際契約（對照 `apps/sso/worker/admin-clients.ts`）：
 

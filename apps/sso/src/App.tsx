@@ -352,6 +352,7 @@ const ADMIN_USER_ERROR_MESSAGES: Record<string, string> = {
   role_not_assignable: "你的角色無法執行這個角色變更。",
   user_not_found: "找不到這個使用者，請重新整理列表。",
   user_state_changed: "使用者狀態已變更，請重新整理後再試。",
+  user_state_unchanged: "使用者已處於要求的狀態。",
 };
 
 function adminUserErrorMessage(code: unknown, fallback: string): string {
@@ -486,6 +487,7 @@ const ADMIN_CLIENT_ERROR_MESSAGES: Record<string, string> = {
   invalid_redirect_uri:
     "Redirect URI 必須是完整的 HTTPS URL，不允許 wildcard 或 fragment。",
   invalid_scopes: "Scopes 只能是 openid/profile/email/offline_access。",
+  management_state_changed: "管理狀態已變更，請重新整理後再試。",
   rate_limited: "操作太頻繁，請稍後再試。",
   refresh_token_requires_offline_access:
     "啟用 refresh token 時必須包含 offline_access scope。",

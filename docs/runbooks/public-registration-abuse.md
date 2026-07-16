@@ -182,6 +182,13 @@ disable an already owned RP; if the incident involves that RP, an authorized
 administrator decides its status and token containment separately. Never bypass
 these rules with an ad hoc D1 write during routine response.
 
+Every management/developer mutation revalidates the actor's live session and
+active, `standard`, permission-relevant D1 snapshot in the same batch as the
+mutation and success audit. If the actor or target snapshot changed after the initial request guard,
+the API returns a state conflict and commits neither the mutation nor a success
+audit. Repeating an already-completed access/status transition is also a no-op
+conflict rather than a second success event.
+
 ## 6. False Positives and Appeals
 
 Before promotion or reactivation, require all of the following:

@@ -2,7 +2,12 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 
 import { requireAdminPermission } from "./admin-gate";
-import { recordAudit } from "./audit";
+import {
+  auditInsertForOpenOAuthReportStatement,
+  createAuditEvent,
+  enqueueSecurityEvent,
+  recordAudit,
+} from "./audit";
 import { createAuth } from "./auth";
 import { readRuntimeConfig } from "./config";
 
@@ -250,37 +255,29 @@ adminOauthReportRoutes.post("/:id/resolve", async (c) => {
   }
 
   const now = new Date().toISOString();
-  const update = await c.env.PG72_ID_DB.prepare(
-    `UPDATE oauth_client_report
-        SET status = 'resolved', resolved_at = ?, resolved_by_user_id = ?
-      WHERE id = ? AND status = 'open'`,
-  )
-    .bind(now, gate.actor.userId, id)
-    .run();
-  if (update.meta.changes !== 1) {
-    // Either the report does not exist or it was already resolved.
-    return c.json({ error: "report_not_found" }, 404);
+  const event = createAuditEvent({
+    eventType: "oauth_client.report_resolved",
+    outcome: "success",
+    actorUserId: gate.actor.userId,
+    subjectId: id,
+  });
+  const results = await c.env.PG72_ID_DB.batch([
+    auditInsertForOpenOAuthReportStatement(c.env, event, {
+      actor: gate.actor.commitGuard,
+      reportId: id,
+    }),
+    c.env.PG72_ID_DB.prepare(
+      `UPDATE oauth_client_report
+          SET status = 'resolved', resolved_at = ?, resolved_by_user_id = ?
+        WHERE id = ?
+          AND status = 'open'
+          AND EXISTS (SELECT 1 FROM audit_event WHERE id = ?)`,
+    ).bind(now, gate.actor.userId, id, event.eventId),
+  ]);
+  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+    return c.json({ error: "management_state_changed" }, 409);
   }
-
-  try {
-    await recordAudit(
-      c.env,
-      {
-        eventType: "oauth_client.report_resolved",
-        outcome: "success",
-        actorUserId: gate.actor.userId,
-        subjectId: id,
-      },
-      c.executionCtx,
-    );
-  } catch (error) {
-    console.error(
-      JSON.stringify({
-        event: "oauth_report_resolve_audit_failed",
-        error: error instanceof Error ? error.name : "UnknownError",
-      }),
-    );
-  }
+  await enqueueSecurityEvent(c.env, event, c.executionCtx);
 
   return c.json({ resolved: true, id, at: now });
 });

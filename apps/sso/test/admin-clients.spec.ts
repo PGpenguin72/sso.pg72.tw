@@ -1022,8 +1022,10 @@ describe("Admin OAuth client management", () => {
     await waitOnExecutionContext(ctx);
 
     expect(interposed.wasIntercepted()).toBe(true);
-    expect(response.status).toBe(404);
-    expect(await response.json()).toEqual({ error: "client_not_found" });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "management_state_changed",
+    });
     const after = await env.PG72_ID_DB.prepare(
       "SELECT id, ownerUserId, disabled FROM oauthClient WHERE clientId = ?",
     )
@@ -1126,8 +1128,10 @@ describe("Admin OAuth client management", () => {
     await waitOnExecutionContext(ctx);
 
     expect(interposed.wasIntercepted()).toBe(true);
-    expect(response.status).toBe(404);
-    expect(await response.json()).toEqual({ error: "client_not_found" });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "management_state_changed",
+    });
     expect(replacementId).not.toBe(original?.id);
     const replacement = await env.PG72_ID_DB.prepare(
       `SELECT id, ownerUserId, disabled, name

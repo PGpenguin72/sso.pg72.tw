@@ -1,3 +1,9 @@
+import {
+  ADMIN_ACTOR_COMMIT_PREDICATE,
+  adminActorCommitBindings,
+  type AdminActorCommitGuard,
+} from "./admin-commit";
+
 export type AuditOutcome = "success" | "denied" | "failure";
 
 /**
@@ -31,17 +37,97 @@ export interface RecordAuditInput {
 }
 
 export interface ExistingClientAuditGuard {
+  actor: AdminActorCommitGuard;
   clientId: string;
   clientRowId: string;
   /** Omitted for actors with clients.manage_all. */
   expectedOwnerUserId?: string;
 }
 
+export interface ExistingInvitationAuditGuard {
+  actor: AdminActorCommitGuard;
+  email: string;
+  invitationId: string;
+  role: string;
+}
+
+export interface ExistingOAuthReportAuditGuard {
+  actor: AdminActorCommitGuard;
+  reportId: string;
+}
+
 export interface ExistingUserAuditGuard {
+  actor: AdminActorCommitGuard;
   expectedAccessLevel: string;
   expectedRole: string | null;
   expectedStatus: string;
   userId: string;
+}
+
+export function auditInsertForExistingInvitationStatement(
+  env: Env,
+  event: SecurityEvent,
+  guard: ExistingInvitationAuditGuard,
+): D1PreparedStatement {
+  return env.PG72_ID_DB.prepare(
+    `INSERT INTO audit_event
+      (id, event_type, actor_user_id, client_id, subject_id, outcome,
+       metadata_json, occurred_at)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (
+        SELECT 1
+          FROM invitation
+         WHERE id = ?
+           AND email_normalized = ?
+           AND role = ?
+           AND created_by_user_id = ?
+      )
+        AND ${ADMIN_ACTOR_COMMIT_PREDICATE}`,
+  ).bind(
+    event.eventId,
+    event.eventType,
+    event.actorUserId ?? null,
+    event.clientId ?? null,
+    event.subjectId ?? null,
+    event.outcome,
+    event.metadata ? JSON.stringify(event.metadata) : null,
+    event.occurredAt,
+    guard.invitationId,
+    guard.email,
+    guard.role,
+    guard.actor.userId,
+    ...adminActorCommitBindings(guard.actor),
+  );
+}
+
+export function auditInsertForOpenOAuthReportStatement(
+  env: Env,
+  event: SecurityEvent,
+  guard: ExistingOAuthReportAuditGuard,
+): D1PreparedStatement {
+  return env.PG72_ID_DB.prepare(
+    `INSERT INTO audit_event
+      (id, event_type, actor_user_id, client_id, subject_id, outcome,
+       metadata_json, occurred_at)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (
+        SELECT 1
+          FROM oauth_client_report
+         WHERE id = ? AND status = 'open'
+      )
+        AND ${ADMIN_ACTOR_COMMIT_PREDICATE}`,
+  ).bind(
+    event.eventId,
+    event.eventType,
+    event.actorUserId ?? null,
+    event.clientId ?? null,
+    event.subjectId ?? null,
+    event.outcome,
+    event.metadata ? JSON.stringify(event.metadata) : null,
+    event.occurredAt,
+    guard.reportId,
+    ...adminActorCommitBindings(guard.actor),
+  );
 }
 
 export function createAuditEvent(input: RecordAuditInput): SecurityEvent {
@@ -94,7 +180,8 @@ export function auditInsertForExistingClientStatement(
          WHERE id = ?
            AND clientId = ?
            AND (? IS NULL OR ownerUserId = ?)
-      )`,
+      )
+        AND ${ADMIN_ACTOR_COMMIT_PREDICATE}`,
   ).bind(
     event.eventId,
     event.eventType,
@@ -108,6 +195,7 @@ export function auditInsertForExistingClientStatement(
     guard.clientId,
     guard.expectedOwnerUserId ?? null,
     guard.expectedOwnerUserId ?? null,
+    ...adminActorCommitBindings(guard.actor),
   );
 }
 
@@ -128,7 +216,8 @@ export function auditInsertForExistingUserStatement(
            AND accessLevel = ?
            AND role IS ?
            AND status = ?
-      )`,
+      )
+        AND ${ADMIN_ACTOR_COMMIT_PREDICATE}`,
   ).bind(
     event.eventId,
     event.eventType,
@@ -142,6 +231,7 @@ export function auditInsertForExistingUserStatement(
     guard.expectedAccessLevel,
     guard.expectedRole,
     guard.expectedStatus,
+    ...adminActorCommitBindings(guard.actor),
   );
 }
 

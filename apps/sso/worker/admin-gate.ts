@@ -4,6 +4,7 @@ import {
   accountAccessLevel,
   recordRestrictedActionDenied,
 } from "./account-access";
+import type { AdminActorCommitGuard } from "./admin-commit";
 import { createAuth } from "./auth";
 import {
   FRESH_SESSION_MAX_AGE_MS,
@@ -20,6 +21,7 @@ import {
 type AppEnv = { Bindings: Env };
 
 export interface AdminActor {
+  commitGuard: AdminActorCommitGuard;
   role: PlatformRole;
   userId: string;
 }
@@ -153,5 +155,17 @@ export async function requireAdminPermission(
     }
   }
 
-  return { ok: true, actor: { role, userId: session.user.id } };
+  return {
+    ok: true,
+    actor: {
+      commitGuard: {
+        expectedEmail: currentUser.email,
+        expectedRole: currentUser.role,
+        sessionId: session.session.id,
+        userId: session.user.id,
+      },
+      role,
+      userId: session.user.id,
+    },
+  };
 }

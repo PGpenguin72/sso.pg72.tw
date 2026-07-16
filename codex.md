@@ -321,8 +321,8 @@ access:                  standard <-> restricted
 - `suspended` 使用者不因公開模式繞過管制：session 建立前一律檢查中央 `user.status`，非 `active`（含已刪除、user row 不存在）一律拒絕。
 - 已刪除帳號重新註冊會取得全新的 `sub`；RP 視其為新使用者，不會繼承舊資料。
 - 未受邀、非 bootstrap 的 public-created user 持久化為 `accessLevel=restricted`；邀請與 bootstrap 建帳為 `standard`，`0017` 套用前既有 rows 由 default/backfill 保持 `standard`。Restricted user 保留 basic login、account view/mutation、Passkey 與 ordinary OIDC；ID token/UserInfo 平台 role claim 固定為 `user`。
-- Restricted user 不可新增 Google/Telegram/其他 optional provider link，不可取得 elevated platform role，不可新建或接管 OAuth client，也不可使用 developer/admin/system-client management。Initial public Google account 是 migration trigger 的唯一窄例外；request guard 每次重讀 D1，D1 trigger 決定 provider/client/role race winner。既有 owned client 不因 restrict 自動停用，若 incident 涉及該 RP 必須由 operator 另作 client containment 決策。
-- 管理後台可依 `standard`/`restricted` filter，並在 role hierarchy 內執行 restrict/promote/suspend/reactivate。Restrict 同批 demote 至 `user`、撤銷 sessions/access tokens/refresh tokens 並插入 success audit；promote 不 re-activate、不還原舊 role。Guarded snapshot 不符時回 `user_state_changed` 且不留下假 success audit。
+- Restricted user 不可新增 Google/Telegram/其他 optional provider link，不可取得 elevated platform role，不可新建或接管 OAuth client，也不可使用 developer/admin/system-client management。Initial public Google account 是 migration trigger 的唯一窄例外；request guard 每次重讀 D1，所有 management/developer mutation 的 D1 batch 另以同一 actor session + email/stored-role snapshot 重驗 live + active + standard，D1 trigger 則守住 provider/client-owner/role constraint。既有 owned client 不因 restrict 自動停用，若 incident 涉及該 RP 必須由 operator 另作 client containment 決策。
+- 管理後台可依 `standard`/`restricted` filter，並在 role hierarchy 內執行 restrict/promote/suspend/reactivate。Restrict 同批 demote 至 `user`、撤銷 sessions/access tokens/refresh tokens 並插入 success audit；promote 不 re-activate、不還原舊 role。Actor 或 target guarded snapshot 不符時回 state-conflict，且 mutation 與 success audit 都不落寫；重複的 no-op transition 不新增 success audit。
 - Restricted sensitive denial 寫入 `account.restricted_action_denied`，metadata 只有固定 `surface`；`user.created` 另記 `accessLevel` enum，讓 promotion/deletion 不會改寫歷史 volume。Registration limiter/denial 與管理狀態轉換事件同樣避免 email/IP/token。初始人工 review threshold、triage、containment、false-positive 與 invite-mode rollback 見 [`docs/runbooks/public-registration-abuse.md`](./docs/runbooks/public-registration-abuse.md)。Repository 尚無外部 dashboard/paging/自動 suspension，runbook 不等同 operational monitoring。
 
 切換 production 至 public 前尚未完成的安全 gate：
@@ -634,7 +634,7 @@ Audit metadata 不得包含 access token、refresh token、session token、autho
 - CORS 採 allowlist，不對 credentialed endpoints 使用 `*`。
 - 所有 state-changing endpoints 使用 CSRF 保護或不依賴 cookie 的等效防護。
 - 登入、callback、token、Passkey、邀請與管理 endpoints 具獨立 rate limits；新帳號建立另有更嚴的 per-IP `REGISTRATION_RATE_LIMITER`。
-- Turnstile、版本化法律同意與 restricted account 已在 local source 實作。受限帳號的 sensitive request guard 必須重讀 D1，成功 restrict/promote/suspend transition 與 audit 必須同批 commit；D1 trigger 覆蓋 role、provider insert 與 client owner 的 check/use race。
+- Turnstile、版本化法律同意與 restricted account 已在 local source 實作。受限帳號的 sensitive request guard 必須重讀 D1；所有 management/developer writes 必須在 committing D1 batch 重新確認 actor session 仍 live、帳號仍為 active + standard 且 permission-relevant snapshot 未變，成功 mutation 與 audit 必須同批 commit；D1 trigger 另覆蓋 role、provider insert 與 client owner constraint。
 - Abuse runbook 已以現有 redacted D1 evidence 定義 manual threshold/triage/containment/rollback；Preview/production 配置、獨立 review、實機驗證、threshold baseline、operator assignment 與外部 aggregation/alert delivery 仍未完成，皆屬 §9.2 的 public 啟用 gate。
 - Error response 不洩漏帳號是否存在、token 狀態、secret 或內部 exception。
 - 日誌與 telemetry 預設遮蔽 PII 與憑證。

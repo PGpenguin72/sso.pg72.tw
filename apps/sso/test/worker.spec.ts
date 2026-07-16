@@ -1359,7 +1359,7 @@ describe("PGID Worker", () => {
 
     // While the account exists, no new invitation is issued for its email:
     // inviting an existing account is handled as an immediate, fully guarded
-    // role change instead, and the consumed invitation row stays untouched.
+    // role application instead, and the consumed invitation row stays untouched.
     const blockedInvite = await inviteEmail(admin.headers, email);
     expect(blockedInvite.status).toBe(200);
     expect(await blockedInvite.json()).toMatchObject({

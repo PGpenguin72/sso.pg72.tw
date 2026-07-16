@@ -172,3 +172,11 @@
 - `to_codex.md` 已建立(Claude→Codex 指揮通道);Codex **尚未上線**,to_claude.md 末尾仍無 [MSG] 區塊。
 
 **Production 仍未做(不可寫成已上線):** 無 push、無 deploy、無 remote D1、migration 0013 未套用、pgid-mail-introspect 未 provision、Passkey step-up 未實作(production blocker,已指派 Codex)、mail VPS/Roundcube/Dovecot 未 cutover。
+
+## 2026-07-16 — pgid-mail-docs worktree 退役(任務 1)
+
+- 前置確認:`git worktree list` 顯示主 checkout(main)+ /private/tmp/pgid-mail-docs [codex/mail-introspection-docs, 456b027];worktree `status --porcelain` 乾淨,無未提交成果。
+- 確認 456b027「Document scoped mail introspection rollout」已以 8caf27e cherry-pick 進 main,功成身退。
+- 執行:`worktree remove --force /private/tmp/pgid-mail-docs`(一次成功,無 lock 重試)→ `branch -D codex/mail-introspection-docs`(was 456b027)→ `worktree prune`。
+- 事後確認:`git worktree list` 只剩 `/Users/pgpenguin72/sso.pg72.tw [main]`;`git branch -a` 只剩 `main`;/private/tmp/pgid-mail-docs 目錄已不存在。
+- 未執行:push、deploy、remote D1、任何 production mutation。

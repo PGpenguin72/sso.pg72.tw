@@ -64,3 +64,4 @@
 | 2026-07-16 (醒) | A2 檢查 | prod SSO D1 | oauthClient | 查 pg72-diary-dev:production 已無此 client(僅剩 pg72-diary),應為另一分頁已移除;無需動作 | 已完成(無操作) |
 | 2026-07-16 (醒) | A3 清理 | link-short Pages (PGpenguin72帳號) | secrets | 刪除 Link 舊 secret ALLOWED_EMAIL/GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET;剩 PG72_ID_CLIENT_SECRET;Link 仍正常 | 完成 |
 | 2026-07-16 (醒) | 交接模式 | sso.pg72.tw | handoff/agentlog/msg | Owner:上游 token 可能將盡,CODEX 可能隨時接手;維持每步 commit+log,subagent 各自寫日誌後合併,handoff 保持最新 | 進行中 |
+| 2026-07-16 (醒) | 派工(設計統一) | ~/ahsnccu-ann, 原專案代碼/{copy,link,upload}, ~/diary.pg72.tw | 各 repo | 派 5 個設計 agent 依 morden_dark 重塑各 repo,各自寫 DESIGN-LOG.md + 增量 commit,不 push;背景執行 | 進行中 |

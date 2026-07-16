@@ -36,6 +36,11 @@ import {
   X,
 } from "lucide-react";
 import type { Passkey } from "@better-auth/passkey";
+import {
+  startAuthentication,
+  type AuthenticationResponseJSON,
+  type PublicKeyCredentialRequestOptionsJSON,
+} from "@simplewebauthn/browser";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -204,6 +209,8 @@ const SECURITY_ACTIVITY_LABELS: Record<string, string> = {
   "passkey.added": "新增 Passkey",
   "passkey.removed": "刪除 Passkey",
   "passkey.renamed": "重新命名 Passkey",
+  "passkey.step_up_failed": "Passkey 驗證失敗",
+  "passkey.step_up_succeeded": "Passkey 驗證成功",
   "profile.updated": "更新個人資料",
   "session.revoked": "撤銷裝置 session",
   "session.revoked_all": "登出其他裝置",
@@ -252,6 +259,13 @@ interface CreatedAdminClientResponse {
   clientSecret?: string;
 }
 
+interface PasskeyStepUpChallengeResponse {
+  challengeId?: string;
+  error?: string;
+  options?: PublicKeyCredentialRequestOptionsJSON;
+  verified?: boolean;
+}
+
 const ADMIN_CLIENT_ERROR_MESSAGES: Record<string, string> = {
   client_exists: "這個 Client ID 已存在。",
   invalid_client_id: "Client ID 格式無效（小寫英數、-、_、.，3-64 字元）。",
@@ -259,6 +273,10 @@ const ADMIN_CLIENT_ERROR_MESSAGES: Record<string, string> = {
   invalid_developer_name: "開發者名稱為必填，且不可超過 64 字元。",
   invalid_privacy_policy_url: "隱私權政策必須是完整的 HTTPS URL。",
   invalid_terms_of_service_url: "服務條款必須是完整的 HTTPS URL。",
+  passkey_enrollment_required:
+    "請先在「安全性」新增 Passkey，再執行這個操作。",
+  passkey_step_up_required: "請先完成 Passkey 驗證。",
+  fresh_session_required: "登入時間已超過 10 分鐘，請重新登入。",
   invalid_redirect_uri:
     "Redirect URI 必須是完整的 HTTPS URL，不允許 wildcard 或 fragment。",
   invalid_scopes: "Scopes 只能是 openid/profile/email/offline_access。",
@@ -2922,11 +2940,77 @@ export function App() {
     }
   };
 
+  const ensureClientPasskeyStepUp = async (): Promise<boolean> => {
+    const challengeResponse = await fetch(
+      "/api/account/passkey-step-up/challenge",
+      {
+        method: "POST",
+        credentials: "include",
+        headers: { Accept: "application/json" },
+      },
+    );
+    const challenge = (await challengeResponse.json().catch(() => ({}))) as
+      PasskeyStepUpChallengeResponse;
+    if (!challengeResponse.ok) {
+      setAdminClientsError(
+        adminClientErrorMessage(
+          challenge.error,
+          "無法開始 Passkey 驗證，請稍後再試。",
+        ),
+      );
+      return false;
+    }
+    if (challenge.verified === true) return true;
+    if (!challenge.challengeId || !challenge.options) {
+      setAdminClientsError("無法開始 Passkey 驗證，請重新整理。");
+      return false;
+    }
+
+    let assertion: AuthenticationResponseJSON;
+    try {
+      assertion = await startAuthentication({ optionsJSON: challenge.options });
+    } catch {
+      setAdminClientsError("Passkey 驗證已取消或無法完成。");
+      return false;
+    }
+
+    const verificationResponse = await fetch(
+      "/api/account/passkey-step-up/verify",
+      {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          challengeId: challenge.challengeId,
+          response: assertion,
+        }),
+      },
+    );
+    const verification = (await verificationResponse
+      .json()
+      .catch(() => ({}))) as PasskeyStepUpChallengeResponse;
+    if (!verificationResponse.ok || verification.verified !== true) {
+      setAdminClientsError(
+        verification.error === "passkey_step_up_challenge_invalid"
+          ? "Passkey 驗證已過期或已使用，請再試一次。"
+          : "Passkey 驗證失敗，操作尚未送出。",
+      );
+      return false;
+    }
+
+    setNotice("Passkey 驗證已完成。");
+    return true;
+  };
+
   const createAdminClient = async () => {
     setBusy("client:create");
     setAdminClientsError(null);
     setIssuedClientSecret(null);
     try {
+      if (!(await ensureClientPasskeyStepUp())) return;
       const redirectUris = clientRedirectUrisDraft
         .split("\n")
         .map((line) => line.trim())
@@ -3001,6 +3085,7 @@ export function App() {
     setBusy(`client:${client.clientId}`);
     setAdminClientsError(null);
     try {
+      if (!(await ensureClientPasskeyStepUp())) return;
       const response = await fetch(
         `/api/admin/clients/${encodeURIComponent(client.clientId)}`,
         {
@@ -3038,6 +3123,7 @@ export function App() {
     setAdminClientsError(null);
     setIssuedClientSecret(null);
     try {
+      if (!(await ensureClientPasskeyStepUp())) return;
       const response = await fetch(
         `/api/admin/clients/${encodeURIComponent(client.clientId)}/rotate-secret`,
         {
@@ -3073,6 +3159,7 @@ export function App() {
     setBusy(`client:${client.clientId}`);
     setAdminClientsError(null);
     try {
+      if (!(await ensureClientPasskeyStepUp())) return;
       const response = await fetch(
         `/api/admin/clients/${encodeURIComponent(client.clientId)}/status`,
         {
@@ -3108,6 +3195,7 @@ export function App() {
     setBusy(`client:${client.clientId}`);
     setAdminClientsError(null);
     try {
+      if (!(await ensureClientPasskeyStepUp())) return;
       const response = await fetch(
         `/api/admin/clients/${encodeURIComponent(client.clientId)}`,
         {

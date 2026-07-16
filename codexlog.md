@@ -52,3 +52,20 @@
 - Verification so far: production build and Wrangler type generation passed;
   `pnpm --filter @pg72/id typecheck` passed. Behavior tests are intentionally
   the next stage and have not yet been claimed as passing.
+
+## 2026-07-16 16:47 CST - Account-center integration
+
+- Added a pre-mutation Passkey step-up flow to all five OAuth client actions
+  exposed by the React account center: create, trust edit, secret rotation,
+  status change, and delete.
+- The UI first asks the Worker for a challenge. A still-valid D1 step-up skips
+  another prompt; otherwise `@simplewebauthn/browser` opens the native
+  credential prompt and the client mutation is sent only after verification.
+- Missing enrollment, stale login sessions, cancellation, expired/replayed
+  challenges, and assertion failure stay fail-closed and produce actionable
+  errors. No fallback authentication method or client-side timestamp is used.
+- Added self-security-activity labels for successful and denied step-up events.
+- Verification: `pnpm --filter @pg72/id typecheck` and
+  `pnpm --filter @pg72/id build` both passed. The build emitted only the
+  expected local warning that required production secret names have no local
+  values; no secret value was read or printed.

@@ -1460,34 +1460,59 @@ describe("PGID Worker", () => {
     expect(user.role).toBe("admin");
   });
 
-  it.each([
-    [
-      "authorization endpoint",
-      () =>
-        new Request(
-          "http://localhost:5173/oauth2/authorize?resource=https%3A%2F%2Fanother-resource.example",
-        ),
-    ],
-    [
-      "token endpoint",
-      () =>
-        new Request("http://localhost:5173/oauth2/token", {
+  const resourceVariants = [
+    {
+      name: "single URL",
+      values: ["https://another-resource.example"],
+    },
+    { name: "empty value", values: [""] },
+    { name: "malformed URI", values: ["not-an-absolute-uri"] },
+    {
+      name: "duplicate values",
+      values: [
+        "https://another-resource.example",
+        "https://second-resource.example",
+      ],
+    },
+  ] as const;
+  const resourceGuardCases = resourceVariants.flatMap(({ name, values }) => [
+    {
+      name: `authorization endpoint with ${name}`,
+      createRequest: () => {
+        const url = new URL("http://localhost:5173/oauth2/authorize");
+        for (const value of values) url.searchParams.append("resource", value);
+        return new Request(url);
+      },
+    },
+    {
+      name: `token endpoint with ${name}`,
+      createRequest: () => {
+        const body = new URLSearchParams({
+          grant_type: "authorization_code",
+          code: "not-a-real-code",
+        });
+        for (const value of values) body.append("resource", value);
+        return new Request("http://localhost:5173/oauth2/token", {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({
-            grant_type: "authorization_code",
-            code: "not-a-real-code",
-            resource: "https://another-resource.example",
-          }),
-        }),
-    ],
-  ])(
-    "blocks resource indicators at the %s while the stable provider lacks grant binding",
-    async (_endpoint, createRequest) => {
+          body,
+        });
+      },
+    },
+  ]);
+
+  it.each(resourceGuardCases)(
+    "blocks resource indicators at the $name while the stable provider lacks grant binding",
+    async ({ createRequest }) => {
       const response = await exports.default.fetch(createRequest());
 
       expect(response.status).toBe(400);
-      expect(await response.json()).toMatchObject({ error: "invalid_target" });
+      expect(response.headers.get("content-type")).toBe("application/json");
+      expect(await response.json()).toEqual({
+        error: "invalid_target",
+        error_description:
+          "Resource indicators are disabled until the stable provider includes grant binding.",
+      });
     },
   );
 

@@ -91,3 +91,12 @@
 - Commits:bf9ef57 / 80581fb / f36ec5f(前次 c08b3c8 / 6f5812b / d8d66d4);master 領先 origin 13 commits,未 push、未 deploy。
 - 驗證:npm run check 全綠(tsc app+worker、vitest 4 files/13 tests、build);src/api.ts 與 src-worker/ 零變更(auth/BFF/ClientSecretPost 未觸碰);無 slate/blue/purple 殘留。
 - 待 owner:實機看 Login/Dashboard/Admin/QRModal/404,決定 push + wrangler pages deploy 時機。
+
+## 2026-07-16 — copy.pg72.tw reskin 完成
+
+- reskin agent 回報:**copy.pg72.tw 完成**。接手點 = Step 3(shadcn 原語)未提交半成品,先驗證(typecheck+lint)後 commit 保存,再續 Step 4/5。
+- 本次:privacy/terms/error/cookie-banner 殘留純黑與 gray 卡片改 morden_dark token;hero canvas 粒子改靛藍家族並加 prefers-reduced-motion 支援;dialog scrim 刻意保留。
+- Commits:4f76851 / aaeaa56(前次)、81a3972 / eafcffc / 54830e7(本次);本地 master,未 push。
+- 驗證:tsc、eslint --max-warnings 0、next build、next-on-pages pages:build 全過;舊色 grep 零殘留。
+- 邊界:auth/OIDC/token vault/六位數訪客碼/API 零觸碰。
+- 待 owner:push 前本機 pnpm dev 實看;push 會觸發 Pages 部署,時機由 owner 決定。

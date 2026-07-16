@@ -38,7 +38,7 @@ A：只有 Authorization Code + PKCE S256。ID token 用 EdDSA 簽章。
 A：不行。精確比對，production 必須 HTTPS。
 
 **Q：client 認證要用 Basic 還是 post？**
-A：用 `client_secret_post`（credential 放 token 請求的 form body）。現行 provider 對 HTTP Basic 的處理與標準不相容，避免使用。見[手冊 §5.3](../docs/api/PGID-integration.md#53-client-認證方式重要)。
+A：用 `client_secret_post`（credential 放 token 請求的 form body）。現行 provider 對 HTTP Basic 的處理與標準不相容，避免使用。見[建立 OAuth Client](developers/register-client.md)。
 
 **Q：我要怎麼識別使用者？**
 A：用不可變的 `sub`，不要用 email。email 只適合一次性綁定既有帳號，且要檢查 `email_verified`。

@@ -1,6 +1,6 @@
 # 串接總覽
 
-這一章帶開發者從零把服務接上 PGID。教學導向；端點與參數的精簡查表請搭配 [PGID 串接 API 手冊](../../docs/api/PGID-integration.md)。
+這一章帶開發者從零把服務接上 PGID。需要實作端點與參數時，接著看 [跑通 OIDC 登入流程](oidc-flow.md)。
 
 ## PGID 是哪一種身分提供者
 

@@ -1,6 +1,6 @@
 # 跑通 OIDC 登入流程
 
-這一頁用 `oauth4webapi` 走完一次完整登入。可運作的完整範例是 `apps/test-rp/worker/index.ts`；更多語言 / library 的通用步驟版見 [PGID 串接 API 手冊 §9](../../docs/api/PGID-integration.md#9-串接範例-b通用步驟版任何語言--library)。
+這一頁用 `oauth4webapi` 走完一次完整登入。可運作的完整範例是 `apps/test-rp/worker/index.ts`；使用其他語言或 library 時，仍須遵守本頁相同的 discovery、state / nonce、PKCE S256、issuer / audience / 簽章驗證與後端 session 契約。
 
 ## 前置
 

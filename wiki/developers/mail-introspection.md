@@ -1,6 +1,6 @@
 # Mail Token Introspection
 
-這一頁給維護 PG72 Webmail / Dovecot 的 operator 與串接者。它描述固定的 Mail Path A trust relationship，不是一般 OAuth client 可申請的功能。精確 wire contract 與完整狀態表見 [PGID 串接 API 手冊 §5.4](../../docs/api/PGID-integration.md#54-mail-introspection-system-client)。
+這一頁給維護 PG72 Webmail / Dovecot 的 operator 與串接者。它完整描述固定的 Mail Path A trust relationship、wire contract 與 fail-closed 狀態表；這不是一般 OAuth client 可申請的功能。
 
 > 狀態：repository 的 local source 已實作 introspection 與真正的 Passkey step-up，並通過本地 regression gate；production 尚未套用 `0013`/`0014`、部署、完成獨立 review，或 provision `pgid-mail-introspect`。
 
@@ -80,4 +80,4 @@ Dovecot / gateway 只應在 HTTP `200` 且 `active === true`、`client_id === "p
 
 目前行為依賴 exact-pinned `@better-auth/oauth-provider@1.6.23` patch。Missing / unknown `kid`、malformed JWT 與由 token 控制的 JOSE 驗證失敗會正規化為 inactive；JWKS 損毀、同 `kid` 多 key 等基礎設施問題仍保留為 server error。
 
-升級 provider 前先讀 [`patches/README.md`](../../patches/README.md)。只有 stable upstream 完整取代 fixed-pair hook、live-session 資訊、same-client default、JWT/refresh denial、`kid` / JOSE fail-closed 分類、hint fallback 與 inactive error handling，且 frozen install 與完整 regression gate 都通過時，才能移除 patch。
+升級 provider 前，先以本節列出的 pinned patch 行為作 removal checklist。只有 stable upstream 完整取代 fixed-pair hook、live-session 資訊、same-client default、JWT/refresh denial、`kid` / JOSE fail-closed 分類、hint fallback 與 inactive error handling，且 frozen install 與完整 regression gate 都通過時，才能移除 patch。

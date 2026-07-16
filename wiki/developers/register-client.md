@@ -24,7 +24,9 @@ PGID **不開放動態自助註冊**。每個 client 由 PGID 管理員或具 `d
 
 建立、更新、輪替 secret、停用 / 啟用或刪除 client 都是同源 admin mutation：請求必須帶有效的 PGID session cookie，且 `Origin` 必須精確等於 PGID 的 `AUTH_BASE_URL`。這些操作只接受 `createdAt` 距目前時間小於 10 分鐘的 session；不符合時固定回 `403` 與 `{"code":"SESSION_NOT_FRESH","error":"fresh_session_required"}`。
 
-Local source 還要求同一個 D1 session 最近完成 Passkey step-up。帳號中心會在 mutation 前啟動原生 Passkey 驗證；取消或驗證失敗時不會送出原操作。10 分鐘 session age 只是額外 gate，不能替代 step-up。沒有 Passkey 時不提供 bypass，包含 `bootadmin`；先用既有 Google fresh session 註冊 Passkey，再操作 client。若 Google 與所有 Passkey 都遺失，目前沒有可用的自助 recovery/break-glass flow。Endpoint、有效窗口與錯誤契約見 [PGID 串接 API 手冊 §5.1.1](../../docs/api/PGID-integration.md#511-passkey-step-up)。Production 尚未套用 `0014` 或部署此行為。
+Local source 還要求同一個 D1 session 最近完成 Passkey step-up。帳號中心會在 mutation 前啟動原生 Passkey 驗證；取消或驗證失敗時不會送出原操作。10 分鐘 session age 只是額外 gate，不能替代 step-up。沒有 Passkey 時不提供 bypass，包含 `bootadmin`；先用既有 Google fresh session 註冊 Passkey，再操作 client。若 Google 與所有 Passkey 都遺失，目前沒有可用的自助 recovery/break-glass flow。
+
+Step-up 使用同源的 `POST /api/account/passkey-step-up/challenge` 與 `POST /api/account/passkey-step-up/verify`。Challenge 兩分鐘內有效、只能使用一次，並綁定目前的 user 與 D1 session；WebAuthn 必須完成 user verification。Step-up 有效期只能設定為 60–600 秒，目前為 600 秒。沒有 Passkey 時回 `PASSKEY_ENROLLMENT_REQUIRED`；未完成或已過期時，client mutation 回 `PASSKEY_STEP_UP_REQUIRED`。Production 尚未套用 `0014` 或部署此行為。
 
 ## 本機開發
 
@@ -42,11 +44,11 @@ OIDC_SCOPE=openid profile email offline_access
 
 ## Client 認證方式（重要）
 
-confidential client 換 token 時，請把 `client_id` / `client_secret` 放在 **token 請求的 form body**（`client_secret_post`），**不要**用 HTTP Basic header。現行 OAuth provider 版本對 Basic header 的 client credential 處理與標準不相容，可能導致認證失敗。細節與範例見 [PGID 串接 API 手冊 §5.3](../../docs/api/PGID-integration.md#53-client-認證方式重要)。
+confidential client 換 token 時，請把 `client_id` / `client_secret` 放在 **token 請求的 form body**（`client_secret_post`），**不要**用 HTTP Basic header。現行 OAuth provider 版本對 Basic header 的 client credential 處理與標準不相容，可能導致認證失敗。實作方式見 [跑通 OIDC 登入流程](oidc-flow.md) 的 confidential client token exchange。
 
 ## System-reserved clients
 
-`pg72-webmail` 與 `pgid-mail-introspect` 是 PGID 保留的 system client ID，developer 不能建立或接管。`pgid-mail-introspect` 是無登入 grant 的 unowned service client，只能由 `clients.manage_all` 管理員透過專用 provisioning 操作建立；該端點應送空 body，secret 只顯示一次且資料庫只存 hash。它只能 introspect `pg72-webmail` 的 opaque access token，不能查其他 client、JWT 或 refresh token，也不能自行取得 token。操作方式與 fail-closed 契約見 [Mail Token Introspection](mail-introspection.md)；wire details 見 [PGID 串接 API 手冊 §5.4](../../docs/api/PGID-integration.md#54-mail-introspection-system-client)。
+`pg72-webmail` 與 `pgid-mail-introspect` 是 PGID 保留的 system client ID，developer 不能建立或接管。`pgid-mail-introspect` 是無登入 grant 的 unowned service client，只能由 `clients.manage_all` 管理員透過專用 provisioning 操作建立；該端點應送空 body，secret 只顯示一次且資料庫只存 hash。它只能 introspect `pg72-webmail` 的 opaque access token，不能查其他 client、JWT 或 refresh token，也不能自行取得 token。完整操作方式、wire contract 與 fail-closed response handling 見 [Mail Token Introspection](mail-introspection.md)。
 
 ## 下一步
 

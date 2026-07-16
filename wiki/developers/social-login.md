@@ -39,5 +39,5 @@ Telegram 使用 Login Widget 而不是 OAuth/OIDC,而且 Telegram 不提供 veri
 
 ## 下一步
 
-* 精簡技術參考：[PGID 串接 API 手冊](../../docs/api/PGID-integration.md)
+* [開發者串接總覽](overview.md)
 * [常見問題 FAQ](../faq.md)

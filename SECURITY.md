@@ -4,7 +4,7 @@ PGID currently runs as a deployed, invite-only production beta. Existing deploym
 
 This deployed state is not the same as full Production GO or general-public approval. Local source now emits and validates the central ID-token `sid`, but the visited-client ledger, replay-safe back-channel logout, recovery/rotation drills, independent review, and other gates below are still incomplete; no document may treat production traffic alone as proof that those controls passed.
 
-The repository's local source now includes the narrowly scoped Mail Path A introspection prerequisite and Passkey step-up for every OAuth client mutation, and has passed its full local typecheck, workerd, production-build, and test-RP protocol gate. Production has neither migration `0013`/`0014` nor this Worker version; `pgid-mail-introspect` has not been provisioned, no remote D1 operation was performed, and the mail VPS has not been cut over. These local results must not be represented as production behavior.
+The repository's local source now includes the narrowly scoped Mail Path A introspection prerequisite and Passkey step-up for every OAuth client mutation, and has passed its full local typecheck, workerd, production-build, and test-RP protocol gate. Production has none of migrations `0013`/`0014`/`0015` or this Worker version; `pgid-mail-introspect` has not been provisioned, no remote D1 operation was performed, and the mail VPS has not been cut over. These local results must not be represented as production behavior.
 
 ## Reporting
 

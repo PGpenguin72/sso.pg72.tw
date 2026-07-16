@@ -14,7 +14,9 @@
   - `anzhiyu`、`fuwari` 這兩個部落格(保留各自主題);
   - 任何從**別人倉庫 clone** 下來的內容(保持上游樣式);
   - 上游快照專案 file(File Browser)、webmail(Roundcube)的**核心**(只在自有的 gateway/包裝層套用,不改上游 UI)。
-- 進行前先列出 `~` 下的專案資料夾,逐一判定「自有原創 vs clone/blog」,不確定的先問(寫進 msg.md),不亂改。
+- 跨 repository 工作前先依 [`handoff.md`](../handoff.md) 的 current governance
+  確認 scope 與授權；不確定時透過現行 owner/orchestrator channel 釐清，不再
+  寫入已關閉的 historical `msg.md`。
 
 ## 1. 風格定調(Linear / Modern)
 

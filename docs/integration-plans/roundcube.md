@@ -230,7 +230,13 @@ Current target 是第一列的 Dovecot Path A。其餘列只保留為 rollback �
 - [x] Local source 已實作真正的 Passkey step-up，涵蓋 required UV、exact origin/RP ID、session/user-bound one-time challenge、replay/expiry/credential isolation 與六條 client mutation gate。
 - [ ] Owner 安排獨立安全 review，並在 production 套用 migration / deploy 後完成實機 ceremony smoke；`<10m` session-age freshness 仍不能代替 step-up。
 - [ ] Owner 已重新確認 production `pg72-webmail` exact metadata，並建立 private D1 backup / Time Travel 記錄。
-- [ ] Owner 已依序套用 local migrations `0013`、`0014`（最新既有 production record 只有 `0012`）。
+- [ ] Owner 已對 production `account(providerId, accountId)` 執行
+  [`handoff.md`](../../handoff.md) 的 duplicate preflight 並確認零筆結果；任何
+  duplicate 都必須停止 rollout，經獨立審查解決後才能繼續，不可由 migration
+  自動挑選、合併或刪除 owner。
+- [ ] Owner 已依序套用 local migrations `0013`、`0014`、`0015`（最新既有
+  production record 只有 `0012`）；`0015` 必須成功後才能部署 current Worker
+  candidate。
 - [ ] PGID Worker 已部署，`PASSKEY_STEP_UP_MAX_AGE_SECONDS=600`，且 `INTROSPECTION_IP_RATE_LIMITER` namespace `1004` 與 `INTROSPECTION_CLIENT_RATE_LIMITER` namespace `1005` bindings 均存在。
 - [ ] 完成 Passkey step-up 後，以 same-origin fresh admin session provision `pgid-mail-introspect`，並立即將一次性 secret 放入 approved secret store/VPS secret config。
 - [ ] Production active/inactive/401 normal-flow smoke 通過；429/503 僅在 isolated Preview/controlled local test 驗證，沒有對 production flood/failure injection。
@@ -257,7 +263,7 @@ Current target 是第一列的 Dovecot Path A。其餘列只保留為 rollback �
 |---|---|---|---|
 | production Dovecot 狀態未重新查證 | 高 | Owner 已選 Path A，但本輪沒有確認實際版本、SASL capability、introspection/SMTP path 或 rollback | 維護窗口前由 owner 唯讀查證；未確認前不 cut over |
 | Passkey step-up 尚未部署 / 獨立審查 | 高 | Local implementation 與 regression 不代表 production ceremony 已可用 | 先套 `0014`、部署、獨立審查並 smoke，再 provision/rotate system client |
-| PGID prerequisite 尚未部署 | 高 | Local tests 通過不代表 production 已有 0013/0014、rate bindings 或 service client | 依 handoff owner runbook 逐步 deploy/provision/smoke，保留 rollback |
+| PGID prerequisite 尚未部署 | 高 | Local tests 通過不代表 production 已有 0013/0014/0015、provider duplicate preflight、rate bindings 或 service client | 先確認 duplicate preflight 為零筆，再依 handoff owner runbook 套用 0013/0014/0015；任何衝突或 migration failure 都停止 rollout，保留 rollback |
 | Web UI OIDC 假象 | 高 | Web 登入成功不代表 IMAP/SMTP 已通過認證 | 明確分開 §3 兩層，各自驗收 |
 | app password 與撤銷脫鉤 | 高 | 最後手段下，PGID 撤銷無法讓 mail 憑證失效 | 僅作最後手段；獨立生命週期管理 + audit；優先推 backend 支援 OAuth |
 | 單一 audience 與 mail token 衝突 | 中-高 | SECURITY.md 拒 RFC 8707 `resource`；mail backend 若要求自行驗專屬 audience 會衝突 | 固定使用 scoped introspection，不讓 Dovecot 以 JWKS 解 opaque token；若 backend 不接受此模式則停止 Path A rollout |

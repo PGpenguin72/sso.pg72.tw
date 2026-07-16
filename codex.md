@@ -589,7 +589,9 @@ Audit metadata 不得包含 access token、refresh token、session token、autho
 - 不建立 `Domain=.pg72.tw` 共用 session cookie。
 - OAuth Authorization Code Flow 強制 PKCE S256、`state`、`nonce` 與 issuer/audience 驗證。
 - Redirect URI 完整比對，不允許 wildcard。
-- ID/access token 使用非對稱簽章並發布 JWKS。
+- ID token 與 back-channel logout JWT 使用非對稱簽章並透過 JWKS 驗證。現行
+  `pg72_at_` access token 是 opaque；一般 RP 使用 UserInfo，Mail Path A 使用
+  §10.5 的 scoped introspection，不得解析 access token 或用 JWKS 本地驗證。
 - 支援 signing key overlap rotation，舊 key 在既有短效 token 到期後才移除。
 - 所有 secret 經 Wrangler secrets/Secrets Store 管理，不寫入 repo、log 或 D1 明文。
 - Recovery code（未來實作時）、refresh token、client secret 與 invitation token 只保存不可逆 hash，除非協議明確要求可還原資料。

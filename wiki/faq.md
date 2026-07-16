@@ -3,7 +3,7 @@
 ## 一般使用者
 
 **Q：PGID 是什麼？**
-A：PG72 自己掌控的單一登入系統。一個帳號登入所有 PG72 服務，日常用 Google 與 Passkey 登入。詳見[認識 PGID](README.md)。
+A：PG72 自己掌控的單一登入系統。一個帳號登入已接入 PGID 的 PG72 服務，日常用 Google 與 Passkey 登入。詳見[認識 PGID](README.md)。
 
 **Q：我需要記密碼嗎？**
 A：不需要。日常登入用 Google 或 Passkey（指紋 / 臉部 / 硬體金鑰），沒有密碼。

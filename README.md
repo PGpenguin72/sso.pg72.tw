@@ -139,6 +139,7 @@ The local test RP is a public client. It has no client secret; its transaction s
 
 ```bash
 pnpm check
+pnpm security:tools:install
 pnpm security:check
 pnpm dast:local
 ```
@@ -149,11 +150,14 @@ relying-party protocol tests, Wiki route/link/header validation, and production
 and static builds.
 
 `pnpm security:check` runs type-aware Promise analysis over both Workers,
-secret scanning, GitHub workflow and Wrangler-schema validation, the exact
-dependency advisory policy, a production `wrangler deploy --dry-run --outdir`
-artifact gate, a path-free dependency/license inventory, and negative tests for
-the automation itself. The audit covers runtime, build, and development
-dependencies so tooling advisories cannot bypass the gate.
+required checksum-pinned Gitleaks history scanning, a redacted bounded scanner
+over tracked/untracked files and ignored sensitive filenames, captured
+Secretlint, recursive workflow/package-script allowlists, exact source/generated
+Wrangler binding targets, the dependency advisory policy, a production
+`wrangler deploy --dry-run --outdir` artifact gate, a path-free
+dependency/license inventory, and negative tests for the automation itself. The
+audit covers runtime, build, and development dependencies so tooling advisories
+cannot bypass the gate.
 
 The audit currently reports the accepted Moderate `GHSA-p2fr-6hmx-4528`.
 [`security/accepted-advisories.json`](./security/accepted-advisories.json)
@@ -163,8 +167,11 @@ waiver remains, expires, or is joined by any unrecorded finding. High and
 Critical advisories cannot be waived by this file.
 
 `pnpm dast:local` creates fresh temporary local D1 state, starts ephemeral PGID
-and test-RP Workers on loopback, and runs credential-free public/error probes.
-It terminates both process groups and deletes the synthetic state afterward.
+and test-RP Workers only at literal `127.0.0.1:5173`/`:5174`, and runs
+credential-free public/error probes without following redirects or permitting
+Host overrides. It terminates both process groups and deletes the synthetic
+state afterward.
+
 The protected manual Preview path and its limitations are documented in the
 [release-security runbook](./docs/runbooks/release-security.md); it has not been
 run by this source change.

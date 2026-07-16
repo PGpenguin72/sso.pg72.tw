@@ -36,19 +36,21 @@ Run the tracked local gates from a frozen install:
 
 ```bash
 pnpm check
+pnpm security:tools:install
 pnpm security:check
 pnpm dast:local
 ```
 
-`pnpm security:check` combines type-aware Worker Promise analysis, Gitleaks
-history scanning (or the pinned Secretlint fallback when the native tool is not
-installed), actionlint plus deterministic workflow checks, Wrangler JSON Schema
-and production-binding checks, exact dependency-advisory reconciliation, a
-production Worker dry-run artifact scan, and a dependency/license inventory.
-The artifact gate rejects source maps, private machine paths, secret patterns,
-unexpected files, binding/config drift, and size-limit regressions. CI installs
-actionlint and Gitleaks from checksum-pinned upstream release archives and keeps
-the redacted inventories for seven days.
+`pnpm security:check` combines type-aware Worker Promise analysis, required
+checksum-pinned Gitleaks full-history scanning, an explicit bounded/redacted
+tracked/untracked/ignored-sensitive-path scan plus captured Secretlint,
+actionlint and recursive workflow/package-script allowlists, exact source and
+generated Wrangler binding/resource contracts, dependency-advisory
+reconciliation, a production Worker dry-run artifact scan, and a
+dependency/license inventory. The artifact gate uses the same redacted secret
+families for text and bounded binary strings and rejects source maps, private
+machine paths, unexpected files, binding/config drift, and size regressions. CI
+keeps only the redacted inventories for seven days.
 
 `pnpm dast:local` starts only ephemeral loopback Workers with synthetic values
 and fresh local D1 state. Its credential-free probes cover health/readiness,
@@ -59,12 +61,14 @@ not cover real login, consent, authenticated admin/gateway/logout behavior,
 abuse/load testing, or an independent review.
 
 The separate `Isolated Preview DAST` workflow is manual and targets only the
-exact origin configured in the protected `isolated-preview` environment. It
-also requires an explicit owner opt-in and a fixed
-`pg72-id-preview.<account-subdomain>.workers.dev` hostname. The scanner rejects
-the production origin, custom domains, arbitrary targets, credentials, and URL
-paths before making a request. This workflow has not been run or treated as
-Preview evidence by this source change. See
+exact origin committed to `security/dast-policy.json` and repeated in the
+protected `isolated-preview` environment. A job-level guard permits only owner
+`PGpenguin72` on `refs/heads/main`, including reruns, before any step starts.
+The approved origin is intentionally `null` until the owner commits the actual
+`pg72-id-preview.<account-subdomain>.workers.dev` origin, so the workflow
+currently fails before any DAST HTTP request. Production, custom domains,
+Pages, lookalikes, credentials, and URL paths are rejected. This workflow has
+not been run or treated as Preview evidence by this source change. See
 [`docs/runbooks/release-security.md`](./docs/runbooks/release-security.md).
 
 ## Full Production GO and Public Registration Gate

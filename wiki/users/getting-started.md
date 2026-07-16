@@ -22,7 +22,8 @@ Production 目前是 **invite-only beta**。Google email 已驗證只是必要�
 > 公開註冊的 local source 已加入 Turnstile 驗證、目前服務條款/隱私權政策
 > 的明確同意與一次性註冊 intent，但 production 尚未套用 migration、配置或
 > 啟用。未來即使經完整安全 gate、獨立審查與 owner 核准切換至 public，
-> Google 仍必須提供 verified email；Passkey 與 Telegram 仍不能建立新帳號。
+> Google 仍必須提供 verified email，而且是唯一的公開建帳 provider；Passkey、Telegram
+> 與其他可選社群登入都不能建立新帳號，只能用於符合各自綁定規則的既有帳號。
 
 註冊完成後，強烈建議立刻[設定一組 Passkey](passkey.md)，之後就能無密碼快速登入，也多一層安全保障。
 

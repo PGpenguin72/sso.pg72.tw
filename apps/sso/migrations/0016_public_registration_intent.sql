@@ -40,25 +40,41 @@ BEGIN
 END;
 
 CREATE TABLE "public_registration_intent" (
-  "id" text NOT NULL PRIMARY KEY,
+  "intent_hash" text NOT NULL PRIMARY KEY,
   "terms_version" text NOT NULL,
   "privacy_version" text NOT NULL,
   "turnstile_hostname" text NOT NULL,
   "turnstile_action" text NOT NULL
     CHECK ("turnstile_action" = 'pgid_public_registration'),
+  "oauth_reference_hash" text,
+  "oauth_state_hash" text,
   "created_at" date NOT NULL,
   "expires_at" date NOT NULL,
   "consumed_at" date,
-  CHECK (length("id") = 43),
+  CHECK (length("intent_hash") = 43),
   CHECK (length("terms_version") BETWEEN 1 AND 64),
   CHECK (length("privacy_version") BETWEEN 1 AND 64),
   CHECK (length("turnstile_hostname") BETWEEN 1 AND 253),
+  CHECK (
+    ("oauth_reference_hash" IS NULL AND "oauth_state_hash" IS NULL)
+    OR
+    (
+      "oauth_reference_hash" IS NOT NULL
+      AND "oauth_state_hash" IS NOT NULL
+      AND length("oauth_reference_hash") = 43
+      AND length("oauth_state_hash") = 43
+    )
+  ),
   CHECK ("expires_at" > "created_at"),
   CHECK ("consumed_at" IS NULL OR "consumed_at" >= "created_at")
 );
 
 CREATE INDEX "public_registration_intent_expiry_idx"
   ON "public_registration_intent" ("expires_at", "consumed_at");
+
+CREATE UNIQUE INDEX "public_registration_intent_oauth_reference_idx"
+  ON "public_registration_intent" ("oauth_reference_hash")
+  WHERE "oauth_reference_hash" IS NOT NULL;
 
 CREATE TRIGGER "user_legal_acceptance_insert_guard"
 BEFORE INSERT ON "user"

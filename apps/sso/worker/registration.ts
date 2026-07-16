@@ -2,7 +2,10 @@ import { APIError } from "better-auth/api";
 
 import { recordAudit, type WaitUntilContext } from "./audit";
 import { normalizeEmail, type RuntimeConfig } from "./config";
-import { claimPublicRegistrationIntent } from "./public-registration";
+import {
+  claimPublicRegistrationIntent,
+  type PublicRegistrationOAuthBinding,
+} from "./public-registration";
 
 interface InvitationRow {
   id: string;
@@ -20,7 +23,8 @@ export interface RegistrationInput {
   emailVerified: boolean;
   /** Client IP taken from `cf-connecting-ip`; `"local"` when absent. */
   clientIp: string;
-  registrationIntentId?: string;
+  providerId?: string;
+  registrationBinding?: PublicRegistrationOAuthBinding;
 }
 
 export interface RegistrationGrant {
@@ -78,15 +82,26 @@ export async function authorizeRegistration(
     });
   }
 
-  const legalAcceptance =
-    config.registrationMode === "public"
-      ? await claimPublicRegistrationIntent(
-          env,
-          config,
-          input.registrationIntentId,
-          executionCtx,
-        )
-      : {};
+  let legalAcceptance: Partial<RegistrationGrant> = {};
+  if (config.registrationMode === "public") {
+    if (input.providerId !== "google") {
+      await recordAudit(
+        env,
+        { eventType: "registration.denied", outcome: "denied" },
+        executionCtx,
+      );
+      throw new APIError("FORBIDDEN", {
+        code: "REGISTRATION_PREREQUISITE_REQUIRED",
+        message: "Complete registration verification before creating an account.",
+      });
+    }
+    legalAcceptance = await claimPublicRegistrationIntent(
+      env,
+      config,
+      input.registrationBinding,
+      executionCtx,
+    );
+  }
 
   // Invitations stay functional in public mode: a pending invitation still
   // assigns its role and is consumed by the create.after hook.

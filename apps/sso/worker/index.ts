@@ -34,7 +34,14 @@ import {
   oauthReportRoutes,
 } from "./oauth-reports";
 import { passkeyStepUpRoutes } from "./passkey-step-up";
-import { publicRegistrationRoutes } from "./public-registration";
+import {
+  bindPublicRegistrationOAuthState,
+  preparePublicRegistrationOAuthStart,
+  PUBLIC_REGISTRATION_STATE_KEY,
+  publicRegistrationRoutes,
+  readStrictJson as readRegistrationJson,
+  RegistrationIntentError,
+} from "./public-registration";
 import { ASSIGNABLE_ROLES, isPlatformRole } from "./roles";
 import {
   ACTIVITY_AUDIT_PATHS,
@@ -88,6 +95,11 @@ interface ConsentClientInfoRow {
 interface AuthRedirectPayload {
   redirect: true;
   url: string;
+}
+
+interface RegistrationSocialStartInput {
+  callbackURL?: unknown;
+  intentId?: unknown;
 }
 
 interface OAuthMetadata {
@@ -602,6 +614,105 @@ app.route("/", accountRoutes);
 app.route("/", oauthReportRoutes);
 app.route("/", telegramRoutes);
 app.route("/", publicRegistrationRoutes);
+
+app.use(
+  "/api/registration/social-start",
+  bodyLimit({
+    maxSize: 4 * 1024,
+    onError: (c) => c.json({ error: "request_too_large" }, 413),
+  }),
+);
+
+app.post("/api/registration/social-start", async (c) => {
+  const config = readRuntimeConfig(c.env);
+  if (!config.publicRegistration) {
+    return c.json({ error: "registration_not_open" }, 403);
+  }
+  if (c.req.header("origin") !== config.authBaseUrl) {
+    return c.json({ error: "invalid_origin" }, 403);
+  }
+
+  const input = await readRegistrationJson<RegistrationSocialStartInput>(
+    c.req.raw,
+  );
+  if (
+    typeof input?.callbackURL !== "string" ||
+    typeof input.intentId !== "string"
+  ) {
+    return c.json({ error: "invalid_registration_start" }, 400);
+  }
+
+  const clientIp = c.req.header("cf-connecting-ip") ?? "local";
+  try {
+    const limit = await c.env.AUTH_RATE_LIMITER.limit({
+      key: `registration-social-start:${clientIp}`,
+    });
+    if (!limit.success) {
+      return c.json({ error: "registration_rate_limited" }, 429);
+    }
+  } catch {
+    return c.json({ error: "registration_verification_unavailable" }, 503);
+  }
+
+  try {
+    const prepared = await preparePublicRegistrationOAuthStart(
+      c.env,
+      config,
+      input.intentId,
+    );
+    const headers = new Headers(c.req.raw.headers);
+    headers.delete("content-length");
+    headers.set("content-type", "application/json");
+    const auth = createAuth(c.env, c.executionCtx);
+    const authResponse = await auth.handler(
+      new Request(new URL("/sign-in/social", config.authBaseUrl), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          additionalData: {
+            [PUBLIC_REGISTRATION_STATE_KEY]: prepared.oauthReference,
+          },
+          callbackURL: input.callbackURL,
+          provider: "google",
+          requestSignUp: true,
+        }),
+      }),
+    );
+    if (!authResponse.ok) return authResponse;
+
+    let redirect: AuthRedirectPayload;
+    try {
+      redirect = (await authResponse.clone().json()) as AuthRedirectPayload;
+    } catch {
+      return c.json({ error: "registration_verification_unavailable" }, 503);
+    }
+    if (redirect.redirect !== true || typeof redirect.url !== "string") {
+      return c.json({ error: "registration_verification_unavailable" }, 503);
+    }
+    let oauthState: string | null;
+    try {
+      oauthState = new URL(redirect.url).searchParams.get("state");
+    } catch {
+      return c.json({ error: "registration_verification_unavailable" }, 503);
+    }
+    if (!oauthState) {
+      return c.json({ error: "registration_verification_unavailable" }, 503);
+    }
+
+    await bindPublicRegistrationOAuthState(
+      c.env,
+      config,
+      prepared,
+      oauthState,
+    );
+    return authResponse;
+  } catch (error) {
+    if (error instanceof RegistrationIntentError) {
+      return c.json({ error: error.code }, error.status);
+    }
+    throw error;
+  }
+});
 
 app.use("/oauth2/introspect", async (c, next) => {
   const ip = c.req.header("cf-connecting-ip") ?? "local";

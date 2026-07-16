@@ -18,11 +18,17 @@ import {
   assertSessionUserActive,
   authorizeRegistration,
 } from "./registration";
-import { registrationIntentIdFromOAuthState } from "./public-registration";
+import { registrationBindingFromOAuthState } from "./public-registration";
 import { effectivePlatformRole, hasPermission } from "./roles";
 import { recordLoginAudit, type AuthHookContext } from "./security-activity";
 
 type AuthDatabase = NonNullable<Parameters<typeof betterAuth>[0]["database"]>;
+
+function socialCallbackProvider(request: Request | undefined): string | undefined {
+  if (!request) return undefined;
+  const match = /^\/callback\/([^/]+)$/.exec(new URL(request.url).pathname);
+  return match?.[1];
+}
 
 export function createAuth(
   env: Env,
@@ -232,6 +238,10 @@ export function createAuth(
               ctx?.request?.headers.get("cf-connecting-ip") ??
               ctx?.headers?.get("cf-connecting-ip") ??
               "local";
+            const registrationBinding =
+              config.registrationMode === "public" && ctx?.request
+                ? registrationBindingFromOAuthState(await getOAuthState())
+                : undefined;
             const grant = await authorizeRegistration(
               env,
               config,
@@ -239,10 +249,8 @@ export function createAuth(
                 email: user.email,
                 emailVerified: user.emailVerified === true,
                 clientIp,
-                registrationIntentId:
-                  config.registrationMode === "public" && ctx?.request
-                    ? registrationIntentIdFromOAuthState(await getOAuthState())
-                    : undefined,
+                providerId: socialCallbackProvider(ctx?.request),
+                registrationBinding,
               },
               executionCtx,
             );

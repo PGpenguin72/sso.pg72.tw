@@ -79,6 +79,11 @@ interface RegistrationConfig {
   publicRegistration: PublicRegistrationOptions | null;
 }
 
+interface SocialRedirectPayload {
+  redirect: boolean;
+  url: string;
+}
+
 interface TurnstileApi {
   remove(widgetId: string): void;
   render(
@@ -829,7 +834,8 @@ export function SignInView({ pending }: { pending: boolean }) {
   // Hide the divider + grid entirely when nothing in the section is available.
   const showSocialSection =
     socialConfigReady &&
-    (visibleSocial.length > 0 || (!registering && telegramEnabled));
+    !registering &&
+    (visibleSocial.length > 0 || telegramEnabled);
 
   const resetRegistrationChallenge = () => {
     setTurnstileToken(null);
@@ -843,6 +849,10 @@ export function SignInView({ pending }: { pending: boolean }) {
   };
 
   const socialSignIn = async (provider: string, label: string) => {
+    if (registering && provider !== "google") {
+      setError("新帳號只能使用已驗證 Email 的 Google 帳號建立。");
+      return;
+    }
     setBusy(provider);
     setError(null);
     let registrationIntentId: string | undefined;
@@ -891,18 +901,21 @@ export function SignInView({ pending }: { pending: boolean }) {
     }
     await runSocialAuthenticationStart(
       () =>
-        authClient.signIn.social({
-          provider: provider as SocialProviderId,
-          callbackURL: window.location.href,
-          ...(registrationIntentId
-            ? {
-                additionalData: {
-                  pgidRegistrationIntent: registrationIntentId,
+        registrationIntentId
+          ? authClient.$fetch<SocialRedirectPayload>(
+              "/api/registration/social-start",
+              {
+                method: "POST",
+                body: {
+                  callbackURL: window.location.href,
+                  intentId: registrationIntentId,
                 },
-                requestSignUp: true,
-              }
-            : {}),
-        }),
+              },
+            )
+          : authClient.signIn.social({
+              provider: provider as SocialProviderId,
+              callbackURL: window.location.href,
+            }),
       `${label} 登入失敗，請稍後再試。`,
       (message) => {
         setError(message);

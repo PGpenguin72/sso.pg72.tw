@@ -64,7 +64,7 @@ Discovery 目前回報的重點欄位（對照 `@better-auth/oauth-provider@1.6.
 
 Google 社群登入的 callback（`https://sso.pg72.tw/callback/google`）是 **PGID 內部**與 Google 之間的路徑，RP 不會用到，也不應設定為自己的 redirect URI。
 
-`GET /api/registration/config` 與 `POST /api/registration/intent` 同樣是 PGID 第一方 UI 的內部註冊 prerequisite，不是 discovery 公布的 OIDC/RP contract，RP 不應呼叫或代理它們。Production 目前是 invite-only：config 回 `publicRegistration: null`，intent endpoint 拒絕建立。Local public path 只在 exact same-origin、目前政策版本皆明確接受且 Turnstile server-side 驗證成功後核發短效一次性 opaque intent；Turnstile secret 不會回給 browser。是否能建立帳號仍由 PGID callback 的 verified-email 與 registration policy 決定，RP 不可自行推論或繞過。
+`GET /api/registration/config`、`POST /api/registration/intent` 與 `POST /api/registration/social-start` 同樣是 PGID 第一方 UI 的內部註冊 prerequisite，不是 discovery 公布的 OIDC/RP contract，RP 不應呼叫或代理它們。Production 目前是 invite-only：config 回 `publicRegistration: null`，兩個 POST endpoint 拒絕建立。Local public path 只在 exact same-origin、目前政策版本皆明確接受且 Turnstile server-side 驗證成功後核發短效一次性 opaque intent；D1 只存 raw intent 的 SHA-256 digest。`social-start` 只啟動 Google，將 raw intent 換成獨立 reference，並在 server 綁定 Better Auth 實際 OAuth state；raw intent 不寫入 Better Auth verification value。Turnstile secret 不會回給 browser。是否能建立帳號仍由 PGID callback 的 Google verified-email 與 registration policy 決定，RP 不可自行推論或繞過。
 
 ---
 

@@ -1,6 +1,6 @@
 # 社群登入申請與設定教學
 
-PGID 已支援 Discord / GitHub / Facebook / Apple / Telegram 登入,但**目前都沒設定 secret,所以登入頁不會顯示這些按鈕**(自動隱藏,不影響 Google/Passkey)。Secret 值只能由授權 operator 直接寫入 Cloudflare secret store,不得貼到聊天或寫入檔案。Telegram 只可登入已從 authenticated PGID session 明確連結的既有帳號,不能在 invite 或 public mode 直接建立帳號。
+PGID 已支援 Discord / GitHub / Facebook / Apple / Telegram 登入,但**目前都沒設定 secret,所以登入頁不會顯示這些按鈕**(自動隱藏,不影響 Google/Passkey)。Secret 值只能由授權 operator 直接寫入 Cloudflare secret store,不得貼到聊天或寫入檔案。公開新帳號只可由 Google verified-email flow 建立;Discord / GitHub / Facebook / Apple 只供既有帳號登入或 authenticated session 中明確連結。Telegram 只可登入已從 authenticated PGID session 明確連結的既有帳號,不能在 invite 或 public mode 直接建立帳號。
 
 ## 共通:設定 secret 的方式
 
@@ -78,5 +78,6 @@ https://sso.pg72.tw/callback/<provider>
 ## 注意
 
 - 每個 provider **只有兩個(id+secret)都設好才會啟用**;沒設的就自動隱藏,不會壞。
+- 設定 optional provider 不會把它變成 public 建帳入口;公開新帳號仍固定使用 Google verified-email flow。
 - 這些 secret 只放 Wrangler secrets / Secrets Store,**不要**貼進 git、`wrangler.jsonc`、log、issue 或聊天。
 - Google 與 Passkey 是主力登入,社群登入是額外選項。

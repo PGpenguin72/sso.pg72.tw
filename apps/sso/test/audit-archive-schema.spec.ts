@@ -71,16 +71,32 @@ async function insertAuditEvent(
   const eventId = options.eventId ?? crypto.randomUUID();
   const occurredAt = options.occurredAt ?? at(index * 1_000);
   const actorRef = options.actorRef === undefined ? reference(index + 1) : options.actorRef;
+  const actorUserId = actorRef === null ? null : crypto.randomUUID();
+  if (actorUserId !== null) {
+    await env.PG72_ID_DB.prepare(
+      `INSERT INTO user
+        (id, name, email, emailVerified, createdAt, updatedAt, role, status)
+       VALUES (?, 'Archive Test Actor', ?, 1, ?, ?, 'user', 'active')`,
+    )
+      .bind(
+        actorUserId,
+        `${actorUserId}@archive-test.invalid`,
+        occurredAt,
+        occurredAt,
+      )
+      .run();
+  }
   await env.PG72_ID_DB.prepare(
     `INSERT INTO audit_event
       (id, event_type, actor_user_id, subject_id, client_id, session_id,
        outcome, ip_hash, user_agent_hash, metadata_json, occurred_at,
        actor_ref, actor_ref_hash_version)
-     VALUES (?, 'test.archive', NULL, ?, NULL, NULL,
+     VALUES (?, 'test.archive', ?, ?, NULL, NULL,
              'success', NULL, NULL, ?, ?, ?, ?)`,
   )
     .bind(
       eventId,
+      actorUserId,
       `subject:${index}`,
       JSON.stringify({ kind: "archive_test", ordinal: index }),
       occurredAt,

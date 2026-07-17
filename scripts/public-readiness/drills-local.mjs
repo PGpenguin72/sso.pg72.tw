@@ -7,12 +7,15 @@ import { fileURLToPath } from "node:url";
 import {
   dependencyStatus,
   runGlobalLogoutDependencyProof,
+  runRecoveryDependencyProof,
+  runReleaseAutomationDependencyProof,
 } from "./dependency-contracts.mjs";
 import { DRILL_DEFINITIONS } from "./drill-contract.mjs";
 import {
   applyAllMigrations,
+  assertIntegratedMigrationLedger,
   collectD1Manifest,
-  expectedMigrationLedger,
+  expectedIntegratedMigrationLedger,
 } from "./d1-manifest.mjs";
 import { runBoundedProfile } from "./load-profiles.mjs";
 import {
@@ -142,6 +145,8 @@ export async function runLocalDrills() {
     stage = "workerd_suites";
     runFocusedDrillTests(temporaryRoot);
     dependencyProofs.push(runGlobalLogoutDependencyProof(temporaryRoot));
+    dependencyProofs.push(runRecoveryDependencyProof(temporaryRoot));
+    dependencyProofs.push(runReleaseAutomationDependencyProof(temporaryRoot));
     stage = "migrations";
     applyAllMigrations(temporaryRoot);
     stage = "runtime";
@@ -162,8 +167,8 @@ export async function runLocalDrills() {
     stage = "manifest";
     const manifest = collectD1Manifest(temporaryRoot);
     assert.deepEqual(
-      manifest.migrationLedger,
-      expectedMigrationLedger(path.join(ssoRoot, "migrations")),
+      assertIntegratedMigrationLedger(manifest.migrationLedger),
+      expectedIntegratedMigrationLedger(path.join(ssoRoot, "migrations")),
     );
     assert.equal(manifest.integrityOk, true);
     assert.equal(manifest.foreignKeysOk, true);

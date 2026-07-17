@@ -162,8 +162,8 @@ test("completed continuity evidence requires a populated migration-ledger summar
     export: { bytes: 1_024, sha256: "a".repeat(64) },
     failure: { class: "none", stage: "none" },
     migrationLedger: {
-      count: 18,
-      head: "0018_global_logout.sql",
+      count: 19,
+      head: "0019_recovery_codes.sql",
       sha256: "b".repeat(64),
     },
     ready: true,
@@ -177,9 +177,10 @@ test("completed continuity evidence requires a populated migration-ledger summar
   assert.doesNotThrow(() => validateClosedReport(completed));
   for (const migrationLedger of [
     { count: 0, head: null, sha256: null },
-    { count: 18, head: "0001_global_logout.sql", sha256: "b".repeat(64) },
-    { count: 18, head: "not-a-migration", sha256: "b".repeat(64) },
-    { count: 18, head: "0018_global_logout.sql", sha256: "0" },
+    { count: 18, head: "0018_global_logout.sql", sha256: "b".repeat(64) },
+    { count: 19, head: "0019_lookalike.sql", sha256: "b".repeat(64) },
+    { count: 19, head: "not-a-migration", sha256: "b".repeat(64) },
+    { count: 19, head: "0019_recovery_codes.sql", sha256: "0" },
   ]) {
     assert.throws(() =>
       validateClosedReport({ ...completed, migrationLedger }),

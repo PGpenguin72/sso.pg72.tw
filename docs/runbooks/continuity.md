@@ -71,10 +71,14 @@ promote it to `verified`; caller-provided dependency names are rejected. Empty,
 truncated, lookalike, malformed, or comment-only configuration cannot be
 promoted. The integrated global-logout proof requires the exact Vitest file and
 suite to report 25 passed assertions with zero failed, skipped, pending, or todo
-tests; exit status alone is insufficient. In particular, missing recovery
-migration `0019`, observability migration `0020`, encrypted R2 archive
-integration, or release automation remains fail-closed until that slice and
-its same-run exercise are integrated and reviewed.
+tests; exit status alone is insufficient. Recovery uses the exact recovery
+Vitest file and requires 4 suites and 20 passed assertions across the three
+fixed recovery groups. Release automation uses an exact Node test event stream
+and requires all 89 tests from the nine fixed security test files to pass with
+zero failed, cancelled, skipped, or todo results. In particular, missing
+observability migration `0020` or encrypted R2 archive integration remains
+fail-closed until that slice and its same-run exercise are integrated and
+reviewed.
 
 `ready: true` requires a clean attributed commit, every exact local invariant,
 successful cleanup, and all five dependency contracts verified by the same

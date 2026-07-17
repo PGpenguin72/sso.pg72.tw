@@ -192,6 +192,7 @@ export function createLocalProject(
       { name: "REGISTRATION_RATE_LIMITER", namespace_id: "9103", simple: { limit: 1000, period: 60 } },
       { name: "INTROSPECTION_IP_RATE_LIMITER", namespace_id: "9104", simple: { limit: 1000, period: 60 } },
       { name: "INTROSPECTION_CLIENT_RATE_LIMITER", namespace_id: "9105", simple: { limit: 1000, period: 60 } },
+      { name: "RECOVERY_RATE_LIMITER", namespace_id: "9106", simple: { limit: 1000, period: 60 } },
     ],
     queues: {
       producers: [
@@ -204,6 +205,7 @@ export function createLocalProject(
       PASSKEY_RP_ID: "127.0.0.1",
       PASSKEY_ORIGIN: origin,
       PASSKEY_STEP_UP_MAX_AGE_SECONDS: "600",
+      RECOVERY_MODE: "disabled",
       REGISTRATION_MODE: "invite",
       ENVIRONMENT: "development",
     },

@@ -121,7 +121,7 @@ Before enabling `REGISTRATION_MODE=public` or declaring full Production GO, comp
   session/token revocation, and RP logout-delivery drill before any
   owner-approved enablement;
 - signing-key rotation, D1 restore, and Queue retry/DLQ drills;
-- integrate and independently review the recovery, observability, encrypted R2 archive, and release-automation dependencies required by the local continuity/drill reports; then record a clean synthetic run without treating it as remote evidence;
+- independently review the integrated local recovery and release-automation source/proofs, finalize the Worker artifact identity for the exact release candidate, and integrate and independently review observability plus encrypted R2 archive; only then record a clean synthetic run without treating it as remote evidence;
 - deploy, configure, independently review, and smoke-test the locally implemented Turnstile, versioned Terms/Privacy acceptance, and restricted-account paths after applying migrations `0016` and `0017`; the owner must approve the exact live policy versions, validate the initial abuse thresholds in Preview, assign an operator, and test external alert delivery;
 - deploy and independently review the locally implemented Passkey step-up for high-risk system-client provisioning and secret rotation; production must apply migration `0014`, and the session-age freshness check remains an additional condition rather than a substitute;
 - no unresolved Critical or High finding; every accepted Medium still needs an owner, deadline, and compensating control.

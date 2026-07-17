@@ -22,14 +22,17 @@ import {
 import {
   dependencyStatus,
   runGlobalLogoutDependencyProof,
+  runRecoveryDependencyProof,
+  runReleaseAutomationDependencyProof,
 } from "./dependency-contracts.mjs";
 import {
   applyAllMigrations,
   assertEquivalentD1,
+  assertIntegratedMigrationLedger,
   collectD1Manifest,
   executeD1,
   executeD1File,
-  expectedMigrationLedger,
+  expectedIntegratedMigrationLedger,
   exportD1,
   queryRows,
   readContinuityRecords,
@@ -573,6 +576,8 @@ export async function runContinuityLocal() {
     stage = "workerd_suites";
     runFocusedContinuityTests(temporaryRoot);
     dependencyProofs.push(runGlobalLogoutDependencyProof(temporaryRoot));
+    dependencyProofs.push(runRecoveryDependencyProof(temporaryRoot));
+    dependencyProofs.push(runReleaseAutomationDependencyProof(temporaryRoot));
     stage = "migrations";
     applyAllMigrations(sourceProject);
     stage = "seed";
@@ -591,8 +596,8 @@ export async function runContinuityLocal() {
     classifiedStage("ContinuityInvariantError", () => {
       exactFixtureChecks(sourceRecords, fixture);
       assert.deepEqual(
-        sourceManifest.migrationLedger,
-        expectedMigrationLedger(path.join(ssoRoot, "migrations")),
+        assertIntegratedMigrationLedger(sourceManifest.migrationLedger),
+        expectedIntegratedMigrationLedger(path.join(ssoRoot, "migrations")),
       );
       assert.equal(sourceManifest.integrityOk, true);
       assert.equal(sourceManifest.foreignKeysOk, true);

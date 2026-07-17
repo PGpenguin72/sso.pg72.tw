@@ -29,6 +29,7 @@ test("accepts the exact typed production and local test-RP source contracts", ()
 test("rejects every production binding resource and tuning mutation", () => {
   const mutations = [
     ["route", (value) => (value.routes[0].pattern = "login.pg72.tw")],
+    ["cron", (value) => (value.triggers.crons[0] = "0 0 * * *")],
     ["assets", (value) => (value.assets.binding = "PUBLIC")],
     ["D1 name", (value) => (value.d1_databases[0].database_name = "other-db")],
     ["D1 id", (value) => (value.d1_databases[0].database_id = "11111111-1111-1111-1111-111111111111")],
@@ -38,9 +39,14 @@ test("rejects every production binding resource and tuning mutation", () => {
     ["Queue batch", (value) => (value.queues.consumers[0].max_batch_size = 11)],
     ["Queue timeout", (value) => (value.queues.consumers[0].max_batch_timeout = 6)],
     ["Queue retries", (value) => (value.queues.consumers[0].max_retries = 6)],
+    ["logout Queue producer", (value) => (value.queues.producers[1].queue = "other-logout")],
+    ["logout Queue consumer", (value) => (value.queues.consumers[1].queue = "other-logout")],
+    ["logout Queue DLQ", (value) => (value.queues.consumers[1].dead_letter_queue = "other-logout-dlq")],
     ["Rate Limit namespace", (value) => (value.ratelimits[0].namespace_id = "9999")],
     ["Rate Limit limit", (value) => (value.ratelimits[0].simple.limit = 31)],
     ["Rate Limit period", (value) => (value.ratelimits[0].simple.period = 10)],
+    ["Recovery Rate Limit", (value) => (value.ratelimits[5].simple.limit = 11)],
+    ["Recovery mode", (value) => (value.vars.RECOVERY_MODE = "enabled")],
     ["secret names", (value) => value.secrets.required.push("UNREVIEWED_SECRET")],
     ["remote binding", (value) => (value.d1_databases[0].remote = true)],
   ];
@@ -69,8 +75,11 @@ test("accepts only the exact normalized generated production contract", () => {
     ["asset directory", (value) => (value.assets.directory = "../../unreviewed")],
     ["generated D1 target", (value) => (value.d1_databases[0].database_name = "other-db")],
     ["generated Queue target", (value) => (value.queues.producers[0].queue = "other-events")],
+    ["generated cron", (value) => (value.triggers.crons[0] = "0 0 * * *")],
+    ["generated logout Queue", (value) => (value.queues.producers[1].queue = "other-logout")],
     ["generated DLQ", (value) => (value.queues.consumers[0].dead_letter_queue = "other-dlq")],
     ["generated Rate Limit", (value) => (value.ratelimits[0].simple.limit = 999)],
+    ["generated Recovery mode", (value) => (value.vars.RECOVERY_MODE = "enabled")],
     ["unexpected R2 binding", (value) => value.r2_buckets.push({ binding: "LEAK", bucket_name: "prod" })],
   ]) {
     const changed = structuredClone(generated);

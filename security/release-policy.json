@@ -44,6 +44,9 @@
             "customDomain": true
           }
         ],
+        "triggers": {
+          "crons": ["* * * * *"]
+        },
         "assets": {
           "type": "assets",
           "name": "ASSETS",
@@ -57,6 +60,7 @@
           { "type": "plain-var", "name": "PASSKEY_RP_ID", "value": "sso.pg72.tw" },
           { "type": "plain-var", "name": "PASSKEY_ORIGIN", "value": "https://sso.pg72.tw" },
           { "type": "plain-var", "name": "PASSKEY_STEP_UP_MAX_AGE_SECONDS", "value": "600" },
+          { "type": "plain-var", "name": "RECOVERY_MODE", "value": "disabled" },
           { "type": "plain-var", "name": "REGISTRATION_MODE", "value": "invite" },
           { "type": "plain-var", "name": "ENVIRONMENT", "value": "production" }
         ],
@@ -87,6 +91,11 @@
               "type": "queue-producer",
               "name": "SECURITY_EVENTS",
               "target": "pg72-id-security-events"
+            },
+            {
+              "type": "queue-producer",
+              "name": "LOGOUT_DELIVERIES",
+              "target": "pg72-id-logout-deliveries"
             }
           ],
           "consumers": [
@@ -98,6 +107,15 @@
               "maxBatchSize": 10,
               "maxBatchTimeout": 5,
               "maxRetries": 5
+            },
+            {
+              "type": "queue-consumer",
+              "name": "pg72-id-logout-deliveries-consumer",
+              "target": "pg72-id-logout-deliveries",
+              "deadLetterTarget": "pg72-id-logout-deliveries-dlq",
+              "maxBatchSize": 10,
+              "maxBatchTimeout": 5,
+              "maxRetries": 5
             }
           ]
         },
@@ -106,7 +124,8 @@
           { "type": "rate-limit", "name": "ADMIN_RATE_LIMITER", "target": "1002", "limit": 20, "period": 60 },
           { "type": "rate-limit", "name": "REGISTRATION_RATE_LIMITER", "target": "1003", "limit": 5, "period": 60 },
           { "type": "rate-limit", "name": "INTROSPECTION_IP_RATE_LIMITER", "target": "1004", "limit": 1200, "period": 60 },
-          { "type": "rate-limit", "name": "INTROSPECTION_CLIENT_RATE_LIMITER", "target": "1005", "limit": 600, "period": 60 }
+          { "type": "rate-limit", "name": "INTROSPECTION_CLIENT_RATE_LIMITER", "target": "1005", "limit": 600, "period": 60 },
+          { "type": "rate-limit", "name": "RECOVERY_RATE_LIMITER", "target": "1006", "limit": 10, "period": 60 }
         ],
         "observability": {
           "enabled": true,

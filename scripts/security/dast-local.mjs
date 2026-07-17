@@ -182,6 +182,8 @@ async function main() {
         "--var",
         "PASSKEY_STEP_UP_MAX_AGE_SECONDS:600",
         "--var",
+        "RECOVERY_MODE:disabled",
+        "--var",
         "REGISTRATION_MODE:invite",
         "--var",
         "ENVIRONMENT:development",

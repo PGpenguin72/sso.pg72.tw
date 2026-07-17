@@ -13,8 +13,8 @@ const workflowDigests = Object.freeze({
 const packageContracts = Object.freeze({
   ".": Object.freeze({
     file: "package.json",
-    fileDigest: "5918fbc11718f01d9298a6c96f5716c202769d3c80b251d005fbb0069db338a9",
-    scriptsDigest: "ed08a1eee1e256ba7e382e7a37fb4ac2f2c58c70c152fdb125e1b64691875bdd",
+    fileDigest: "783246633bf965c32f47b43622677e50b118f218bb6328f9577b08a5381fdc38",
+    scriptsDigest: "7db676862a8557b0d2a08f0f82a55ae64d306f1832c3a10e69250c000294ebd1",
   }),
   "apps/sso": Object.freeze({
     file: "apps/sso/package.json",
@@ -23,7 +23,7 @@ const packageContracts = Object.freeze({
   }),
   "apps/test-rp": Object.freeze({
     file: "apps/test-rp/package.json",
-    fileDigest: "ec8c0e2dd637f450dbcc683ccace0d630125aa620fe8a7ca05f1baa26136f033",
+    fileDigest: "20f93ab0f93e12cd7ec18c8a3926238e55e5c7bb0f3705797943bea96ce8ed68",
     scriptsDigest: "27f7ead993f9e39bbe49e0df769eefd977be898a52d0e55f57175a29fbbf1af8",
   }),
   wiki: Object.freeze({
@@ -42,13 +42,13 @@ const pnpmWorkspaceContract = Object.freeze({
 
 const pnpmLockfileContract = Object.freeze({
   file: "pnpm-lock.yaml",
-  digest: "8edc8aab209e831a3d50f857ca59cad643bcbfc8b705b3f544d3d5a598ad82b3",
+  digest: "318d3fb68b15384f374cfb7d4a81b7cec543b1e275aa8b8cd0b5697b0af1dcdc",
 });
 
 const patchContracts = Object.freeze({
   "@better-auth__oauth-provider@1.6.23.patch":
-    "1f29a064e1624b9e96d7b2ee1b5bdb7e593834de2aed1cb1b4f59b27dae28c2d",
-  "README.md": "5ae6a4d06f5243c5758644138961c330646e41aa105464ab6c4442dd113495d8",
+    "98ee2635aa622b1dd846c50a6cc414e81b3fa976aeb6499e9dc9581b4faae5bb",
+  "README.md": "e1cccd28b6dbf29c2d063645fd3d988113f3bcdaaa28ef4da3c09297f28378e9",
 });
 
 const prohibitedWorkspacePnpmfiles = Object.freeze([

@@ -57,9 +57,9 @@ const codeOwnedWorkflowSourceDigests = Object.freeze({
   "dast-preview.yml": "9826177b4315c8f0ca29fe812508349d1ac0fcab6e3cce9d1e0772c9c124e711",
 });
 const codeOwnedReachablePackageScriptDigest =
-  "04c31e7ea87041f5841a7904a5cba6dc28c32355ae03c93364ec191139a7b98f";
+  "98547eca8d6e8bd2ea927b40022e22589246a514a98a5d7ea47588becff8c8f0";
 const codeOwnedCompletePackageScriptDigest =
-  "8f70fedf8ed6cc7a476ba9773f30a4ee5b0e27800b32b86b5701a194691e524b";
+  "c7845bbe3711fb62111f2ccb929dafb45de20579232218f89202b16fb4f09679";
 const codeOwnedWorkflowRuns = Object.freeze({
   "ci.yml": Object.freeze({
     "verify:1": "node scripts/security/release-identity.mjs",
@@ -78,7 +78,7 @@ const codeOwnedWorkflowRuns = Object.freeze({
 });
 const codeOwnedReachablePackageScripts = Object.freeze({
   ".": Object.freeze({
-    check: "pnpm test:clean-dist && pnpm --filter @pg72/id check && pnpm --filter @pg72/test-rp check && pnpm --filter @pg72/wiki check",
+    check: "pnpm test:clean-dist && pnpm test:public-readiness && pnpm --filter @pg72/id check && pnpm --filter @pg72/test-rp check && pnpm --filter @pg72/wiki check",
     "dast:local": "node scripts/security/dast-local.mjs",
     "dast:preview": "node scripts/security/dast.mjs --preview",
     "security:artifact": "node scripts/security/artifact-gate.mjs",
@@ -90,6 +90,7 @@ const codeOwnedReachablePackageScripts = Object.freeze({
     "security:static": "oxlint --type-aware apps/sso/worker apps/test-rp/worker",
     "security:tools:install": "node scripts/security/install-tools.mjs",
     "test:clean-dist": "node --test scripts/clean-package-dist.test.mjs",
+    "test:public-readiness": "node --test scripts/public-readiness/*.test.mjs",
     "test:security": "node --test scripts/security/*.test.mjs",
   }),
   "apps/sso": Object.freeze({
@@ -117,12 +118,14 @@ const codeOwnedReachablePackageScripts = Object.freeze({
 const codeOwnedPackageScripts = Object.freeze({
   ".": Object.freeze({
     build: "pnpm -r --if-present build",
-    check: "pnpm test:clean-dist && pnpm --filter @pg72/id check && pnpm --filter @pg72/test-rp check && pnpm --filter @pg72/wiki check",
+    check: "pnpm test:clean-dist && pnpm test:public-readiness && pnpm --filter @pg72/id check && pnpm --filter @pg72/test-rp check && pnpm --filter @pg72/wiki check",
     "dast:local": "node scripts/security/dast-local.mjs",
     "dast:preview": "node scripts/security/dast.mjs --preview",
     dev: "pnpm --filter @pg72/id dev",
     "dev:rp": "pnpm --filter @pg72/test-rp dev",
     "dev:wiki": "pnpm --filter @pg72/wiki dev",
+    "public-readiness:continuity:local": "node scripts/public-readiness/continuity-local.mjs",
+    "public-readiness:drills:local": "node scripts/public-readiness/drills-local.mjs",
     "security:artifact": "node scripts/security/artifact-gate.mjs",
     "security:audit": "node scripts/security/accepted-advisories.mjs",
     "security:check": "pnpm test:security && pnpm security:static && pnpm security:secrets && pnpm security:config && pnpm security:audit && pnpm security:artifact && pnpm security:inventory",
@@ -133,6 +136,7 @@ const codeOwnedPackageScripts = Object.freeze({
     "security:tools:install": "node scripts/security/install-tools.mjs",
     test: "pnpm -r --if-present test",
     "test:clean-dist": "node --test scripts/clean-package-dist.test.mjs",
+    "test:public-readiness": "node --test scripts/public-readiness/*.test.mjs",
     "test:security": "node --test scripts/security/*.test.mjs",
     typecheck: "pnpm -r --if-present typecheck",
   }),
@@ -168,6 +172,7 @@ const codeOwnedPackageScripts = Object.freeze({
 const codeOwnedLeafCommands = Object.freeze([
   "node ../../scripts/clean-package-dist.mjs",
   "node --test scripts/clean-package-dist.test.mjs",
+  "node --test scripts/public-readiness/*.test.mjs",
   "node --test scripts/security/*.test.mjs",
   "node --test scripts/summary.test.mjs",
   "node scripts/remove-built-dev-vars.mjs",
@@ -197,6 +202,7 @@ const codeOwnedLocalScripts = Object.freeze([
   "apps/sso/scripts/remove-built-dev-vars.mjs",
   "scripts/clean-package-dist.mjs",
   "scripts/clean-package-dist.test.mjs",
+  "scripts/public-readiness/*.test.mjs",
   "scripts/security/*.test.mjs",
   "scripts/security/accepted-advisories.mjs",
   "scripts/security/artifact-gate.mjs",

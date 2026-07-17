@@ -5,6 +5,7 @@ import {
   existsSync,
   lstatSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
 } from "node:fs";
@@ -15,6 +16,7 @@ import { parse as parseJsoncText } from "jsonc-parser";
 import {
   closedChildEnvironment,
   repoRoot,
+  runLocalCommand,
   runWorkspaceBinary,
   ssoRoot,
 } from "./local-runtime.mjs";
@@ -38,6 +40,75 @@ let previousParsedSource = null;
 const dependencyProofs = new WeakMap();
 const GLOBAL_LOGOUT_TEST_COUNT = 25;
 const GLOBAL_LOGOUT_SUITE_COUNT = 2;
+const RECOVERY_TEST_COUNT = 20;
+const RECOVERY_SUITE_COUNT = 4;
+const RECOVERY_ANCESTOR_COUNTS = Object.freeze({
+  "recovery Passkey completion": 4,
+  "recovery code management": 7,
+  "restricted recovery entry": 9,
+});
+const RELEASE_SECURITY_TESTS = Object.freeze([
+  Object.freeze({ filename: "accepted-advisories.test.mjs", count: 5 }),
+  Object.freeze({ filename: "artifact-gate.test.mjs", count: 11 }),
+  Object.freeze({ filename: "dast.test.mjs", count: 6 }),
+  Object.freeze({ filename: "dependency-inventory.test.mjs", count: 2 }),
+  Object.freeze({ filename: "release-identity.test.mjs", count: 13 }),
+  Object.freeze({ filename: "secret-family.test.mjs", count: 20 }),
+  Object.freeze({ filename: "secret-scan.test.mjs", count: 2 }),
+  Object.freeze({ filename: "workflow-config.test.mjs", count: 25 }),
+  Object.freeze({ filename: "wrangler-config.test.mjs", count: 5 }),
+]);
+const RELEASE_TEST_COUNT = RELEASE_SECURITY_TESTS.reduce(
+  (sum, { count }) => sum + count,
+  0,
+);
+const RELEASE_AUTOMATION_FINGERPRINT_FILES = Object.freeze([
+  ".github/workflows/ci.yml",
+  ".github/workflows/dast-preview.yml",
+  ".oxlintrc.json",
+  ".secretlintrc.json",
+  "apps/sso/package.json",
+  "apps/sso/wrangler.jsonc",
+  "apps/test-rp/package.json",
+  "apps/test-rp/wrangler.jsonc",
+  "package.json",
+  "patches/@better-auth__oauth-provider@1.6.23.patch",
+  "patches/README.md",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  "scripts/public-readiness/dependency-contracts.mjs",
+  "scripts/public-readiness/exact-test-reporter.mjs",
+  "scripts/public-readiness/local-runtime.mjs",
+  "scripts/security/accepted-advisories.mjs",
+  "scripts/security/accepted-advisories.test.mjs",
+  "scripts/security/artifact-gate.mjs",
+  "scripts/security/artifact-gate.test.mjs",
+  "scripts/security/dast-local.mjs",
+  "scripts/security/dast.mjs",
+  "scripts/security/dast.test.mjs",
+  "scripts/security/dependency-inventory.mjs",
+  "scripts/security/dependency-inventory.test.mjs",
+  "scripts/security/install-tools.mjs",
+  "scripts/security/release-identity.mjs",
+  "scripts/security/release-identity.test.mjs",
+  "scripts/security/secret-family.mjs",
+  "scripts/security/secret-family.test.mjs",
+  "scripts/security/secret-scan.mjs",
+  "scripts/security/secret-scan.test.mjs",
+  "scripts/security/typescript-static-values.mjs",
+  "scripts/security/workflow-config.mjs",
+  "scripts/security/workflow-config.test.mjs",
+  "scripts/security/wrangler-config.mjs",
+  "scripts/security/wrangler-config.test.mjs",
+  "security/accepted-advisories.json",
+  "security/dast-policy.json",
+  "security/public-readiness-policy.json",
+  "security/release-policy.json",
+  "security/secret-inventory.json",
+  "security/tool-versions.json",
+  "security/workflow-policy.json",
+  "wiki/package.json",
+]);
 
 export const REQUIRED_DEPENDENCY_NAMES = Object.freeze([
   "global_logout_0018",
@@ -188,6 +259,31 @@ function sqlContractFingerprint(identityRoot, contract) {
   return createHash("sha256").update(source.text).digest("hex");
 }
 
+function exactFileSetFingerprint(root, filenames) {
+  const hash = createHash("sha256");
+  for (const relative of filenames) {
+    const filename = path.join(root, relative);
+    const stat = lstatSync(filename);
+    assert.ok(stat.isFile() && !stat.isSymbolicLink(), `${relative} is not an exact regular file`);
+    const bytes = readFileSync(filename);
+    hash.update(`${relative}\0${bytes.length}\0`);
+    hash.update(bytes);
+  }
+  return hash.digest("hex");
+}
+
+function dependencyFingerprint(name, identityRoot, repositoryRoot) {
+  const sqlContract = SQL_CONTRACTS[name];
+  if (sqlContract) return sqlContractFingerprint(identityRoot, sqlContract);
+  if (name === "release_automation") {
+    return exactFileSetFingerprint(
+      repositoryRoot,
+      RELEASE_AUTOMATION_FINGERPRINT_FILES,
+    );
+  }
+  assert.fail(`dependency ${name} has no executable fingerprint contract`);
+}
+
 export function validateGlobalLogoutProofReport(report) {
   assert.ok(report && typeof report === "object" && !Array.isArray(report));
   assert.equal(report.success, true);
@@ -264,6 +360,204 @@ export function runGlobalLogoutDependencyProof(homeDirectory) {
   dependencyProofs.set(proof, {
     identityRoot: realpathSync(ssoRoot),
     name: "global_logout_0018",
+    repositoryRoot: realpathSync(repoRoot),
+    sourceFingerprint,
+  });
+  return proof;
+}
+
+export function validateRecoveryProofReport(report) {
+  assert.ok(report && typeof report === "object" && !Array.isArray(report));
+  assert.equal(report.success, true);
+  assert.equal(report.numTotalTestSuites, RECOVERY_SUITE_COUNT);
+  assert.equal(report.numPassedTestSuites, RECOVERY_SUITE_COUNT);
+  assert.equal(report.numFailedTestSuites, 0);
+  assert.equal(report.numPendingTestSuites, 0);
+  assert.equal(report.numTotalTests, RECOVERY_TEST_COUNT);
+  assert.equal(report.numPassedTests, RECOVERY_TEST_COUNT);
+  assert.equal(report.numFailedTests, 0);
+  assert.equal(report.numPendingTests, 0);
+  assert.equal(report.numTodoTests, 0);
+  assert.ok(Array.isArray(report.testResults));
+  assert.equal(report.testResults.length, 1);
+  const [testResult] = report.testResults;
+  assert.equal(
+    path.resolve(testResult.name),
+    path.join(ssoRoot, "test", "recovery.spec.ts"),
+  );
+  assert.equal(testResult.status, "passed");
+  assert.ok(Array.isArray(testResult.assertionResults));
+  assert.equal(testResult.assertionResults.length, RECOVERY_TEST_COUNT);
+  const ancestorCounts = Object.fromEntries(
+    Object.keys(RECOVERY_ANCESTOR_COUNTS).map((name) => [name, 0]),
+  );
+  for (const assertion of testResult.assertionResults) {
+    assert.equal(assertion.status, "passed");
+    assert.ok(Array.isArray(assertion.ancestorTitles));
+    assert.equal(assertion.ancestorTitles.length, 1);
+    const [ancestor] = assertion.ancestorTitles;
+    assert.ok(Object.hasOwn(ancestorCounts, ancestor));
+    ancestorCounts[ancestor] += 1;
+  }
+  assert.deepEqual(ancestorCounts, RECOVERY_ANCESTOR_COUNTS);
+  return report;
+}
+
+export function runRecoveryDependencyProof(homeDirectory) {
+  const contract = SQL_CONTRACTS.recovery_0019;
+  assert.equal(
+    sqlContractState(ssoRoot, contract),
+    "source_present_unverified",
+    "recovery source contract is invalid",
+  );
+  const sourceFingerprint = sqlContractFingerprint(ssoRoot, contract);
+  const reportFilename = path.join(
+    homeDirectory,
+    `recovery-proof-${crypto.randomUUID()}.json`,
+  );
+  try {
+    runWorkspaceBinary(
+      ssoRoot,
+      "vitest",
+      [
+        "run",
+        "test/recovery.spec.ts",
+        "--reporter=json",
+        `--outputFile=${reportFilename}`,
+      ],
+      {
+        environment: closedChildEnvironment(homeDirectory),
+        label: "recovery dependency proof",
+      },
+    );
+    const reportSource = fileState(reportFilename);
+    assert.equal(reportSource.state, "present");
+    validateRecoveryProofReport(JSON.parse(reportSource.text));
+  } finally {
+    rmSync(reportFilename, { force: true });
+  }
+  assert.equal(
+    sqlContractFingerprint(ssoRoot, contract),
+    sourceFingerprint,
+    "recovery source changed while its proof was running",
+  );
+  const proof = Object.freeze({});
+  dependencyProofs.set(proof, {
+    identityRoot: realpathSync(ssoRoot),
+    name: "recovery_0019",
+    repositoryRoot: realpathSync(repoRoot),
+    sourceFingerprint,
+  });
+  return proof;
+}
+
+function exactTestCounts(value, count) {
+  assert.ok(value && typeof value === "object" && !Array.isArray(value));
+  assert.deepEqual(value, {
+    tests: count,
+    failed: 0,
+    passed: count,
+    cancelled: 0,
+    skipped: 0,
+    todo: 0,
+    topLevel: count,
+    suites: 0,
+  });
+}
+
+export function validateReleaseAutomationProofEvents(source) {
+  assert.equal(typeof source, "string");
+  const lines = source.split("\n").filter((line) => line.length > 0);
+  const events = lines.map((line) => JSON.parse(line));
+  assert.ok(
+    events.every(({ type }) => ["test:pass", "test:fail", "test:summary"].includes(type)),
+  );
+  assert.equal(events.some(({ type }) => type === "test:fail"), false);
+  const passes = events.filter(({ type }) => type === "test:pass");
+  const summaries = events.filter(({ type }) => type === "test:summary");
+  assert.equal(passes.length, RELEASE_TEST_COUNT);
+  assert.equal(summaries.length, RELEASE_SECURITY_TESTS.length + 1);
+
+  const passCounts = new Map();
+  for (const event of passes) {
+    assert.equal(event.data.nesting, 0);
+    assert.equal(event.data.details?.type, "test");
+    assert.equal(typeof event.data.name, "string");
+    assert.ok(event.data.name.length > 0);
+    const relative = path.relative(repoRoot, path.resolve(event.data.file));
+    assert.ok(!relative.startsWith(".."));
+    passCounts.set(relative, (passCounts.get(relative) ?? 0) + 1);
+  }
+
+  for (const contract of RELEASE_SECURITY_TESTS) {
+    const relative = path.join("scripts", "security", contract.filename);
+    assert.equal(passCounts.get(relative), contract.count, relative);
+    const summary = summaries.find(
+      ({ data }) =>
+        data.file && path.resolve(data.file) === path.join(repoRoot, relative),
+    );
+    assert.ok(summary, `${relative} lacks an exact summary`);
+    assert.equal(summary.data.success, true);
+    exactTestCounts(summary.data.counts, contract.count);
+  }
+  assert.deepEqual(
+    [...passCounts.keys()].sort(),
+    RELEASE_SECURITY_TESTS.map(({ filename }) =>
+      path.join("scripts", "security", filename),
+    ).sort(),
+  );
+  const aggregate = summaries.filter(({ data }) => data.file === undefined);
+  assert.equal(aggregate.length, 1);
+  assert.equal(aggregate[0].data.success, true);
+  exactTestCounts(aggregate[0].data.counts, RELEASE_TEST_COUNT);
+  return events;
+}
+
+export function runReleaseAutomationDependencyProof(homeDirectory) {
+  assert.equal(
+    releaseContractState(repoRoot),
+    "source_present_unverified",
+    "release-automation source contract is invalid",
+  );
+  assert.deepEqual(
+    readdirSync(path.join(repoRoot, "scripts", "security"))
+      .filter((filename) => filename.endsWith(".test.mjs"))
+      .sort(),
+    RELEASE_SECURITY_TESTS.map(({ filename }) => filename).sort(),
+    "release-automation security test file set drifted",
+  );
+  const sourceFingerprint = dependencyFingerprint(
+    "release_automation",
+    ssoRoot,
+    repoRoot,
+  );
+  const output = runLocalCommand(
+    process.execPath,
+    [
+      "--test",
+      "--test-concurrency=1",
+      `--test-reporter=${path.join(repoRoot, "scripts", "public-readiness", "exact-test-reporter.mjs")}`,
+      ...RELEASE_SECURITY_TESTS.map(({ filename }) =>
+        path.join("scripts", "security", filename),
+      ),
+    ],
+    {
+      cwd: repoRoot,
+      environment: closedChildEnvironment(homeDirectory),
+      label: "release-automation dependency proof",
+    },
+  );
+  validateReleaseAutomationProofEvents(output);
+  assert.equal(
+    dependencyFingerprint("release_automation", ssoRoot, repoRoot),
+    sourceFingerprint,
+    "release-automation source changed while its proof was running",
+  );
+  const proof = Object.freeze({});
+  dependencyProofs.set(proof, {
+    identityRoot: realpathSync(ssoRoot),
+    name: "release_automation",
+    repositoryRoot: realpathSync(repoRoot),
     sourceFingerprint,
   });
   return proof;
@@ -444,9 +738,10 @@ export function dependencyStatus(options = {}) {
       proof && typeof proof === "object" ? dependencyProofs.get(proof) : undefined;
     assert.ok(evidence, "dependency proof was not produced by an executed check");
     assert.equal(evidence.identityRoot, realpathSync(identityRoot));
+    assert.equal(evidence.repositoryRoot, realpathSync(repositoryRoot));
     assert.equal(
       evidence.sourceFingerprint,
-      sqlContractFingerprint(identityRoot, SQL_CONTRACTS[evidence.name]),
+      dependencyFingerprint(evidence.name, identityRoot, repositoryRoot),
       "dependency source no longer matches its executed proof",
     );
     assert.equal(verifiedNames.has(evidence.name), false, "dependency proof is duplicated");

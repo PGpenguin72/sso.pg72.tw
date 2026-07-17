@@ -226,13 +226,8 @@ export function validateClosedReport(report) {
     if (report.failure.stage === "none") {
       assert.equal(report.failure.class, "none");
       assert.ok(report.export.bytes > 0);
-      assert.ok(report.migrationLedger.count > 0);
-      assert.match(report.migrationLedger.head, /^\d{4}_[a-z0-9_]+\.sql$/);
-      assert.equal(
-        Number(report.migrationLedger.head.slice(0, 4)),
-        report.migrationLedger.count,
-        "migration-ledger count and head disagree",
-      );
+      assert.equal(report.migrationLedger.count, 19);
+      assert.equal(report.migrationLedger.head, "0019_recovery_codes.sql");
       assert.match(report.migrationLedger.sha256, /^[a-f0-9]{64}$/);
       assert.equal(report.schema.integrity, "ok");
       assert.equal(report.schema.foreignKeys, "ok");

@@ -15,9 +15,13 @@ import {
   REQUIRED_DEPENDENCY_NAMES,
   dependencyStatus,
   runGlobalLogoutDependencyProof,
+  runRecoveryDependencyProof,
+  runReleaseAutomationDependencyProof,
   validateGlobalLogoutProofReport,
+  validateRecoveryProofReport,
+  validateReleaseAutomationProofEvents,
 } from "./dependency-contracts.mjs";
-import { ssoRoot } from "./local-runtime.mjs";
+import { repoRoot, ssoRoot } from "./local-runtime.mjs";
 import { readinessFromDependencies } from "./report.mjs";
 
 function writeFixture(filename, value) {
@@ -125,6 +129,98 @@ function globalLogoutProofReport(overrides = {}) {
   };
 }
 
+function recoveryProofReport(overrides = {}) {
+  const groups = [
+    ["recovery code management", 7],
+    ["restricted recovery entry", 9],
+    ["recovery Passkey completion", 4],
+  ];
+  return {
+    numFailedTestSuites: 0,
+    numFailedTests: 0,
+    numPassedTestSuites: 4,
+    numPassedTests: 20,
+    numPendingTestSuites: 0,
+    numPendingTests: 0,
+    numTodoTests: 0,
+    numTotalTestSuites: 4,
+    numTotalTests: 20,
+    success: true,
+    testResults: [
+      {
+        assertionResults: groups.flatMap(([ancestor, count]) =>
+          Array.from({ length: count }, () => ({
+            ancestorTitles: [ancestor],
+            status: "passed",
+          })),
+        ),
+        name: path.join(ssoRoot, "test", "recovery.spec.ts"),
+        status: "passed",
+      },
+    ],
+    ...overrides,
+  };
+}
+
+const releaseTestCounts = new Map([
+  ["accepted-advisories.test.mjs", 5],
+  ["artifact-gate.test.mjs", 11],
+  ["dast.test.mjs", 6],
+  ["dependency-inventory.test.mjs", 2],
+  ["release-identity.test.mjs", 13],
+  ["secret-family.test.mjs", 20],
+  ["secret-scan.test.mjs", 2],
+  ["workflow-config.test.mjs", 25],
+  ["wrangler-config.test.mjs", 5],
+]);
+
+function nodeTestCounts(count) {
+  return {
+    tests: count,
+    failed: 0,
+    passed: count,
+    cancelled: 0,
+    skipped: 0,
+    todo: 0,
+    topLevel: count,
+    suites: 0,
+  };
+}
+
+function releaseProofEvents() {
+  const events = [];
+  let testNumber = 0;
+  for (const [filename, count] of releaseTestCounts) {
+    const file = path.join(repoRoot, "scripts", "security", filename);
+    for (let index = 0; index < count; index += 1) {
+      testNumber += 1;
+      events.push({
+        type: "test:pass",
+        data: {
+          name: `${filename}:${index}`,
+          nesting: 0,
+          testNumber,
+          details: { type: "test" },
+          file,
+        },
+      });
+    }
+    events.push({
+      type: "test:summary",
+      data: { success: true, counts: nodeTestCounts(count), file },
+    });
+  }
+  events.push({
+    type: "test:summary",
+    data: { success: true, counts: nodeTestCounts(testNumber) },
+  });
+  return events;
+}
+
+function eventSource(events) {
+  return `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+}
+
 test("valid source remains unverified and caller assertions cannot promote it", () => {
   const fixture = createDependencyFixture();
   try {
@@ -172,6 +268,28 @@ test("only the executed repo-bound global-logout check produces its proof", () =
     assert.throws(
       () => dependencyStatus({ proofs: [proof, proof] }),
       /duplicated/,
+    );
+  } finally {
+    rmSync(homeDirectory, { force: true, recursive: true });
+  }
+});
+
+test("only same-run recovery and release checks produce their opaque proofs", () => {
+  const homeDirectory = mkdtempSync(
+    path.join(os.tmpdir(), "pgid-integrated-dependency-proofs-"),
+  );
+  try {
+    const recoveryProof = runRecoveryDependencyProof(homeDirectory);
+    const releaseProof = runReleaseAutomationDependencyProof(homeDirectory);
+    const dependencies = dependencyStatus({
+      proofs: [recoveryProof, releaseProof],
+    });
+    assert.equal(statusOf(dependencies, "recovery_0019"), "verified");
+    assert.equal(statusOf(dependencies, "release_automation"), "verified");
+    assert.ok(
+      dependencies
+        .filter(({ name }) => !["recovery_0019", "release_automation"].includes(name))
+        .every(({ status }) => status !== "verified"),
     );
   } finally {
     rmSync(homeDirectory, { force: true, recursive: true });
@@ -241,6 +359,108 @@ test("global-logout proof rejects skipped, partial, wrong-file, and malformed re
     ),
   );
   assert.throws(() => validateGlobalLogoutProofReport({ success: true }));
+});
+
+test("recovery proof rejects failed, partial, skipped, wrong-file, and wrong-suite results", () => {
+  assert.doesNotThrow(() => validateRecoveryProofReport(recoveryProofReport()));
+  for (const mutation of [
+    { success: false },
+    { numPassedTestSuites: 3 },
+    { numTotalTestSuites: 3 },
+    { numPassedTests: 19 },
+    { numTotalTests: 19 },
+    { numPendingTests: 1 },
+    { numPendingTestSuites: 1 },
+    { numFailedTests: 1 },
+    { numFailedTestSuites: 1 },
+    { numTodoTests: 1 },
+  ]) {
+    assert.throws(() =>
+      validateRecoveryProofReport(recoveryProofReport(mutation)),
+    );
+  }
+
+  const wrongFile = recoveryProofReport();
+  wrongFile.testResults[0].name = path.join(ssoRoot, "test", "lookalike.spec.ts");
+  assert.throws(() => validateRecoveryProofReport(wrongFile));
+
+  const wrongStatus = recoveryProofReport();
+  wrongStatus.testResults[0].status = "pending";
+  assert.throws(() => validateRecoveryProofReport(wrongStatus));
+
+  const wrongAncestorCount = recoveryProofReport();
+  wrongAncestorCount.testResults[0].assertionResults[0].ancestorTitles = [
+    "restricted recovery entry",
+  ];
+  assert.throws(() => validateRecoveryProofReport(wrongAncestorCount));
+
+  const wrongAncestor = recoveryProofReport();
+  wrongAncestor.testResults[0].assertionResults[0].ancestorTitles = [
+    "lookalike recovery suite",
+  ];
+  assert.throws(() => validateRecoveryProofReport(wrongAncestor));
+
+  const partialAssertions = recoveryProofReport();
+  partialAssertions.testResults[0].assertionResults.pop();
+  assert.throws(() => validateRecoveryProofReport(partialAssertions));
+});
+
+test("release proof rejects malformed, failed, missing, duplicate, and skipped events", () => {
+  const baseline = releaseProofEvents();
+  assert.doesNotThrow(() =>
+    validateReleaseAutomationProofEvents(eventSource(baseline)),
+  );
+  assert.throws(() => validateReleaseAutomationProofEvents("{not-json}\n"));
+
+  const mutations = [
+    (events) => events.push({ type: "test:diagnostic", data: {} }),
+    (events) => events.push({ type: "test:fail", data: {} }),
+    (events) => events.splice(events.findIndex(({ type }) => type === "test:pass"), 1),
+    (events) => events.push(structuredClone(events.find(({ type }) => type === "test:pass"))),
+    (events) => {
+      events.find(({ type }) => type === "test:pass").data.file = path.join(
+        repoRoot,
+        "scripts",
+        "security",
+        "lookalike.test.mjs",
+      );
+    },
+    (events) => events.splice(events.findIndex(({ type, data }) => type === "test:summary" && data.file), 1),
+    (events) => events.push(structuredClone(events.find(({ type, data }) => type === "test:summary" && data.file))),
+    (events) => {
+      events.find(({ type, data }) => type === "test:summary" && data.file).data.file = path.join(
+        repoRoot,
+        "scripts",
+        "security",
+        "lookalike.test.mjs",
+      );
+    },
+    (events) => {
+      events.find(({ type, data }) => type === "test:summary" && data.file).data.counts.passed -= 1;
+    },
+    (events) => {
+      events.find(({ type, data }) => type === "test:summary" && data.file === undefined).data.counts.tests -= 1;
+    },
+    (events) => {
+      events.find(({ type, data }) => type === "test:summary" && data.file).data.counts.skipped = 1;
+    },
+    (events) => {
+      events.find(({ type, data }) => type === "test:summary" && data.file).data.counts.cancelled = 1;
+    },
+    (events) => {
+      events.find(({ type, data }) => type === "test:summary" && data.file).data.counts.todo = 1;
+    },
+    (events) => {
+      events.find(({ type, data }) => type === "test:summary" && data.file).data.success = false;
+    },
+  ];
+  for (const mutate of mutations) {
+    const events = structuredClone(baseline);
+    mutate(events);
+    assert.throws(() =>
+      validateReleaseAutomationProofEvents(eventSource(events)),
+    );
+  }
 });
 
 test("empty dependency sources remain invalid", () => {

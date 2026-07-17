@@ -98,6 +98,29 @@ export function expectedMigrationHead(migrationsDirectory) {
   return expectedMigrationLedger(migrationsDirectory).head;
 }
 
+export const INTEGRATED_MIGRATION_LEDGER = Object.freeze({
+  count: 19,
+  head: "0019_recovery_codes.sql",
+});
+
+export function assertIntegratedMigrationLedger(ledger) {
+  assert.equal(
+    ledger.count,
+    INTEGRATED_MIGRATION_LEDGER.count,
+    "integrated migration ledger count drifted",
+  );
+  assert.equal(
+    ledger.head,
+    INTEGRATED_MIGRATION_LEDGER.head,
+    "integrated migration ledger head drifted",
+  );
+  return ledger;
+}
+
+export function expectedIntegratedMigrationLedger(migrationsDirectory) {
+  return assertIntegratedMigrationLedger(expectedMigrationLedger(migrationsDirectory));
+}
+
 function canonicalMigrationLedger(names) {
   return {
     count: names.length,

@@ -59,6 +59,14 @@ function policyErrors(environment) {
   for (const route of worker.routes) {
     if (route.type !== "custom-domain") errors.push(`route ${route.pattern} has the wrong type`);
   }
+  if (
+    worker.triggers &&
+    (!Array.isArray(worker.triggers.crons) ||
+      worker.triggers.crons.length === 0 ||
+      worker.triggers.crons.some((cron) => typeof cron !== "string" || cron.length === 0))
+  ) {
+    errors.push("Worker cron triggers have the wrong type");
+  }
   return errors;
 }
 
@@ -131,6 +139,7 @@ export function expectedSourceConfig(environment) {
     compatibility_flags: worker.compatibilityFlags,
   };
   if (worker.routes.length > 0) expected.routes = sourceRoutes(worker.routes);
+  if (worker.triggers) expected.triggers = worker.triggers;
   if (worker.assets) expected.assets = sourceAssets(worker.assets);
   if (worker.d1.length > 0) expected.d1_databases = sourceD1(worker.d1);
   if (worker.rateLimits.length > 0) expected.ratelimits = sourceRateLimits(worker.rateLimits);
@@ -198,7 +207,7 @@ export function expectedGeneratedSsoConfig(root = repoRoot) {
     name: worker.name,
     main: worker.main.generated,
     routes: sourceRoutes(worker.routes),
-    triggers: {},
+    triggers: worker.triggers ?? {},
     assets: generatedAssets(worker.assets),
     vars: varsObject(worker.vars),
     secrets: { required: worker.secrets.map(({ name }) => name) },

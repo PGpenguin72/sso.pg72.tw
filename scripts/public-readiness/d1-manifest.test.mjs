@@ -19,9 +19,12 @@ import {
 } from "./crypto-fixtures.mjs";
 import {
   D1_CONSISTENCY_CHECK_SQL,
+  INTEGRATED_MIGRATION_LEDGER,
   assertEquivalentD1,
+  assertIntegratedMigrationLedger,
   classifiedManifestStep,
   expectedMigrationHead,
+  expectedIntegratedMigrationLedger,
   expectedMigrationLedger,
   isApplicationSchemaRow,
   normalizeMigrationLedgerRows,
@@ -125,6 +128,35 @@ test("derives the complete migration ledger from the integrated source sequence"
   assert.equal(ledger.head, expectedNames.at(-1));
   assert.match(ledger.sha256, /^[a-f0-9]{64}$/);
   assert.equal(expectedMigrationHead(migrationsDirectory), ledger.head);
+  assert.deepEqual(
+    expectedIntegratedMigrationLedger(migrationsDirectory),
+    ledger,
+  );
+  assert.deepEqual(
+    { count: ledger.count, head: ledger.head },
+    INTEGRATED_MIGRATION_LEDGER,
+  );
+});
+
+test("integrated migration proof requires exact 0019 count and head", () => {
+  assert.doesNotThrow(() =>
+    assertIntegratedMigrationLedger({
+      count: 19,
+      head: "0019_recovery_codes.sql",
+    }),
+  );
+  assert.throws(() =>
+    assertIntegratedMigrationLedger({
+      count: 18,
+      head: "0018_global_logout.sql",
+    }),
+  );
+  assert.throws(() =>
+    assertIntegratedMigrationLedger({
+      count: 19,
+      head: "0019_lookalike.sql",
+    }),
+  );
 });
 
 test("migration source ledger rejects gaps, duplicate numbers, malformed names, and links", () => {

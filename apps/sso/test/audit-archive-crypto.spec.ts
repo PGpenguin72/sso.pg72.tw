@@ -109,6 +109,19 @@ async function archiveError(
   throw new Error("Expected archive crypto to fail");
 }
 
+function expectReconstructedArchiveError(
+  error: AuditArchiveCryptoError,
+  incoming: unknown,
+  code: AuditArchiveCryptoError["code"],
+  sentinel: string,
+): void {
+  expect(error).not.toBe(incoming);
+  expect(error.code).toBe(code);
+  expect(error.message).toBe(`Audit archive crypto failed (${code})`);
+  expect(error.message).not.toContain(sentinel);
+  expect(error.stack ?? "").not.toContain(sentinel);
+}
+
 function fullBoundaryMetadata(): string {
   return JSON.stringify(
     Object.fromEntries(
@@ -563,6 +576,141 @@ describe("audit archive crypto v1", () => {
         }),
       "integrity_mismatch",
     );
+  });
+
+  it("reconstructs seal records-accessor failures with fixed identity and text", async () => {
+    const sentinel = `seal-accessor-${crypto.randomUUID()}`;
+    const incoming = new AuditArchiveCryptoError("invalid_input");
+    incoming.message = sentinel;
+    const failure = await archiveError(() =>
+      sealAuditArchiveV1({
+        batchGeneration: 1,
+        createdAt: CREATED_AT,
+        kek: generatedKek(),
+        keyVersion: "v1",
+        get records(): readonly AuditArchiveRecordV1[] {
+          throw incoming;
+        },
+      }),
+    );
+
+    expectReconstructedArchiveError(
+      failure,
+      incoming,
+      "invalid_input",
+      sentinel,
+    );
+
+    const fallbackSentinel = `seal-fallback-${crypto.randomUUID()}`;
+    const fallbackIncoming = new Error(fallbackSentinel);
+    const fallback = await archiveError(() =>
+      sealAuditArchiveV1({
+        batchGeneration: 1,
+        createdAt: CREATED_AT,
+        kek: generatedKek(),
+        keyVersion: "v1",
+        get records(): readonly AuditArchiveRecordV1[] {
+          throw fallbackIncoming;
+        },
+      }),
+    );
+    expectReconstructedArchiveError(
+      fallback,
+      fallbackIncoming,
+      "encryption_failed",
+      fallbackSentinel,
+    );
+  });
+
+  it("reconstructs open input and manifest accessors without reading hostile codes", async () => {
+    const kek = generatedKek();
+    const sealed = await sealAuditArchiveV1({
+      batchGeneration: 1,
+      createdAt: CREATED_AT,
+      kek,
+      keyVersion: "v1",
+      records: [record(1)],
+    });
+
+    const expectedSentinel = `open-expected-${crypto.randomUUID()}`;
+    const expectedIncoming = new AuditArchiveCryptoError("integrity_mismatch");
+    expectedIncoming.message = expectedSentinel;
+    const expectedFailure = await archiveError(() =>
+      openAuditArchiveV1({
+        get expected(): AuditArchiveManifestV1 {
+          throw expectedIncoming;
+        },
+        kek,
+        objectBytes: sealed.objectBytes,
+      }),
+    );
+    expectReconstructedArchiveError(
+      expectedFailure,
+      expectedIncoming,
+      "integrity_mismatch",
+      expectedSentinel,
+    );
+
+    const objectSentinel = `open-object-${crypto.randomUUID()}`;
+    const objectIncoming = new AuditArchiveCryptoError("invalid_input");
+    objectIncoming.message = objectSentinel;
+    let objectCodeRead = false;
+    Object.defineProperty(objectIncoming, "code", {
+      configurable: true,
+      get() {
+        objectCodeRead = true;
+        throw new Error(objectSentinel);
+      },
+    });
+    const objectFailure = await archiveError(() =>
+      openAuditArchiveV1({
+        expected: sealed.manifest,
+        kek,
+        get objectBytes(): Uint8Array<ArrayBuffer> {
+          throw objectIncoming;
+        },
+      }),
+    );
+    expectReconstructedArchiveError(
+      objectFailure,
+      objectIncoming,
+      "decryption_failed",
+      objectSentinel,
+    );
+    expect(objectCodeRead).toBe(false);
+
+    const manifestSentinel = `open-manifest-${crypto.randomUUID()}`;
+    let manifestCodeRead = false;
+    const crossRealmLike = Object.create(null) as Record<string, unknown>;
+    Object.defineProperties(crossRealmLike, {
+      code: {
+        get() {
+          manifestCodeRead = true;
+          throw new Error(manifestSentinel);
+        },
+      },
+      message: { value: manifestSentinel },
+    });
+    const hostileManifest = {
+      ...sealed.manifest,
+      get eventCount(): number {
+        throw crossRealmLike;
+      },
+    };
+    const manifestFailure = await archiveError(() =>
+      openAuditArchiveV1({
+        expected: hostileManifest,
+        kek,
+        objectBytes: sealed.objectBytes,
+      }),
+    );
+    expectReconstructedArchiveError(
+      manifestFailure,
+      crossRealmLike,
+      "decryption_failed",
+      manifestSentinel,
+    );
+    expect(manifestCodeRead).toBe(false);
   });
 
   it("does not mutate caller data or expose caller values in failures", async () => {

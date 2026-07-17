@@ -187,13 +187,46 @@ function fail(code: AuditArchiveCryptoErrorCode): never {
   throw new AuditArchiveCryptoError(code);
 }
 
+function isAuditArchiveCryptoErrorCode(
+  value: unknown,
+): value is AuditArchiveCryptoErrorCode {
+  return (
+    value === "bounds_exceeded" ||
+    value === "decryption_failed" ||
+    value === "encryption_failed" ||
+    value === "integrity_mismatch" ||
+    value === "invalid_input" ||
+    value === "invalid_kek"
+  );
+}
+
+function exactLocalArchiveErrorCode(
+  error: unknown,
+): AuditArchiveCryptoErrorCode | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  try {
+    if (Object.getPrototypeOf(error) !== AuditArchiveCryptoError.prototype) {
+      return undefined;
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(error, "code");
+    if (
+      !descriptor ||
+      !("value" in descriptor) ||
+      !isAuditArchiveCryptoErrorCode(descriptor.value)
+    ) {
+      return undefined;
+    }
+    return descriptor.value;
+  } catch {
+    return undefined;
+  }
+}
+
 function redactedArchiveError(
   error: unknown,
   fallback: "decryption_failed" | "encryption_failed",
 ): AuditArchiveCryptoError {
-  return error instanceof AuditArchiveCryptoError
-    ? error
-    : new AuditArchiveCryptoError(fallback);
+  return new AuditArchiveCryptoError(exactLocalArchiveErrorCode(error) ?? fallback);
 }
 
 function clearBytes(

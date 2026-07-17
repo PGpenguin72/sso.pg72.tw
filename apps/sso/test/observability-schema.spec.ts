@@ -3804,6 +3804,83 @@ describe("alert observability migration", () => {
     ).resolves.toBeDefined();
   });
 
+  it("stores exact safe-integer runtime fences without widening alert caps", async () => {
+    const tables = await env.PG72_ID_DB.prepare(
+      `SELECT name, sql
+         FROM sqlite_schema
+        WHERE type = 'table'
+          AND name IN (
+            'alert_state', 'security_alert', 'alert_runtime_status',
+            'alert_evaluator_bootstrap'
+          )`,
+    ).all<{ name: string; sql: string }>();
+    const tableSql = new Map(
+      tables.results.map(({ name, sql }) => [name, sql]),
+    );
+    expect(tableSql.get("alert_runtime_status")).toContain(
+      '"generation" BETWEEN 0 AND 9007199254740991',
+    );
+    expect(tableSql.get("alert_runtime_status")).toContain(
+      '"revision" BETWEEN 0 AND 9007199254740991',
+    );
+    expect(tableSql.get("alert_evaluator_bootstrap")).toContain(
+      '"source_generation" BETWEEN 1 AND 9007199254740991',
+    );
+    expect(tableSql.get("alert_evaluator_bootstrap")).toContain(
+      '"source_revision" BETWEEN 1 AND 9007199254740991',
+    );
+    expect(tableSql.get("alert_state")).toContain(
+      '"generation" BETWEEN 0 AND 1000000',
+    );
+    expect(tableSql.get("alert_state")).toContain(
+      '"revision" BETWEEN 0 AND 1000000000',
+    );
+    expect(tableSql.get("security_alert")).toContain(
+      '"generation" BETWEEN 1 AND 1000000',
+    );
+    expect(tableSql.get("alert_runtime_status")).toContain(
+      '"consecutive_nonzero_samples" BETWEEN 0 AND 1000000',
+    );
+
+    const roundTripTable = "alert_runtime_safe_integer_roundtrip";
+    await env.PG72_ID_DB.prepare(
+      `CREATE TABLE ${roundTripTable} (
+        value INTEGER NOT NULL CHECK (
+          typeof(value) = 'integer'
+          AND value BETWEEN 0 AND 9007199254740991
+        )
+      )`,
+    ).run();
+    try {
+      await env.PG72_ID_DB.prepare(
+        `INSERT INTO ${roundTripTable} (value) VALUES (?)`,
+      )
+        .bind(Number.MAX_SAFE_INTEGER)
+        .run();
+      expect(
+        await env.PG72_ID_DB.prepare(
+          `SELECT value, typeof(value) AS storage_class
+             FROM ${roundTripTable}`,
+        ).first(),
+      ).toEqual({
+        storage_class: "integer",
+        value: Number.MAX_SAFE_INTEGER,
+      });
+      await expect(
+        env.PG72_ID_DB.prepare(
+          `INSERT INTO ${roundTripTable} (value) VALUES (9007199254740992)`,
+        ).run(),
+      ).rejects.toThrow();
+      await expect(
+        env.PG72_ID_DB.prepare(
+          `INSERT INTO ${roundTripTable} (value) VALUES (1.5)`,
+        ).run(),
+      ).rejects.toThrow();
+    } finally {
+      await env.PG72_ID_DB.prepare(`DROP TABLE ${roundTripTable}`).run();
+    }
+  });
+
   it("requires paired runtime leases, errors, and queue metric samples", async () => {
     await expect(
       env.PG72_ID_DB.prepare(

@@ -2235,9 +2235,9 @@ CREATE TABLE "alert_runtime_status" (
   "status" text NOT NULL DEFAULT 'disabled'
     CHECK ("status" IN ('disabled', 'healthy', 'degraded', 'failing', 'unavailable')),
   "generation" integer NOT NULL DEFAULT 0
-    CHECK ("generation" BETWEEN 0 AND 1000000),
+    CHECK ("generation" BETWEEN 0 AND 9007199254740991),
   "revision" integer NOT NULL DEFAULT 0
-    CHECK ("revision" BETWEEN 0 AND 1000000000),
+    CHECK ("revision" BETWEEN 0 AND 9007199254740991),
   "lease_id" text CHECK ("lease_id" IS NULL OR length("lease_id") = 36),
   "lease_expires_at" date CHECK (
     "lease_expires_at" IS NULL
@@ -2567,11 +2567,11 @@ CREATE TABLE "alert_evaluator_bootstrap" (
   ),
   "source_generation" integer NOT NULL CHECK (
     typeof("source_generation") = 'integer'
-    AND "source_generation" BETWEEN 1 AND 1000000
+    AND "source_generation" BETWEEN 1 AND 9007199254740991
   ),
   "source_revision" integer NOT NULL CHECK (
     typeof("source_revision") = 'integer'
-    AND "source_revision" BETWEEN 1 AND 1000000000
+    AND "source_revision" BETWEEN 1 AND 9007199254740991
   ),
   FOREIGN KEY ("component") REFERENCES "alert_runtime_status" ("component")
     ON DELETE RESTRICT

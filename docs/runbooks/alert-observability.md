@@ -77,11 +77,23 @@ local evaluator runtime repository initializes the evaluator component as
 `disabled` with null history. It acquires and renews the bounded evaluator lease
 and records terminal success or failure by exact generation/revision/lease
 compare-and-swap. On its first repository-controlled success, one ordered D1
-batch updates the runtime row to `healthy` with non-null success evidence, then inserts
+batch updates the runtime row to `healthy` with non-null success evidence, then
+inserts
 `alert_evaluator_bootstrap` with `INSERT ... SELECT` from that exact runtime row.
 The anchor is immutable and its parent runtime row cannot be deleted or
 replaced. This proves the persisted repository transition, not the external
 work itself; status, generation, or revision alone is never bootstrap evidence.
+Runtime generation and revision are monotonic JavaScript-safe fencing counters,
+both bounded inclusively at `9,007,199,254,740,991`. Every ownership grant
+increments generation and every persisted transition increments revision; they
+never wrap or reset. Acquire and renew reserve one final revision for terminal
+success or failure. The repository reports the fixed redacted code
+`counter_headroom_low` when either counter has at most `1,000,000` increments
+remaining and `counter_exhausted` at the bound. Workers Logs must alert on both
+codes independently of the alert delivery path. Acquisition or renewal that
+cannot preserve its required increment plus terminal revision fails closed with
+the fixed repository error `counter_exhausted`; ordinary lease contention still
+returns no lease.
 The repository also owns the exact projection read below. It is local source
 only: the Worker entry point and scheduler do not import or invoke it, and no
 full audit/other metric-source evaluation or same-run execution proof exists.
@@ -114,12 +126,24 @@ All four bootstrap aliases null means pre-bootstrap, regardless of the runtime
 row. Any non-null bootstrap alias means post-bootstrap forever; a corrupt or
 missing runtime projection is missing threshold input, never a return to
 pre-bootstrap. The parser accepts only component `evaluator`, canonical
-timestamps, source generation `1..1,000,000`, source revision
-`1..1,000,000,000`, a current generation/revision not behind the anchor, and the
-closed runtime status/error domains. It also requires
+timestamps, source generation and revision
+`1..9,007,199,254,740,991`, a current generation/revision not behind the anchor,
+and the closed runtime status/error domains. It also requires
 `first_success_at <= last_success_at <= updated_at <= asOf` and
 `last_started_at <= updated_at`; current `last_started_at` need not precede the
 retained `last_success_at` after a later run starts.
+
+This in-place `0020` source correction is allowed only while the target ledger
+has never applied the old `0020` bytes. Production is recorded through `0012`,
+but every target still needs explicit ledger evidence before migration. Recreate
+disposable local or isolated Preview databases that applied the old migration
+and rehearse the complete ordered ledger again. If any persistent D1 already
+contains the old `0020`, stop: editing the migration file will not rerun it.
+Ship a separately reviewed additive replacement-table migration with exact row
+copy/swap, deferred foreign-key handling, and full integrity/FK proof instead.
+Never reset the counters. An older Worker with the former caps is not a durable
+rollback once values pass those caps, so rollout evidence must record the
+minimum compatible Worker version and coordinate any D1 restore with it.
 
 Logout health has two different time domains. `dead` counts every row currently
 dead until replay changes its state, and `oldest_unresolved_age_seconds` scans

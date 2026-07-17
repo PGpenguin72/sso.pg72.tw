@@ -6,6 +6,8 @@ import {
   ALERT_QUEUE_NAMES,
   ALERT_RULE_DEFINITIONS,
   ALERT_RULE_IDS,
+  ALERT_RUNTIME_GENERATION_MAX,
+  ALERT_RUNTIME_REVISION_MAX,
   BOOTADMIN_PROTECTED_EVENTS,
   deriveAlertReferenceV1,
   evaluateAlertRule,
@@ -983,6 +985,15 @@ describe("redacted observation parsing", () => {
       runtime_generation: validProjection.source_generation,
       runtime_revision: validProjection.source_revision,
     }, AS_OF)).toEqual({ evaluatorAgeSeconds: 60 });
+    expect(ALERT_RUNTIME_GENERATION_MAX).toBe(Number.MAX_SAFE_INTEGER);
+    expect(ALERT_RUNTIME_REVISION_MAX).toBe(Number.MAX_SAFE_INTEGER);
+    expect(parseAlertRuntimeSourceCompleteness({
+      ...validProjection,
+      runtime_generation: Number.MAX_SAFE_INTEGER,
+      runtime_revision: Number.MAX_SAFE_INTEGER,
+      source_generation: Number.MAX_SAFE_INTEGER,
+      source_revision: Number.MAX_SAFE_INTEGER,
+    }, AS_OF)).toEqual({ evaluatorAgeSeconds: 60 });
 
     const runtimeMissing = {
       ...validProjection,
@@ -1017,6 +1028,7 @@ describe("redacted observation parsing", () => {
       { runtime_component: "delivery" },
       { runtime_generation: 0 },
       { runtime_generation: 1.5 },
+      { runtime_generation: Number.MAX_SAFE_INTEGER + 1 },
       { runtime_last_error_at: "2026-07-17T11:59:40.000Z" },
       { runtime_last_error_code: "evaluator_failed" },
       {
@@ -1029,12 +1041,13 @@ describe("redacted observation parsing", () => {
       { runtime_last_success_at: "2026-07-17T11:54:59.000Z" },
       { runtime_last_success_at: "2026-07-17T11:59:00Z" },
       { runtime_revision: 1 },
+      { runtime_revision: Number.MAX_SAFE_INTEGER + 1 },
       { runtime_status: "unknown" },
       { runtime_updated_at: "2026-07-17T12:00:01.000Z" },
       { source_generation: 0 },
-      { source_generation: 1_000_001 },
+      { source_generation: Number.MAX_SAFE_INTEGER + 1 },
       { source_revision: 0 },
-      { source_revision: 1_000_000_001 },
+      { source_revision: Number.MAX_SAFE_INTEGER + 1 },
     ];
     for (const corruption of corruptions) {
       expect(parseAlertRuntimeSourceCompleteness({

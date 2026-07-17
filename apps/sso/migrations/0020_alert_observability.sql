@@ -10,6 +10,9 @@
 -- Persisted alert timestamps are exact 24-character UTC millisecond strings.
 -- Their canonical form makes text ordering precise; SQLite epoch-second
 -- conversion drops sub-second ownership and chronology differences.
+-- The '+0 seconds' modifier forces calendar normalization. Each formatter
+-- result is also checked for non-null because SQLite treats a null CHECK result
+-- as passing rather than as a constraint violation.
 
 ALTER TABLE "audit_event" ADD COLUMN "actor_ref" text CHECK (
   "actor_ref" IS NULL
@@ -131,7 +134,9 @@ CREATE TABLE "alert_hash_key_sentinel" (
   "created_at" date NOT NULL CHECK (
     typeof("created_at") = 'text'
     AND length("created_at") = 24
-    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at") = "created_at"
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds') IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds')
+      = "created_at"
   )
 );
 
@@ -307,45 +312,74 @@ CREATE TABLE "alert_state" (
     "cooldown_until" IS NULL
     OR (typeof("cooldown_until") = 'text'
       AND length("cooldown_until") = 24
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "cooldown_until")
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "cooldown_until", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "cooldown_until", '+0 seconds'
+      )
         = "cooldown_until")
   ),
   "last_evaluated_at" date NOT NULL CHECK (
     typeof("last_evaluated_at") = 'text'
     AND length("last_evaluated_at") = 24
-    AND strftime('%Y-%m-%dT%H:%M:%fZ', "last_evaluated_at")
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', "last_evaluated_at", '+0 seconds'
+    ) IS NOT NULL
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', "last_evaluated_at", '+0 seconds'
+    )
       = "last_evaluated_at"
   ),
   "last_breached_at" date CHECK (
     "last_breached_at" IS NULL
     OR (typeof("last_breached_at") = 'text'
       AND length("last_breached_at") = 24
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "last_breached_at")
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_breached_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_breached_at", '+0 seconds'
+      )
         = "last_breached_at")
   ),
   "last_cleared_at" date CHECK (
     "last_cleared_at" IS NULL
     OR (typeof("last_cleared_at") = 'text'
       AND length("last_cleared_at") = 24
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "last_cleared_at")
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_cleared_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_cleared_at", '+0 seconds'
+      )
         = "last_cleared_at")
   ),
   "last_notification_scheduled_at" date CHECK (
     "last_notification_scheduled_at" IS NULL
     OR (typeof("last_notification_scheduled_at") = 'text'
       AND length("last_notification_scheduled_at") = 24
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "last_notification_scheduled_at")
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_notification_scheduled_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_notification_scheduled_at", '+0 seconds'
+      )
         = "last_notification_scheduled_at")
   ),
   "created_at" date NOT NULL CHECK (
     typeof("created_at") = 'text'
     AND length("created_at") = 24
-    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at") = "created_at"
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds') IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds')
+      = "created_at"
   ),
   "updated_at" date NOT NULL CHECK (
     typeof("updated_at") = 'text'
     AND length("updated_at") = 24
-    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at") = "updated_at"
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at", '+0 seconds') IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at", '+0 seconds')
+      = "updated_at"
   ),
   UNIQUE ("id", "rule_id", "environment", "source_kind"),
   CHECK (
@@ -821,12 +855,18 @@ CREATE TABLE "security_alert" (
   "first_seen_at" date NOT NULL CHECK (
     typeof("first_seen_at") = 'text'
     AND length("first_seen_at") = 24
-    AND strftime('%Y-%m-%dT%H:%M:%fZ', "first_seen_at") = "first_seen_at"
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "first_seen_at", '+0 seconds')
+      IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "first_seen_at", '+0 seconds')
+      = "first_seen_at"
   ),
   "last_seen_at" date NOT NULL CHECK (
     typeof("last_seen_at") = 'text'
     AND length("last_seen_at") = 24
-    AND strftime('%Y-%m-%dT%H:%M:%fZ', "last_seen_at") = "last_seen_at"
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "last_seen_at", '+0 seconds')
+      IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "last_seen_at", '+0 seconds')
+      = "last_seen_at"
   ),
   "window_seconds" integer NOT NULL
     CHECK ("window_seconds" IN (300, 900, 3600)),
@@ -884,7 +924,12 @@ CREATE TABLE "security_alert" (
     "acknowledged_at" IS NULL
     OR (typeof("acknowledged_at") = 'text'
       AND length("acknowledged_at") = 24
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "acknowledged_at")
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "acknowledged_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "acknowledged_at", '+0 seconds'
+      )
         = "acknowledged_at")
   ),
   "acknowledged_by_ref" text CHECK (
@@ -906,7 +951,10 @@ CREATE TABLE "security_alert" (
     "resolved_at" IS NULL
     OR (typeof("resolved_at") = 'text'
       AND length("resolved_at") = 24
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "resolved_at") = "resolved_at")
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "resolved_at", '+0 seconds')
+        IS NOT NULL
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "resolved_at", '+0 seconds')
+        = "resolved_at")
   ),
   "resolved_by_ref" text CHECK (
     "resolved_by_ref" IS NULL
@@ -931,12 +979,16 @@ CREATE TABLE "security_alert" (
   "created_at" date NOT NULL CHECK (
     typeof("created_at") = 'text'
     AND length("created_at") = 24
-    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at") = "created_at"
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds') IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds')
+      = "created_at"
   ),
   "updated_at" date NOT NULL CHECK (
     typeof("updated_at") = 'text'
     AND length("updated_at") = 24
-    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at") = "updated_at"
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at", '+0 seconds') IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at", '+0 seconds')
+      = "updated_at"
   ),
   UNIQUE ("state_id", "generation"),
   UNIQUE ("id", "generation"),
@@ -1441,12 +1493,18 @@ CREATE TABLE "alert_outbox" (
   "first_seen_at" date NOT NULL CHECK (
     typeof("first_seen_at") = 'text'
     AND length("first_seen_at") = 24
-    AND strftime('%Y-%m-%dT%H:%M:%fZ', "first_seen_at") = "first_seen_at"
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "first_seen_at", '+0 seconds')
+      IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "first_seen_at", '+0 seconds')
+      = "first_seen_at"
   ),
   "last_seen_at" date NOT NULL CHECK (
     typeof("last_seen_at") = 'text'
     AND length("last_seen_at") = 24
-    AND strftime('%Y-%m-%dT%H:%M:%fZ', "last_seen_at") = "last_seen_at"
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "last_seen_at", '+0 seconds')
+      IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "last_seen_at", '+0 seconds')
+      = "last_seen_at"
   ),
   "window_seconds" integer NOT NULL
     CHECK ("window_seconds" IN (300, 900, 3600)),
@@ -1509,7 +1567,12 @@ CREATE TABLE "alert_outbox" (
     "next_attempt_at" IS NULL
     OR (typeof("next_attempt_at") = 'text'
       AND length("next_attempt_at") = 24
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "next_attempt_at")
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "next_attempt_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "next_attempt_at", '+0 seconds'
+      )
         = "next_attempt_at")
   ),
   "lease_id" text CHECK (
@@ -1519,20 +1582,31 @@ CREATE TABLE "alert_outbox" (
     "lease_expires_at" IS NULL
     OR (typeof("lease_expires_at") = 'text'
       AND length("lease_expires_at") = 24
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "lease_expires_at")
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "lease_expires_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "lease_expires_at", '+0 seconds'
+      )
         = "lease_expires_at")
   ),
   "accepted_at" date CHECK (
     "accepted_at" IS NULL
     OR (typeof("accepted_at") = 'text'
       AND length("accepted_at") = 24
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "accepted_at") = "accepted_at")
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "accepted_at", '+0 seconds')
+        IS NOT NULL
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "accepted_at", '+0 seconds')
+        = "accepted_at")
   ),
   "dead_at" date CHECK (
     "dead_at" IS NULL
     OR (typeof("dead_at") = 'text'
       AND length("dead_at") = 24
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "dead_at") = "dead_at")
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "dead_at", '+0 seconds')
+        IS NOT NULL
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "dead_at", '+0 seconds')
+        = "dead_at")
   ),
   "last_error_code" text CHECK (
     "last_error_code" IS NULL
@@ -1547,12 +1621,16 @@ CREATE TABLE "alert_outbox" (
   "created_at" date NOT NULL CHECK (
     typeof("created_at") = 'text'
     AND length("created_at") = 24
-    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at") = "created_at"
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds') IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds')
+      = "created_at"
   ),
   "updated_at" date NOT NULL CHECK (
     typeof("updated_at") = 'text'
     AND length("updated_at") = 24
-    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at") = "updated_at"
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at", '+0 seconds') IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at", '+0 seconds')
+      = "updated_at"
   ),
   UNIQUE (
     "alert_id", "generation", "event_kind", "event_sequence", "channel"
@@ -2027,13 +2105,19 @@ CREATE TABLE "alert_delivery_attempt" (
   "started_at" date NOT NULL CHECK (
     typeof("started_at") = 'text'
     AND length("started_at") = 24
-    AND strftime('%Y-%m-%dT%H:%M:%fZ', "started_at") = "started_at"
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "started_at", '+0 seconds')
+      IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "started_at", '+0 seconds')
+      = "started_at"
   ),
   "completed_at" date CHECK (
     "completed_at" IS NULL
     OR (typeof("completed_at") = 'text'
       AND length("completed_at") = 24
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "completed_at") = "completed_at")
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "completed_at", '+0 seconds')
+        IS NOT NULL
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "completed_at", '+0 seconds')
+        = "completed_at")
   ),
   UNIQUE ("outbox_id", "replay_count", "attempt_number"),
   CHECK (
@@ -2159,28 +2243,48 @@ CREATE TABLE "alert_runtime_status" (
     "lease_expires_at" IS NULL
     OR (typeof("lease_expires_at") = 'text'
       AND length("lease_expires_at") = 24
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "lease_expires_at")
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "lease_expires_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "lease_expires_at", '+0 seconds'
+      )
         = "lease_expires_at")
   ),
   "last_started_at" date CHECK (
     "last_started_at" IS NULL
     OR (typeof("last_started_at") = 'text'
       AND length("last_started_at") = 24
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "last_started_at")
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_started_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_started_at", '+0 seconds'
+      )
         = "last_started_at")
   ),
   "last_success_at" date CHECK (
     "last_success_at" IS NULL
     OR (typeof("last_success_at") = 'text'
       AND length("last_success_at") = 24
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "last_success_at")
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_success_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_success_at", '+0 seconds'
+      )
         = "last_success_at")
   ),
   "last_error_at" date CHECK (
     "last_error_at" IS NULL
     OR (typeof("last_error_at") = 'text'
       AND length("last_error_at") = 24
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "last_error_at")
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_error_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_error_at", '+0 seconds'
+      )
         = "last_error_at")
   ),
   "last_error_code" text CHECK (
@@ -2194,7 +2298,12 @@ CREATE TABLE "alert_runtime_status" (
     "metric_sampled_at" IS NULL
     OR (typeof("metric_sampled_at") = 'text'
       AND length("metric_sampled_at") = 24
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "metric_sampled_at")
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "metric_sampled_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "metric_sampled_at", '+0 seconds'
+      )
         = "metric_sampled_at")
   ),
   "backlog_count" integer
@@ -2210,7 +2319,12 @@ CREATE TABLE "alert_runtime_status" (
     "nonzero_since_at" IS NULL
     OR (typeof("nonzero_since_at") = 'text'
       AND length("nonzero_since_at") = 24
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "nonzero_since_at")
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "nonzero_since_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "nonzero_since_at", '+0 seconds'
+      )
         = "nonzero_since_at")
   ),
   "consecutive_nonzero_samples" integer CHECK (
@@ -2221,12 +2335,17 @@ CREATE TABLE "alert_runtime_status" (
     "watermark_at" IS NULL
     OR (typeof("watermark_at") = 'text'
       AND length("watermark_at") = 24
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "watermark_at") = "watermark_at")
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "watermark_at", '+0 seconds')
+        IS NOT NULL
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "watermark_at", '+0 seconds')
+        = "watermark_at")
   ),
   "updated_at" date NOT NULL CHECK (
     typeof("updated_at") = 'text'
     AND length("updated_at") = 24
-    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at") = "updated_at"
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at", '+0 seconds') IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at", '+0 seconds')
+      = "updated_at"
   ),
   CHECK (
     typeof("generation") = 'integer'
@@ -2438,7 +2557,12 @@ CREATE TABLE "alert_evaluator_bootstrap" (
   "first_success_at" date NOT NULL CHECK (
     typeof("first_success_at") = 'text'
     AND length("first_success_at") = 24
-    AND strftime('%Y-%m-%dT%H:%M:%fZ', "first_success_at")
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', "first_success_at", '+0 seconds'
+    ) IS NOT NULL
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', "first_success_at", '+0 seconds'
+    )
       = "first_success_at"
   ),
   "source_generation" integer NOT NULL CHECK (

@@ -4,6 +4,64 @@ import { beforeEach, describe, expect, it } from "vitest";
 const NOW = "2026-07-17T10:00:00.000Z";
 let evaluationTick = 0;
 
+const ALERT_TIMESTAMP_COLUMNS = [
+  { table: "alert_hash_key_sentinel", columns: ["created_at"] },
+  {
+    table: "alert_state",
+    columns: [
+      "cooldown_until",
+      "last_evaluated_at",
+      "last_breached_at",
+      "last_cleared_at",
+      "last_notification_scheduled_at",
+      "created_at",
+      "updated_at",
+    ],
+  },
+  {
+    table: "security_alert",
+    columns: [
+      "first_seen_at",
+      "last_seen_at",
+      "acknowledged_at",
+      "resolved_at",
+      "created_at",
+      "updated_at",
+    ],
+  },
+  {
+    table: "alert_outbox",
+    columns: [
+      "first_seen_at",
+      "last_seen_at",
+      "next_attempt_at",
+      "lease_expires_at",
+      "accepted_at",
+      "dead_at",
+      "created_at",
+      "updated_at",
+    ],
+  },
+  {
+    table: "alert_delivery_attempt",
+    columns: ["started_at", "completed_at"],
+  },
+  {
+    table: "alert_runtime_status",
+    columns: [
+      "lease_expires_at",
+      "last_started_at",
+      "last_success_at",
+      "last_error_at",
+      "metric_sampled_at",
+      "nonzero_since_at",
+      "watermark_at",
+      "updated_at",
+    ],
+  },
+  { table: "alert_evaluator_bootstrap", columns: ["first_success_at"] },
+] as const;
+
 function nextEvaluationTime(): string {
   evaluationTick += 1;
   return new Date(Date.parse(NOW) + evaluationTick * 1000).toISOString();
@@ -653,6 +711,38 @@ describe("alert observability migration", () => {
     expect(alertSchemaSql).not.toContain(`${"unix"}epoch(`);
     expect(alertSchemaSql).toContain("length(\"updated_at\") = 24");
     expect(alertSchemaSql).toContain("%Y-%m-%dT%H:%M:%fZ");
+    expect(
+      ALERT_TIMESTAMP_COLUMNS.flatMap(({ columns }) => columns),
+    ).toHaveLength(33);
+    for (const { table, columns } of ALERT_TIMESTAMP_COLUMNS) {
+      const tableSql = schema.results.find(({ name }) => name === table)?.sql;
+      expect(tableSql).toBeDefined();
+      const tableInfo = await env.PG72_ID_DB.prepare(
+        `PRAGMA table_info("${table}")`,
+      ).all<{ name: string; type: string }>();
+      expect(
+        tableInfo.results
+          .filter(({ type }) => type.toLowerCase() === "date")
+          .map(({ name }) => name),
+      ).toEqual([...columns]);
+      for (const column of columns) {
+        const formatterPattern = String.raw`strftime\s*\(\s*'%Y-%m-%dT%H:%M:%fZ'\s*,\s*"${column}"\s*,\s*'\+0 seconds'\s*\)`;
+        expect(tableSql).toMatch(
+          new RegExp(
+            String.raw`typeof\s*\(\s*"${column}"\s*\)\s*=\s*'text'`,
+          ),
+        );
+        expect(tableSql).toMatch(
+          new RegExp(String.raw`length\s*\(\s*"${column}"\s*\)\s*=\s*24`),
+        );
+        expect(tableSql).toMatch(
+          new RegExp(`${formatterPattern}\\s+IS NOT NULL`),
+        );
+        expect(tableSql).toMatch(
+          new RegExp(`${formatterPattern}\\s*=\\s*"${column}"`),
+        );
+      }
+    }
     expect(
       schema.results.find(({ name }) => name === "alert_outbox_due_idx")?.sql,
     ).toContain('("status", "next_attempt_at", "lease_expires_at")');
@@ -3598,12 +3688,18 @@ describe("alert observability migration", () => {
           WHERE component = 'security_dlq'`,
       ).run(),
     ).resolves.toBeDefined();
+  });
 
+  it("rejects noncanonical calendars without blocking exact UTC rollovers", async () => {
     for (const timestamp of [
       "2026-07-17 10:00:00.000",
       "2026-07-17T10:00:00Z",
       "2026-07-17T10:00:00.000+00:00",
+      "2026-13-17T10:00:00.000Z",
+      "2026-02-29T10:00:00.000Z",
       "2026-02-30T10:00:00.000Z",
+      "2026-07-17T10:00:60.000Z",
+      "2026-07-17T24:00:00.000Z",
     ]) {
       await expect(
         env.PG72_ID_DB.prepare(
@@ -3614,6 +3710,58 @@ describe("alert observability migration", () => {
           .run(),
       ).rejects.toThrow();
     }
+
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO alert_runtime_status (component, updated_at)
+         VALUES ('logout_queue', '2024-02-29T23:59:59.800Z')`,
+      ).run(),
+    ).resolves.toBeDefined();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE alert_runtime_status
+            SET generation = 1, revision = 1, lease_id = ?,
+                lease_expires_at = '2024-02-29T24:00:00.900Z',
+                updated_at = '2024-02-29T23:59:59.900Z'
+          WHERE component = 'logout_queue'`,
+      )
+        .bind(crypto.randomUUID())
+        .run(),
+    ).rejects.toThrow();
+    const rolloverLease = crypto.randomUUID();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE alert_runtime_status
+            SET generation = 1, revision = 1, lease_id = ?,
+                lease_expires_at = '2024-03-01T00:00:00.900Z',
+                updated_at = '2024-02-29T23:59:59.900Z'
+          WHERE component = 'logout_queue'`,
+      )
+        .bind(rolloverLease)
+        .run(),
+    ).resolves.toBeDefined();
+    const replaceRolloverLease = (
+      updatedAt: string,
+      leaseExpiresAt: string,
+    ) =>
+      env.PG72_ID_DB.prepare(
+        `UPDATE alert_runtime_status
+            SET generation = 2, revision = 2, lease_id = ?,
+                lease_expires_at = ?, updated_at = ?
+          WHERE component = 'logout_queue'`,
+      ).bind(crypto.randomUUID(), leaseExpiresAt, updatedAt);
+    await expect(
+      replaceRolloverLease(
+        "2024-03-01T00:00:00.500Z",
+        "2024-03-01T00:00:01.500Z",
+      ).run(),
+    ).rejects.toThrow();
+    await expect(
+      replaceRolloverLease(
+        "2024-03-01T00:00:00.900Z",
+        "2024-03-01T00:00:01.900Z",
+      ).run(),
+    ).resolves.toBeDefined();
   });
 
   it("classifies delivery attempt expiry at the exact millisecond boundary", async () => {

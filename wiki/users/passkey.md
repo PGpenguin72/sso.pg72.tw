@@ -35,7 +35,7 @@ Passkey 是一種無密碼登入方式，用你裝置上的指紋、臉部辨識
 
 具有 client 管理權限的使用者在建立、修改、輪替 secret、停用或刪除 OAuth client 前，PGID 會要求再完成一次 Passkey 驗證。取消或驗證失敗時，原本的操作不會送出；成功結果只在目前這個登入 session 的短時間窗口內有效。
 
-這項 step-up 與「session 剛建立」是兩個獨立條件。沒有 Passkey 的帳號不能略過，包含 `bootadmin`；請先透過既有 Google 登入建立 fresh session 並註冊 Passkey。若 Google 與所有 Passkey 都遺失，目前沒有可用的自助 recovery/break-glass flow；相關設計與演練尚未完成，不能用 client 管理 API 繞過。
+這項 step-up 與「session 剛建立」是兩個獨立條件。沒有 Passkey 的帳號不能略過，包含 `bootadmin`；請先透過既有 Google 登入建立 fresh session 並註冊 Passkey。Local source 的復原碼只能在你事先建立並保存未使用 code 時替換遺失的 Passkey；它不會授予 client-management step-up，也沒有管理員 bypass。Production 尚未套用 `0019` 或啟用這項功能。
 
 ### 重要保護
 
@@ -45,6 +45,7 @@ Passkey 是一種無密碼登入方式，用你裝置上的指紋、臉部辨識
 ## 建議
 
 * 至少註冊**兩組**不同的 Passkey（例如手機一組、硬體金鑰一組），避免單一裝置遺失就進不了帳號。
+* 如果帳號中心已顯示復原碼，建立後請離線保存；不要把它放在登入 PGID 才能開啟的位置。詳見[使用帳號復原碼](account-recovery.md)。
 * 管理員應保留至少兩條獨立的復原路徑。
 
 ## 下一步

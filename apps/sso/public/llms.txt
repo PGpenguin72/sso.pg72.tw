@@ -4,6 +4,7 @@
 > 以 OpenID Connect / OAuth 2.1（Authorization Code + PKCE S256）提供身分驗證，
 > 日常登入方式為 Google 登入與 Passkey 無密碼登入，另支援 Discord/GitHub/Facebook/Apple/Telegram。
 > Production 目前仍是邀請制 beta；verified Google Email 不取代邀請，Passkey 只供既有帳號使用。
+> Recovery codes 目前只在 local source 完成；production 尚未套用 migration 0019 或啟用 RECOVERY_MODE。
 > Email 不是主鍵，接入 PGID 的服務以不可變的 OIDC `sub` 識別使用者。
 
 ## 給開發者（串接 PGID）

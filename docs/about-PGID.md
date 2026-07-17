@@ -27,7 +27,7 @@ PGID 把「你是誰」這件事集中到一個由 PG72 自己掌控的地方，
 一般使用者：
 
 1. 受邀使用者用 Google 登入 PGID（首次登入仍要求 Google 已驗證 email）；production 目前不開放未受邀者自行建立帳號。
-2. 在帳號中心註冊一組 Passkey，之後可用指紋 / 臉部 / 硬體金鑰無密碼登入。
+2. 在帳號中心註冊一組 Passkey，之後可用指紋 / 臉部 / 硬體金鑰無密碼登入。若環境已由 owner 啟用 recovery，可另外建立並離線保存一次性復原碼。
 3. 之後登入任一已接入 PGID 的服務時，會被導到 PGID 完成登入並在授權畫面按「允許」，就回到該服務。
 4. 在帳號中心管理個人資料、Passkey、登入中的裝置、已授權的應用程式與安全紀錄，並可隨時撤銷單一裝置、其他裝置或全部裝置。
 
@@ -62,6 +62,7 @@ PGID 目前是部署於 `https://sso.pg72.tw` 的 invite-only beta；既有部�
 - 服務的 OIDC client 由管理員 / developer 明確建立，不開放動態自助註冊。
 - Production `REGISTRATION_MODE` 仍是 `invite`；公開註冊 local source 已包含 Turnstile-backed 一次性 intent、版本化法律同意、persistent restricted access 與 manual abuse-response runbook，但 migrations、實際政策版本核准、環境配置、獨立審查、Preview threshold/alert 驗證、其餘安全 gate 與 owner 啟用核准尚未完成。
 - ID token 的中央 `sid`、visited-client ledger、durable back-channel delivery 與 test receiver 已在 local source 實作；migration `0018`、Queue/DLQ provisioning、production RP receivers、外部告警、復原演練與完整 Production GO gate 仍在進行中，完整清單見 [`codex.md`](../codex.md) §9.2。
+- Hash-only recovery codes、獨立短效 recovery session、required-UV replacement Passkey 與全域 session/token revoke 已在 local source 實作；production 尚未套用 `0019`、啟用 `RECOVERY_MODE`、完成獨立 review 或 lost-device/rollback drill，因此目前 production 使用者不應期待帳號中心或 `/recover` 可用。
 
 任何安全宣稱都以可驗證的自動化 gate 與獨立審查為準，不用文件聲明取代驗證。
 

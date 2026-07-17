@@ -7,6 +7,7 @@
 * [開始使用：註冊與登入](users/getting-started.md)
 * [用 Google 登入](users/google-login.md)
 * [設定與使用 Passkey](users/passkey.md)
+* [使用帳號復原碼](users/account-recovery.md)
 * [帳號管理與安全](users/account-management.md)
 
 ## 給開發者

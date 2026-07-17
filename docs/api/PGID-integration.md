@@ -166,7 +166,25 @@ Challenge 由 Web Crypto / SimpleWebAuthn 產生，兩分鐘內有效，在 D1 �
 
 `PASSKEY_STEP_UP_MAX_AGE_SECONDS` 只能設為 60-600 秒，現行值為 600。無 Passkey 時回 `403 {"code":"PASSKEY_ENROLLMENT_REQUIRED","error":"passkey_enrollment_required"}`；未完成或已過期時 client mutation 回 `403 {"code":"PASSKEY_STEP_UP_REQUIRED","error":"passkey_step_up_required"}`。無效、過期或已使用的 challenge 回 generic `passkey_step_up_challenge_invalid`；credential 不存在、屬於其他 user、origin/RP ID/UV/簽章錯誤都只回 generic `passkey_step_up_failed`，不透露 credential ownership。
 
-`bootadmin` 沒有 bypass。首次 bootstrap 使用既有 Google fresh session，在帳號中心註冊 Passkey，再完成 step-up。若 Google 與所有 Passkey 都遺失，目前沒有可用的自助 recovery/break-glass flow；其設計、審核與演練仍是 full Production GO gate，不能繞過此 API gate。以上是 local source contract；production 尚未套 `0014`、部署或完成實機 smoke。
+`bootadmin` 沒有 bypass。首次 bootstrap 使用既有 Google fresh session，在帳號中心註冊 Passkey，再完成 step-up。Local source 的 recovery-code flow 只能在使用者事先建立且仍持有未使用 code 時替換 Passkey；它不建立 step-up、不授權 client-management API，也不是管理員 override。以上是 local source contract；production 尚未套 `0014`/`0019`、啟用 recovery、部署或完成實機 smoke。
+
+#### 5.1.2 Recovery 對 client / RP 的影響
+
+Recovery 是 PGID 第一方帳號功能，不是 OIDC grant，也不提供 RP 可呼叫的新 authentication endpoint。Local source 的實際端點如下；production `RECOVERY_MODE` 仍為 `disabled`，目前不可視為遠端可用 API：
+
+| Endpoint | Principal / contract |
+| --- | --- |
+| `GET /api/account/recovery-codes` | 一般 active PGID session；只回狀態，不回 raw code |
+| `POST /api/account/recovery-codes/rotate` | 同源 JSON、10 分鐘內 normal session、至少一組 Passkey、同一 session 最近完成 step-up；raw codes 只回一次 |
+| `DELETE /api/account/recovery-codes` | 與 rotate 相同 gate；撤銷 active set 與進行中的 recovery session |
+| `POST /api/recovery/start` | 專用 per-IP limiter 後消耗一組 code，建立十分鐘、hash-token、`/api/recovery`-scoped principal |
+| `GET/DELETE /api/recovery/session` | 只檢查或取消 recovery principal；取消不還原已消耗 code |
+| `POST /api/recovery/passkey/options` | 兩分鐘 required-UV replacement-Passkey registration options |
+| `POST /api/recovery/passkey/verify` | 驗證一次性 challenge；成功後只回 one-view replacement codes，要求走一般 Passkey 登入 |
+
+Recovery principal 不能呼叫 authorize、consent、token、userinfo、account、admin 或一般 Passkey endpoints，也不會建立 normal PGID session。成功完成 recovery 時，PGID 在同一 D1 transaction 撤銷該 user 的全部中央 sessions、access tokens 與 refresh tokens，並依既有 `(sid, client_id)` ledger 建立 durable back-channel logout work。RP 因此必須維持 §5.5 的 `sid` receiver / session-validation contract；不得因使用者剛完成 recovery 而保留或重建舊 RP session。Queue 暫時失敗不會恢復中央 authentication state。
+
+`0019` 只新增 schema，不會自動替既有 user 建立 codes，也不會啟用 runtime。Production deployment record 仍只確認 migration 至 `0012`；隔離 Preview、獨立 review、lost-device/concurrency/rollback/multi-RP drill 與 owner 核准均未完成。Operator runbook 見 [`docs/runbooks/account-recovery.md`](../runbooks/account-recovery.md)。
 
 ### 5.2 Client 類型
 

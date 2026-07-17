@@ -2,9 +2,9 @@
 
 PGID currently runs as a deployed, invite-only production beta. Existing deployment records show Copy and Link using PGID for production sign-in. Public registration remains disabled.
 
-This deployed state is not the same as full Production GO or general-public approval. Local source now includes the central ID-token `sid`, visited-client ledger, replay-safe durable back-channel logout delivery, and an idempotent test RP receiver. Final independent source review of this release candidate, Preview and production rollout, external alerting, recovery/rotation drills, and the other gates below are still incomplete; no document may treat local tests or production traffic alone as proof that those controls passed.
+This deployed state is not the same as full Production GO or general-public approval. Local source now includes the central ID-token `sid`, visited-client ledger, replay-safe durable back-channel logout delivery, an idempotent test RP receiver, and a default-disabled recovery-code path. Final independent source review of this release candidate, Preview and production rollout, external alerting, recovery/rotation drills, and the other gates below are still incomplete; no document may treat local tests or production traffic alone as proof that those controls passed.
 
-The repository's local source now includes the narrowly scoped Mail Path A introspection prerequisite, Passkey step-up for every OAuth client mutation, public-registration prerequisites using Turnstile, versioned legal acceptance and persistent restricted-account access, and the global-logout source contract. Production has none of migrations `0013`/`0014`/`0015`/`0016`/`0017`/`0018` or this Worker version; `pgid-mail-introspect` has not been provisioned, no public-registration or logout-Queue bindings have been configured, no remote D1 operation was performed, and the mail VPS and production RP receivers have not been cut over. These local results must not be represented as production behavior.
+The repository's local source now includes the narrowly scoped Mail Path A introspection prerequisite, Passkey step-up for every OAuth client mutation, public-registration prerequisites using Turnstile, versioned legal acceptance and persistent restricted-account access, the global-logout source contract, and recovery migration `0019`. Production has none of migrations `0013` through `0019` or this Worker version; `pgid-mail-introspect` has not been provisioned, no public-registration or logout-Queue bindings have been configured, `RECOVERY_MODE` remains disabled, no remote D1 operation was performed, and the mail VPS and production RP receivers have not been cut over. These local results must not be represented as production behavior.
 
 ## Reporting
 
@@ -38,7 +38,8 @@ Before enabling `REGISTRATION_MODE=public` or declaring full Production GO, comp
 - DAST across auth, OIDC, admin, gateway, and logout endpoints;
 - automated SAST, dependency, secret, and IaC/config scanning;
 - independently review and deploy the locally implemented central visited-client ledger and replay-safe back-channel logout after applying migration `0018`; provision and exercise its dedicated Queue/DLQ, external retry/dead-delivery alerting, and production RP verification;
-- recovery-code/break-glass, signing-key rotation, D1 restore, and Queue retry/DLQ drills;
+- independently review migration `0019` and the local recovery path, then complete an isolated Preview lost-device, concurrency, rollback, session/token revocation, and RP logout-delivery drill before any owner-approved enablement;
+- signing-key rotation, D1 restore, and Queue retry/DLQ drills;
 - deploy, configure, independently review, and smoke-test the locally implemented Turnstile, versioned Terms/Privacy acceptance, and restricted-account paths after applying migrations `0016` and `0017`; the owner must approve the exact live policy versions, validate the initial abuse thresholds in Preview, assign an operator, and test external alert delivery;
 - deploy and independently review the locally implemented Passkey step-up for high-risk system-client provisioning and secret rotation; production must apply migration `0014`, and the session-age freshness check remains an additional condition rather than a substitute;
 - no unresolved Critical or High finding; every accepted Medium still needs an owner, deadline, and compensating control.
@@ -60,6 +61,20 @@ Migration `0017` adds an independent `user.accessLevel` with `standard` and `res
 - [`docs/runbooks/public-registration-abuse.md`](./docs/runbooks/public-registration-abuse.md) defines the current manual, redacted D1 evidence, initial thresholds, triage, containment, false-positive handling, and configuration rollback. It is not an external monitoring system; Preview threshold validation, operator assignment, aggregation, and alert delivery remain public-launch gates.
 
 Production is still invite-only and has not applied `0017`, deployed this Worker, or exercised these controls in Preview/production.
+
+## Local Recovery Boundary
+
+Migration `0019` and the current Worker add a recovery path that remains disabled by default and is not deployed in production. `RECOVERY_MODE=disabled` returns 404 from both account-management and lost-device recovery endpoints; applying the migration alone does not enable the feature. Existing users receive no recovery-code rows automatically.
+
+- An active user must first create codes from a normal session less than ten minutes old after completing Passkey step-up on that exact session. There is no administrator or `bootadmin` bypass. Each generation contains ten 160-bit `PGID-R1` codes; D1 stores only globally unique SHA-256 digests, and raw codes are returned once under `Cache-Control: no-store`.
+- Recovery entry is independently rate-limited before parsing or lookup. Malformed, unknown, consumed, revoked, expired, suspended, and concurrent-loser inputs return the same generic denial. A successfully accepted code is consumed permanently even if the user cancels or the later Passkey ceremony fails.
+- The recovery cookie is host-only, `Secure`, `HttpOnly`, `SameSite=Strict`, and restricted to `/api/recovery`. Only its hash is stored. The ten-minute recovery principal is separate from a Better Auth session and cannot access account, admin, consent, OIDC, token, or ordinary Passkey-management surfaces.
+- Replacement Passkey registration uses a two-minute one-time challenge, exact configured origin and RP ID, required user verification, bounded input, no attestation, and a globally unique credential ID. It does not disclose email or provider identities.
+- Successful completion atomically creates the replacement Passkey and audit event, revokes the old code set, creates a new generation, revokes all central sessions and access/refresh tokens, clears relevant verification state, and creates durable logout work for visited RPs. Any core D1 failure rolls back the batch. Queue fan-out happens only after commit and cannot resurrect sessions or codes.
+- Removing the final linked social provider requires both another sign-in method and at least one active unused recovery code while recovery is enabled. The committing DELETE repeats the code and login-method predicates so a concurrent recovery-code consume cannot bypass the policy.
+- Audit, Queue, logs, and operator views must never contain raw recovery codes, recovery cookies, Passkey challenges, credential IDs, full email, or full IP. Recovery codes are not daily login credentials, cannot be reconstructed from backups, and must not become an email-based account-merging or support override path.
+
+The local workerd suite covers hash-only storage, one-view rotation, revoke/cascade, freshness and step-up races, restricted/suspended state, concurrent consumption, cookie scope, cancellation, limiter failure, exact origin, required UV, challenge replay, completion rollback, Queue failure, normal Passkey re-login, and logout outbox creation. This evidence is local only. Before owner-approved enablement, complete the migration, isolated Preview, independent review, lost-device, concurrency, rollback, and multi-RP logout acceptance in [`docs/runbooks/account-recovery.md`](./docs/runbooks/account-recovery.md). Production records still show migrations only through `0012` and `RECOVERY_MODE` disabled.
 
 ## Local Mail Introspection Boundary
 

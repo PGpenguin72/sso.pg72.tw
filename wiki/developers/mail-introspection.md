@@ -31,7 +31,7 @@ Endpoint 沒有 request 欄位，建議送空 body；在 4 KiB admin body 上限
 
 建立出的 client 是 unowned、hash-only、introspection-only 的 system service client，沒有 redirect URI、scope 或 token-issuing grant。Secret rotation、停用與刪除同樣只允許 `clients.manage_all` actor，並要求 same-origin cookie、fresh session 與 recent Passkey step-up。
 
-10 分鐘 session age 只是 freshness gate，不能替代 Passkey assertion。沒有 Passkey 時沒有 `bootadmin` bypass；先以既有 Google fresh session 註冊 Passkey，再完成 step-up。若 Google 與所有 Passkey 都遺失，目前沒有可用的自助 recovery/break-glass flow。Production 套用 `0014`、部署、獨立 review 與實機 smoke 前，不得把此 local contract 宣稱為已上線。
+10 分鐘 session age 只是 freshness gate，不能替代 Passkey assertion。沒有 Passkey 時沒有 `bootadmin` bypass；先以既有 Google fresh session 註冊 Passkey，再完成 step-up。Local recovery-code flow 只能替換 Passkey，完成後仍須一般登入與新的 step-up；它不會直接授權 provisioning。Production 套用 `0014`/`0019`、部署、獨立 review、啟用 recovery 與完成實機 smoke 前，不得把任一 local contract 宣稱為已上線。
 
 ## Runtime request
 

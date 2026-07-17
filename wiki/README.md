@@ -16,6 +16,7 @@ description: PGID 使用者與開發者教學站，wiki.sso.pg72.tw 的內容源
 * [開始使用：註冊與登入](users/getting-started.md)——第一次使用 PGID。
 * [用 Google 登入](users/google-login.md)——用 Google 帳號登入。
 * [設定與使用 Passkey](users/passkey.md)——無密碼登入的設定與管理。
+* [使用帳號復原碼](users/account-recovery.md)——在已啟用的環境建立、保存與使用一次性復原碼。
 * [帳號管理與安全](users/account-management.md)——裝置 session、已授權應用、撤銷與帳號刪除。
 
 ### 給開發者

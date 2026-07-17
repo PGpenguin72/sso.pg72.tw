@@ -8,14 +8,15 @@ PGID is the custom identity provider for PG72 services. Phase 0 runs on Cloudfla
 - nonempty central `sid` claims on every user ID token, with refresh issuance bound to the same live user session;
 - admin/developer-managed OAuth clients (dynamic registration disabled), mandatory consent, and the `bootadmin`/`admin`/`developer`/`user` platform role model;
 - host-only central sessions, device revocation, invitations, account suspension, and audit events;
-- versioned D1 migrations through local source `0018`: `0013` normalizes confidential client authentication, `0014` adds Passkey step-up state, `0015` enforces global provider-identity ownership, `0016` adds one-time public-registration intents plus immutable legal-acceptance history, `0017` adds persistent restricted-account access, and `0018` adds durable global-logout state; the latest production record remains applied through `0012` until the owner verifies and applies the pending migrations in order;
+- versioned D1 migrations through local source `0019`: `0013` normalizes confidential client authentication, `0014` adds Passkey step-up state, `0015` enforces global provider-identity ownership, `0016` adds one-time public-registration intents plus immutable legal-acceptance history, `0017` adds persistent restricted-account access, `0018` adds durable global-logout state, and `0019` adds hash-only recovery codes plus a separate short-lived recovery principal; the latest production record remains applied through `0012` until the owner verifies and applies the pending migrations in order;
 - a local durable global-logout path: actual `(sid, client)` visits, atomic D1 revoke/audit/outbox writes, a dedicated Queue/DLQ, bounded retry/Cron recovery, redacted operator replay, and an idempotent test-RP receiver; migration, queue provisioning, production RP receivers, external alerts, and rollout evidence remain incomplete;
 - a tightly scoped mail introspection path for Dovecot: local source authorizes only `pgid-mail-introspect` to inspect eligible `pg72-webmail` access tokens and disclose verified email; this path is not deployed or provisioned in production;
 - Passkey step-up before every OAuth client mutation, using a one-time session/user-bound challenge, required user verification, and a D1 session timestamp; this path is implemented and tested locally but not migrated, deployed, independently reviewed, or smoke-tested in production;
+- a local, default-disabled recovery path: ten one-use 160-bit `PGID-R1` codes, hash-only storage, an isolated ten-minute recovery session, required-UV Passkey replacement, atomic code rotation, and central session/token revocation; production has not applied `0019`, enabled `RECOVERY_MODE`, or completed a recovery drill;
 - an independent OIDC relying party based on `oauth4webapi`;
 - workerd regression tests for discovery, security headers, registration policy, request aborts, D1 constraints, PKCE transactions, and callback replay.
 
-The canonical architecture and migration decisions are in [`codex.md`](./codex.md). PGID is deployed at `https://sso.pg72.tw` as an invite-only beta, and deployment records show Copy and Link using it in production. This is not full Production GO: public registration, global-logout Preview/production rollout and RP receivers, external alerting, recovery drills, and other security gates remain incomplete.
+The canonical architecture and migration decisions are in [`codex.md`](./codex.md). PGID is deployed at `https://sso.pg72.tw` as an invite-only beta, and deployment records show Copy and Link using it in production. This is not full Production GO: public registration, global-logout Preview/production rollout and RP receivers, external alerting, recovery-code Preview/production rollout and drills, and other security gates remain incomplete.
 
 ## Documentation
 
@@ -29,6 +30,7 @@ The canonical architecture and migration decisions are in [`codex.md`](./codex.m
 | [`docs/api/PGID-integration.md`](./docs/api/PGID-integration.md) | Concise integration reference: endpoints, scopes, claims, token lifetimes, client auth, and copyable `oauth4webapi`/generic examples. |
 | [`docs/runbooks/public-registration-abuse.md`](./docs/runbooks/public-registration-abuse.md) | Local public-registration abuse thresholds, triage, account containment, false-positive handling, and rollback. |
 | [`docs/runbooks/global-logout.md`](./docs/runbooks/global-logout.md) | Global-logout migration checks, Preview acceptance, delivery triage/replay, failure drills, and rollback. |
+| [`docs/runbooks/account-recovery.md`](./docs/runbooks/account-recovery.md) | Recovery migration checks, isolated Preview acceptance, incident triage, enablement, and rollback. |
 | [`wiki/`](./wiki/SUMMARY.md) | GitBook-compatible tutorial site (content source for `wiki.sso.pg72.tw`): user guides and developer walkthroughs. |
 
 ## Registration Policy
@@ -112,7 +114,7 @@ pnpm --filter @pg72/test-rp db:migrate:local
 pnpm --filter @pg72/id db:seed-test-rp:local
 ```
 
-Copy tracked `apps/sso/.dev.vars.example` to ignored `apps/sso/.dev.vars`, then replace the required placeholders with a random local secret and development Google credentials. The template exercises public mode, so it also needs a hostname-scoped Turnstile test widget and approved local Terms/Privacy version identifiers; set `REGISTRATION_MODE=invite` instead when that flow is not under test. Optional provider values are intentionally empty so copying the template cannot enable a provider; only fill them in when testing that provider. Never commit the real `.dev.vars`.
+Copy tracked `apps/sso/.dev.vars.example` to ignored `apps/sso/.dev.vars`, then replace the required placeholders with a random local secret and development Google credentials. The template exercises public mode, so it also needs a hostname-scoped Turnstile test widget and approved local Terms/Privacy version identifiers; set `REGISTRATION_MODE=invite` instead when that flow is not under test. Recovery remains independently controlled by `RECOVERY_MODE` and defaults to `disabled`; enable it only in a disposable local or isolated Preview environment prepared through migration `0019`. Optional provider values are intentionally empty so copying the template cannot enable a provider; only fill them in when testing that provider. Never commit the real `.dev.vars`.
 
 ```bash
 openssl rand -base64 32
@@ -193,13 +195,13 @@ Full Production GO checklist:
 3. Do not run the local test client seed against production. The remote test client and its grants were removed.
 4. Create production OAuth clients through an authenticated admin operation with exact HTTPS redirect URIs.
 5. Configure Google callback `https://sso.pg72.tw/callback/google`.
-6. Re-run real Google and production Passkey flows, verify Copy/Link sign-out, and complete the `0018`/dedicated Queue/DLQ rollout, each RP receiver, multi-RP/failure/rollback drills, external alerts, recovery, rotation, restore, and independent-review gates before changing the beta status.
+6. Re-run real Google and production Passkey flows, verify Copy/Link sign-out, and complete the `0018`/dedicated Queue/DLQ rollout, each RP receiver, multi-RP/failure/rollback drills, external alerts, the `0019` recovery-code rollout and lost-device drill, signing-key rotation, restore, and independent-review gates before changing the beta status.
 
 Mail Path A remains a separate owner-run rollout:
 
 1. Review the locally implemented Passkey step-up and verify its session/challenge binding, UV, replay, expiry, and missing-Passkey behavior independently; production still lacks migration `0014` and this Worker version.
 2. Verify the exact production `pg72-webmail` client metadata and take a private production D1 backup.
-3. Run the provider-identity duplicate preflight in `codex.md` §0.1, apply the reviewed pending migrations in numeric order (`0013` through `0018`), provision the dedicated logout Queue/DLQ, and deploy the verified Worker source with `PASSKEY_STEP_UP_MAX_AGE_SECONDS=600` plus Rate Limiting namespaces `1004` and `1005` bound as configured. Migrations `0016`–`0018` are required by this Worker schema even while production remains invite-only; applying them does not authorize changing `REGISTRATION_MODE` or enabling an RP receiver.
+3. Run the provider-identity and Passkey credential duplicate preflights in `codex.md` §§0.1-0.2, apply the reviewed pending migrations in numeric order (`0013` through `0019`), provision the dedicated logout Queue/DLQ, and deploy the verified Worker source with `PASSKEY_STEP_UP_MAX_AGE_SECONDS=600` plus Rate Limiting namespaces `1004`, `1005`, and `1006` bound as configured. Migrations `0016`–`0019` are required by this Worker schema even while production remains invite-only and recovery-disabled; applying them does not authorize changing `REGISTRATION_MODE`, changing `RECOVERY_MODE`, or enabling an RP receiver.
 4. After Passkey step-up, use a same-origin PGID admin session less than 10 minutes old to provision `pgid-mail-introspect`; immediately store its one-time secret in the approved secret store, never source, logs, issues, or chat.
 5. Verify eligible active, ineligible inactive, and bad-credential `401` production behavior. Verify rate-limit `429` and limiter-failure `503` only in isolated Preview or a controlled local test, never by flooding or breaking production.
 6. Cut over Dovecot/Roundcube only in an owner-controlled maintenance window with

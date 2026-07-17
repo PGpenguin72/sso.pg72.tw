@@ -25,7 +25,7 @@ PGID **不開放動態自助註冊**。每個 client 由 standard access 的 PGI
 
 建立、更新、輪替 secret、停用 / 啟用或刪除 client 都是同源 admin mutation：請求必須帶有效的 PGID session cookie，且 `Origin` 必須精確等於 PGID 的 `AUTH_BASE_URL`。這些操作只接受 `createdAt` 距目前時間小於 10 分鐘的 session；不符合時固定回 `403` 與 `{"code":"SESSION_NOT_FRESH","error":"fresh_session_required"}`。
 
-Local source 還要求同一個 D1 session 最近完成 Passkey step-up。帳號中心會在 mutation 前啟動原生 Passkey 驗證；取消或驗證失敗時不會送出原操作。10 分鐘 session age 只是額外 gate，不能替代 step-up。沒有 Passkey 時不提供 bypass，包含 `bootadmin`；先用既有 Google fresh session 註冊 Passkey，再操作 client。若 Google 與所有 Passkey 都遺失，目前沒有可用的自助 recovery/break-glass flow。
+Local source 還要求同一個 D1 session 最近完成 Passkey step-up。帳號中心會在 mutation 前啟動原生 Passkey 驗證；取消或驗證失敗時不會送出原操作。10 分鐘 session age 只是額外 gate，不能替代 step-up。沒有 Passkey 時不提供 bypass，包含 `bootadmin`；先用既有 Google fresh session 註冊 Passkey，再操作 client。Local recovery-code flow 只能替換 Passkey，完成後仍須一般登入；它不會寫入 step-up timestamp 或授權 client mutation。Production 尚未套用 `0019` 或啟用 recovery。
 
 Step-up 使用同源的 `POST /api/account/passkey-step-up/challenge` 與 `POST /api/account/passkey-step-up/verify`。Challenge 兩分鐘內有效、只能使用一次，並綁定目前的 user 與 D1 session；WebAuthn 必須完成 user verification。Step-up 有效期只能設定為 60–600 秒，目前為 600 秒。沒有 Passkey 時回 `PASSKEY_ENROLLMENT_REQUIRED`；未完成或已過期時，client mutation 回 `PASSKEY_STEP_UP_REQUIRED`。Production 尚未套用 `0014` 或部署此行為。
 

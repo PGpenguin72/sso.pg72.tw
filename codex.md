@@ -7,7 +7,7 @@
 
 ## 0. Phase 0 實作狀態
 
-截至 2026-07-17，repository source 包含 SSO Worker、React 帳號中心、D1 migrations `0001`–`0018`、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理、ID-token central `sid` contract、durable global logout ledger/outbox/Queue delivery、Mail Path A introspection prerequisite、Passkey client-mutation step-up、Telegram verified-email enrollment boundary、全域 provider-identity 唯一 ownership、Turnstile-backed public-registration intent、版本化法律同意紀錄、公開新帳號 restricted access 與 abuse-response runbook，以及使用 `oauth4webapi` 的獨立 test RP。每個 release candidate 都必須重跑本 repository 的 typecheck、workerd suite、production build 與 test RP protocol gate；本地通過不得寫成遠端已部署。
+截至 2026-07-17，repository source 包含 SSO Worker、React 帳號中心、D1 migrations `0001`–`0019`、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理、ID-token central `sid` contract、durable global logout ledger/outbox/Queue delivery、Mail Path A introspection prerequisite、Passkey client-mutation step-up、Telegram verified-email enrollment boundary、全域 provider-identity 唯一 ownership、Turnstile-backed public-registration intent、版本化法律同意紀錄、公開新帳號 restricted access 與 abuse-response runbook，以及預設關閉、hash-only 的 recovery-code/Passkey replacement flow 與使用 `oauth4webapi` 的獨立 test RP。每個 release candidate 都必須重跑本 repository 的 typecheck、workerd suite、production build 與 test RP protocol gate；本地通過不得寫成遠端已部署。
 
 `0013_confidential_client_secret_post.sql` 將既有 confidential client metadata 正規化為 `client_secret_post`；它不旋轉 secret、不改 grant/token。`0014_passkey_step_up.sql` 新增 session step-up timestamp 與短效 challenge table。兩者都不代表 production 已套用；現有 deployment record 仍只確認 production D1 至 `0012`，必須由 owner 在維護窗口依序確認與執行。
 
@@ -18,6 +18,8 @@
 `0017_restricted_account_access.sql` 新增獨立於 lifecycle status 的 `user.accessLevel`、既有資料 `standard` default/backfill，以及 restricted role/provider-link/client-owner D1 guards。任何含 restricted request guard 的 Worker 都必須在部署前先套用 `0017`；migration 可在 `invite` 模式下先套用且不會改變現有 production 註冊模式。Production 尚未套用 `0017` 或部署此 Worker。
 
 `0018_global_logout.sql` 新增 client back-channel URI、實際 `(sid, client_id)` visit ledger、durable logout delivery/attempt evidence 與 access-token visit trigger；舊而未被 runtime 使用的 delivery table 會保留為 `logout_delivery_legacy_0018`。任何含 global-logout Worker 的環境都必須先套用 `0018`，並 provision 專用 logout Queue/DLQ。Production 尚未套用 `0018`、部署此 Worker、provision 專用 Queue，或完成任何 production RP receiver 驗收。
+
+`0019_recovery_codes.sql` 新增 recovery code set、一次性 code hash、獨立短效 recovery session 與 Passkey registration challenge；既有使用者不會自動取得 recovery code。Migration 不會自行啟用功能，runtime 仍由 `RECOVERY_MODE` 控制。Production deployment record 仍只確認至 `0012`，尚未套用 `0019`、綁定 recovery limiter、啟用 recovery、完成獨立 review 或執行 lost-device/rollback drill。
 
 ### 0.1 Provider Identity Migration Preflight
 
@@ -30,9 +32,22 @@ GROUP BY providerId, accountId
 HAVING COUNT(*) > 1;
 ```
 
-必須回傳零列。若有任何 duplicate，停止 rollout，獨立審查受影響的使用者與 audit evidence；不得自動刪除、重新指派或合併 identity owner。之後先建立 private backup / Time Travel checkpoint，於隔離 Preview 驗證後才依序套用 `0013`、`0014`、`0015`、`0016`、`0017`、`0018`。
+必須回傳零列。若有任何 duplicate，停止 rollout，獨立審查受影響的使用者與 audit evidence；不得自動刪除、重新指派或合併 identity owner。之後先建立 private backup / Time Travel checkpoint，於隔離 Preview 驗證後才依序套用 `0013`、`0014`、`0015`、`0016`、`0017`、`0018`、`0019`。
 
-既有公開部署紀錄顯示 `pg72-id` 已部署至 `https://sso.pg72.tw`，production D1 已套用至 `0012`，Copy 與 Link 也已切換 production traffic 至 PGID。這些紀錄建立了「已部署 invite beta」現況，但仍不是完整 Production GO：global logout ledger/outbox/delivery 只在 local source 完成，Preview/production migration、專用 Queue/DLQ、各 RP receiver、外部告警、完整復原演練與其他 §9.2 gate 尚未完成。任何 maintenance operation 前都必須由授權 operator 重新驗證實際遠端版本與 migration 狀態。
+### 0.2 Recovery Credential Migration Preflight
+
+`0019` 將 `passkey.credentialID` 收緊為全域唯一。套用前由 owner 對目標 D1 執行唯讀 preflight：
+
+```sql
+SELECT credentialID, COUNT(*) AS copies
+FROM passkey
+GROUP BY credentialID
+HAVING COUNT(*) > 1;
+```
+
+必須回傳零列。任何 duplicate 都停止 `0019` rollout，保留 private evidence 並獨立審查 credential ownership；不得讓 migration 或 coding agent 自動刪除、重新指派或合併 Passkey。Provider identity 與 Passkey preflight 都通過、backup/checkpoint 完成後，才可在隔離 Preview 依序驗證 pending migrations。
+
+既有公開部署紀錄顯示 `pg72-id` 已部署至 `https://sso.pg72.tw`，production D1 已套用至 `0012`，Copy 與 Link 也已切換 production traffic 至 PGID。這些紀錄建立了「已部署 invite beta」現況，但仍不是完整 Production GO：global logout 與 recovery-code path 只在 local source 完成，`RECOVERY_MODE` 維持 disabled，Preview/production migration、專用 Queue/DLQ、各 RP receiver、外部告警、完整復原演練與其他 §9.2 gate 尚未完成。任何 maintenance operation 前都必須由授權 operator 重新驗證實際遠端版本與 migration 狀態。
 
 Preview 必須使用獨立 Cloudflare account、D1、queue、secret、domain、Google callback 與 Rate Limiting namespace，不得以 production D1 或 production secret 代替 Preview。
 
@@ -344,6 +359,8 @@ access:                  standard <-> restricted
 - [x] Local source 的 visited-client ledger、durable logout outbox、opaque delivery key、原子 `in_flight`/terminal attempt evidence、self-delete 全批 rollback、專用 Queue consumer、Cron replayer、bounded retry、redacted operator replay、bounded JWKS reader 與 test-RP receiver/regression。
 - [ ] 套用 `0018`、provision 隔離 logout Queue/DLQ、完成 Preview multi-RP/failure/rollback exercise、部署各 production RP receiver，並實作及測試外部 DLQ/dead-delivery 告警；local source 完成不等於全面上線。
 - [ ] 將 local source 已實作的 Passkey step-up 與 migration `0014` 部署至 production，完成獨立 review 與實機 smoke；10 分鐘 session-age freshness 仍是額外條件，不能替代重新驗證。
+- [x] Local source 的 `0019` recovery schema、hash-only code management、獨立 recovery principal、required-UV Passkey replacement、atomic session/token/logout revocation、one-view replacement codes、UI 與 workerd regression。
+- [ ] 在隔離 Preview 套用 `0019`、綁定專用 recovery limiter、以 Preview-only 帳號完成 lost-device/concurrency/rollback/multi-RP logout exercise、獨立 source/security review 與 operator runbook 驗收；production 維持 `RECOVERY_MODE=disabled`，直到 owner 另行核准部署與實機 smoke。
 
 ### 9.3 Google
 
@@ -361,14 +378,25 @@ access:                  standard <-> restricted
 - 支援同步 Passkey、平台驗證器與硬體安全金鑰。
 - 使用者可查看、命名與移除每一組 Passkey。
 - 管理員至少登錄兩組不同復原路徑的 Passkey。
-- 移除最後一組 Passkey、變更 Email 與管理 client 必須 fresh authentication；未來建立 recovery codes 時也必須套用同一要求。
+- 移除最後一組 Passkey、變更 Email、管理 client，以及建立、輪替或撤銷 recovery codes 必須 fresh authentication；recovery-code mutation 另要求同一 session 最近完成 Passkey step-up。
 - 所有 client mutation 同時要求 session 建立時間在 10 分鐘內，並要求該 D1 session 的 Passkey step-up 時戳仍在 `PASSKEY_STEP_UP_MAX_AGE_SECONDS`（60-600 秒，現行 600）內；兩者缺一不可。
 - Step-up 使用 `POST /api/account/passkey-step-up/challenge` 與 `/verify`。Challenge 由 Web Crypto/SimpleWebAuthn 產生、兩分鐘內有效、一次性且綁定 user + session；assertion 強制 exact origin、RP ID、credential ownership 與 user verification。成功後先以 guarded CAS 更新 credential counter，再以 D1 batch 先寫 success audit、最後寫入依賴該 exact audit event 的 session timestamp；任何 guard 失敗都不會產生有效 step-up。
-- 沒有 Passkey 的帳號一律回 `PASSKEY_ENROLLMENT_REQUIRED`，包含 `bootadmin`，沒有 runtime bypass。首次 bootstrap 以既有 Google fresh session 註冊 Passkey 後再 step-up。若 Google 與所有 Passkey 都遺失，目前沒有可用的自助 recovery/break-glass flow；其設計、審核與演練仍是 full Production GO gate，不能以 client API bypass 代替。
+- 沒有 Passkey 的帳號一律回 `PASSKEY_ENROLLMENT_REQUIRED`，包含 `bootadmin`，沒有 runtime bypass。首次 bootstrap 以既有 Google fresh session 註冊 Passkey 後再 step-up。Local recovery source 只能在使用者事先建立且仍持有未使用 recovery code 時替換 Passkey；它不是 client-management bypass，production 尚未啟用。
 - 以上行為已在 local source 以真實 P-256 assertion、replay、cross-session、expiry、missing-Passkey 與 UV regression 驗證；production 尚未套用 `0014` 或部署，不能宣稱遠端 blocker 已關閉。
-- Recovery code 尚未實作；未來只能供一次性帳號復原，不作為日常登入方式。
 
-### 9.5 Telegram
+### 9.5 Recovery codes（local source，production disabled）
+
+- `RECOVERY_MODE` 是獨立 runtime switch；`disabled` 時管理與 recovery endpoints 都回 404。Migration `0019` 本身不啟用功能，production 必須維持 disabled，直到隔離 Preview、獨立 review、runbook drill 與 owner 核准完成。
+- 帳號中心的 `GET /api/account/recovery-codes` 只回 configured、generation、remaining、count、format 與 nullable expiry 狀態，不回 raw code。`POST /api/account/recovery-codes/rotate` 與 `DELETE /api/account/recovery-codes` 都要求 active normal session、session 建立未滿 10 分鐘、至少一組 Passkey，以及同一 D1 session 最近完成 Passkey step-up；沒有 `bootadmin`/admin bypass，restricted 但 active 的使用者仍可管理自己的 codes。所有 eligibility 與 generation/active-set snapshot 在 committing D1 batch 再驗一次。
+- 每個 generation 固定產生十組 `PGID-R1` code；每組由 Web Crypto 產生 20 random bytes（160 bits），以不含易混淆字元的 32-character payload 顯示。Parser 只接受 ASCII 大小寫、空白與連字號的等價輸入；D1 全域只保存 canonical code 的 SHA-256 unpadded base64url digest。Raw codes 只在建立、輪替或成功復原時的 `no-store` response 顯示一次，不進 log/audit/Queue。現行 set 不自動到期，`expires_at` 保留為 nullable future-policy field。
+- `POST /api/recovery/start` 先使用專用 per-IP `RECOVERY_RATE_LIMITER`，再執行 constant-shape hash lookup；malformed、unknown、used、revoked、expired、suspended 與並行輸家回相同泛化拒絕。Code 一旦成功開始 recovery 就永久 consumed；取消或後續失敗不會恢復它。
+- 成功 start 只建立十分鐘的獨立 recovery principal。Browser 取得 host-only `__Secure-pg72_recovery` cookie，固定 `Path=/api/recovery`、`Secure`、`HttpOnly`、`SameSite=Strict`；D1 只存 token hash。它不能授權 Better Auth、account、admin、OIDC 或任何一般 endpoint，也不建立 normal session。
+- Recovery Passkey challenge 兩分鐘內有效且一次性，registration 強制 exact origin/RP ID、required user verification、resident-key preferred、attestation none，並排除使用者既有 credentials。Challenge、response 與欄位長度有明確上限；credential ID 在 D1 全域唯一。
+- 成功 completion 在單一 D1 batch 建立新 Passkey與 success audit、撤銷舊 recovery set、建立下一 generation 十組 hashes、撤銷所有 central sessions/access tokens/refresh tokens、清除相關 verification state，並為已造訪 RP 建立 durable logout delivery。任何核心 statement 失敗整批 rollback；Queue fan-out 只在 commit 後進行。Raw replacement codes 只回一次，recovery principal 隨舊 set cascade 移除，使用者必須用新 Passkey 走一般登入。
+- 移除最後一個 social provider 除了必須保留至少一組 Passkey外，也必須在 enabled mode 下存在 active、未到期且至少一組 unused recovery code；request check 與 committing DELETE 都重驗，避免 code-consumption race。多於一個 social provider 時不增加這個額外限制。
+- Local test 覆蓋 code entropy/格式/hash-only storage、rotation/revoke、fresh+step-up race、restricted/suspended state、並行 single winner、cookie scope、取消不復原、limiter failure、exact origin、required UV、challenge replay、atomic completion/rollback、Queue failure、normal Passkey re-login 與既有 RP logout outbox。完整 Preview/production acceptance 見 [`docs/runbooks/account-recovery.md`](./docs/runbooks/account-recovery.md)。
+
+### 9.6 Telegram
 
 - Telegram Login Widget payload 必須以 bot token 衍生的 HMAC 驗證，並拒絕過期或未來時間超出容許範圍的 payload。
 - Telegram numeric user ID 只作 provider account identifier，不作 email、OIDC `sub` 或一般服務主鍵。
@@ -455,6 +483,7 @@ SSO session 與應用程式 session 是兩個不同層級：
 
 - SSO session：由 `sso.pg72.tw` 管理登入狀態、裝置與重新驗證。
 - RP session：由 Copy、Link、File 等服務管理應用內狀態。
+- Recovery session：migration `0019` 的十分鐘、hash-token、`/api/recovery` cookie-scoped principal，只能註冊 replacement Passkey；它不是 SSO/RP session，不能取得 consent、OIDC token 或一般 API 權限。
 
 SSO 無法只靠刪除自己的 cookie 清除所有 RP cookie。因此所有第一方服務必須支援下列 contract。
 
@@ -526,7 +555,7 @@ Preview acceptance、唯讀 migration check、triage、manual replay 與 rollbac
 - 撤銷單一裝置、其他裝置或所有裝置。
 - 已授權應用程式、scopes 與撤銷 consent。
 - 個人登入、安全與帳號變更紀錄。
-- Recovery codes 產生與重新產生（planned，尚未實作）。
+- Recovery codes 狀態、產生、重新產生與撤銷；raw codes 只在成功 response 顯示一次。此區只在 `RECOVERY_MODE=enabled` 顯示。
 - 帳號刪除申請。
 
 ### 12.2 管理後台
@@ -589,7 +618,10 @@ Preview acceptance、唯讀 migration check、triage、manual replay 與 rollbac
 - `logout_delivery`（D1 durable delivery source of truth）
 - `logout_delivery_attempt`（每個 replay generation/attempt evidence）
 - `logout_delivery_legacy_0018`（只保留 pre-`0018` evidence，不送達）
-- `recovery_codes`（planned，尚未實作）
+- `recovery_code_set`（每個 user 的 generation、nullable expiry 與 revoke state；同時最多一組 active set）
+- `recovery_code`（十組全域唯一 SHA-256 hashes、ordinal 與一次性 consumption）
+- `recovery_session`（獨立十分鐘 recovery principal，只存 token hash並綁定 exact consumed code/set/user）
+- `recovery_passkey_challenge`（每個 recovery session 至多一組、兩分鐘的一次性 Passkey registration challenge）
 - `audit_events`
 - `security_events`
 - `event_deliveries`
@@ -629,7 +661,7 @@ Audit metadata 不得包含 access token、refresh token、session token、autho
 - Token refresh、revocation 與異常重複使用。
 - 使用者 restrict/promote、停權/復權、角色變更與刪除。
 - Restricted account 嘗試 provider linking 或 developer/admin/client-management sensitive surface 的 denied event（固定 surface enum，不含 PII）。
-- Recovery codes 建立與使用。
+- Recovery codes 建立、輪替、撤銷、開始使用、Passkey failure 與完成；metadata 只能包含 bounded enum/count/generation，不得包含 raw code、token、challenge、credential ID、Email 或 IP。
 - Signing key 建立、啟用、停用與移除。
 - Back-channel logout 發送、成功、重試與永久失敗。
 - 管理員資料查詢與匯出。
@@ -646,9 +678,9 @@ Audit metadata 不得包含 access token、refresh token、session token、autho
   §10.5 的 scoped introspection，不得解析 access token 或用 JWKS 本地驗證。
 - 支援 signing key overlap rotation，舊 key 在既有短效 token 到期後才移除。
 - 所有 secret 經 Wrangler secrets/Secrets Store 管理，不寫入 repo、log 或 D1 明文。
-- Recovery code（未來實作時）、refresh token、client secret 與 invitation token 只保存不可逆 hash，除非協議明確要求可還原資料。
+- Recovery code、recovery-session token、refresh token、client secret 與 invitation token 只保存不可逆 hash，除非協議明確要求可還原資料。
 - 管理員操作要求 fresh authentication；高風險 client mutation 另要求同一 D1 session 的 Passkey step-up。Local source 已實作 required UV、exact origin/RP ID、一次性 session/user-bound challenge、counter guard 與 timestamp/audit 寫入；production 尚未套用 `0014` 或部署，仍須獨立 review 與實機驗證。
-- 管理員至少具有兩種獨立復原方式；受控 recovery/break-glass flow 尚未實作或演練，仍是 full Production GO gate。
+- 管理員至少具有兩種獨立復原方式；local recovery-code source 不能取代第二組 Passkey、獨立 review、isolated Preview drill 或 owner-controlled break-glass planning。Production 尚未套 `0019` 或啟用 recovery，仍是 full Production GO gate。
 - CORS 採 allowlist，不對 credentialed endpoints 使用 `*`。
 - 所有 state-changing endpoints 使用 CSRF 保護或不依賴 cookie 的等效防護。
 - 登入、callback、token、Passkey、邀請與管理 endpoints 具獨立 rate limits；新帳號建立另有更嚴的 per-IP `REGISTRATION_RATE_LIMITER`。
@@ -674,6 +706,7 @@ Better Auth 曾出現 OAuth/OIDC 與 account linking 相關安全公告。因此
 - 每季執行一次完整還原演練，記錄 Recovery Time 與 Recovery Point。
 - 還原後需能保留原 issuer、使用者 `sub`、Passkey credential、client ID 與未過期 signing key。
 - 備份檔與匯出工具不得包含明文 token 或 secret。
+- Recovery backup 只能保存 hashes 與狀態，不可能還原 raw recovery codes；使用者遺失全部 codes 時不得從 D1 backup、log 或 operator tooling 取回明文。
 
 ## 17. Observability 與告警
 
@@ -689,10 +722,11 @@ Better Auth 曾出現 OAuth/OIDC 與 account linking 相關安全公告。因此
 - 管理員登入、角色變更與大量匯出。
 - Signing key 即將過期或 JWKS 不一致。
 - Public registration rate-limit/denial、新 restricted-account volume、restricted sensitive denial 與管理員 restrict/promote/suspend transitions。
+- Recovery rate-limit/denial、code issue/revoke、started、Passkey failure 與 completed 的 redacted volume；不得把 raw code、recovery cookie、challenge、credential ID 或 user identity送入外部告警。
 
 告警不得直接包含完整 Email、IP、token、authorization code 或 credential ID。
 
-本清單是目標，不代表 repository 已配置外部 dashboard、paging 或自動封鎖。Public-registration 的持久 evidence 與人工初始門檻見 [`docs/runbooks/public-registration-abuse.md`](./docs/runbooks/public-registration-abuse.md)；global logout 的 D1 evidence、Preview acceptance、manual replay 與 rollback 見 [`docs/runbooks/global-logout.md`](./docs/runbooks/global-logout.md)。在隔離 Preview 驗證門檻、指派 operator 並測試 alert delivery 前，不得把任一 runbook 寫成 operational monitoring 已完成。
+本清單是目標，不代表 repository 已配置外部 dashboard、paging 或自動封鎖。Public-registration 的持久 evidence 與人工初始門檻見 [`docs/runbooks/public-registration-abuse.md`](./docs/runbooks/public-registration-abuse.md)；global logout 的 D1 evidence、Preview acceptance、manual replay 與 rollback 見 [`docs/runbooks/global-logout.md`](./docs/runbooks/global-logout.md)；recovery migration、lost-device acceptance 與 rollback 見 [`docs/runbooks/account-recovery.md`](./docs/runbooks/account-recovery.md)。在隔離 Preview 驗證門檻、指派 operator 並測試 alert delivery 前，不得把任一 runbook 寫成 operational monitoring 已完成。
 
 ## 18. Service Integration Patterns
 
@@ -801,7 +835,7 @@ Webmail 仍須分成兩個問題：
 - 使用者停權後無法登入，既有 session 全部失效。
 - Public user persistent restricted default；invited/bootstrap/existing user standard default/backfill。
 - Restricted user basic account/OIDC success，provider linking、role elevation與 developer/admin/client management fail closed；restrict/promote/suspend hierarchy、session/token revoke、D1 audit atomicity 與 stale-snapshot race/replay。
-- 管理員 step-up 與 recovery flow。
+- Recovery management 與 lost-device flow：hash-only storage、fresh/step-up guards、single-consume race、generic denial、scoped recovery principal、exact origin/RP ID/UV、challenge replay、full-batch rollback、session/token/logout revocation、replacement-code one-view response 與 recovered Passkey normal sign-in。
 
 ### 19.3 Global logout tests
 
@@ -844,7 +878,7 @@ Webmail 仍須分成兩個問題：
 
 - Google、Passkey、邀請制 SSO core 已部署；可選社群 providers 未設定時保持關閉。
 - OIDC Provider、JWKS、client 管理、帳號中心、sessions 與基礎 audit 已部署。
-- Recovery codes、完整 audit、key rotation/restore drill 仍未完成。
+- Recovery codes 已在 local source 完成且預設關閉；`0019` Preview/production rollout、獨立 review、lost-device/rollback drill、完整 audit 與 key rotation/restore drill 仍未完成。
 
 ### Phase 2：第一方應用整合
 
@@ -891,7 +925,7 @@ Webmail 仍須分成兩個問題：
 | 公開服務撤銷 SLA | 30 秒內 | 待確認 |
 | 管理服務撤銷 SLA | 立即，fail closed | 待確認 |
 | Audit retention | 365 天 | 待確認 |
-| 管理員復原 | 兩組 Passkey + recovery codes | 待確認 |
+| 管理員復原 | 兩組 Passkey + recovery codes；local source complete，production disabled | Preview / drill 待完成 |
 | Dynamic client registration | 關閉 | 建議固定 |
 | Public registration | 現行 `invite`；§9.2 gate 通過並經 owner 核准部署後才開啟 | 已確認 |
 | Better Auth runtime | 目前 `1.6.23` exact pin；安裝前重新查 stable/advisories，不使用 beta/RC | 建議固定 |

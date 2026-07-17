@@ -2,9 +2,9 @@
 
 > Status: local schema, pure evaluator/parser and archive-crypto contracts, an
 > evaluator runtime-status/lease/bootstrap repository, a bounded audit source
-> repository, and a bounded OAuth-report source repository. None of these
-> repositories is imported by the Worker entry point or a scheduler. Remaining
-> fan-out, logout, and Queue metric sources,
+> repository, a bounded OAuth-report source repository, and a bounded logout
+> delivery source repository. None of these repositories is imported by the
+> Worker entry point or a scheduler. Remaining fan-out and Queue metric sources,
 > `alert_state`/`security_alert`/`alert_outbox` CAS, Cron,
 > Queue/Email/admin delivery, same-run proof, the `0021` R2 archive
 > implementation, and deployment remain absent. Production records remain
@@ -153,6 +153,30 @@ lease-expired attempt cohorts are windowed. Separate status-first and
 created-time-first covering indexes support both paths; an old stuck/dead row
 must not age out of health reporting.
 
+The local logout source repository executes nine projections in one awaited D1
+batch: key continuity, tracked clients, sparse timestamp integrity, independent
+global/client current snapshots, delivery-created cohorts, and terminal-attempt
+cohorts. Current evidence includes every pending/processing/retry/dead row with
+`created_at < asOf`, without a 60-minute lower bound. Eligible/unresolved
+delivery cohorts and terminal `outcome=lease_expired` attempt cohorts use exact
+half-open 5/15/60-minute windows. Lease expiry counts attempts, not distinct
+deliveries or a currently expired processing lease that runtime has not yet
+terminalized. Two sparse `0020` partial indexes retain pre-existing malformed
+timestamp evidence while four guards reject future noncanonical writes; either
+integrity bit makes both source dimensions incomplete before lexical windows
+can hide the row.
+
+Global evidence remains independently usable when only the HMAC key/sentinel or
+client projection is unavailable. The client side is all-or-incomplete: raw
+client IDs exist only while deriving the sentinel-protected `client_hmac`, all
+three client projections and tracked zero-fill use `LIMIT 1001`, and every
+complete client projection must exactly rebuild global counters and oldest age.
+Malformed rows, counts, timestamps, HMAC collisions, or inconsistent
+projections cannot manufacture a clear or expose endpoint, token, `jti`, `sid`,
+client ID, metadata, or PII. This repository is local source only. It is not
+imported by the Worker or scheduler and does not alter logout delivery, replay,
+Queue, Cron, configuration, artifact identity, or operator behavior.
+
 OAuth reporter coverage is a whole-evaluation gate. Until every in-window row
 has either its legacy raw reporter ID or the persisted reporter reference, the
 evaluator reports the source as partial, records runtime `source_incomplete`, and
@@ -295,6 +319,7 @@ From a clean worktree with the frozen dependency set:
 pnpm --filter @pg72/id exec vitest run test/observability-schema.spec.ts
 pnpm --filter @pg72/id exec vitest run \
   test/alert-audit-source-repository.spec.ts \
+  test/alert-logout-source-repository.spec.ts \
   test/alert-oauth-source-repository.spec.ts \
   test/alert-evaluator.spec.ts test/alert-rules.spec.ts \
   test/audit-archive-crypto.spec.ts
@@ -322,16 +347,22 @@ and persistence shape without performing D1 writes or scheduling work. The
 OAuth source suite verifies exact half-open cohorts, total/high-risk/distinct
 counts, nullable reporter evidence, domain-separated raw/stored provenance,
 sentinel continuity, bounded tracked zero-fill, query plans, and redacted
-failure behavior without wiring an evaluator. The archive suite verifies the
-record/envelope crypto and checkpoint binding without D1, R2 or Queue I/O.
+failure behavior without wiring an evaluator. The logout source suite verifies
+old current failures, exact delivery/attempt boundaries, closed status/outcome
+semantics, sparse timestamp integrity and guards, global/client reconciliation,
+sentinel continuity, tracked zero-fill, exact caps, bounded query plans, and
+redacted failures without wiring an evaluator or changing delivery runtime. The
+archive suite verifies the record/envelope crypto and checkpoint binding without
+D1, R2 or Queue I/O.
 
 ## Remaining gates
 
 Schema, pure evaluator/parser, the unwired evaluator runtime-status repository,
-and the bounded local `audit_event` and OAuth-report source repositories must
-still report observability as `source_present_unverified`, leaving continuity
-and drills blocked. Later reviewed slices must add the remaining fan-out, logout,
-and Queue sources; D1 state/incident CAS; wire the runtime repository
+and the bounded local `audit_event`, OAuth-report, and logout-delivery source
+repositories must still report observability as `source_present_unverified`,
+leaving continuity
+and drills blocked. Later reviewed slices must add the remaining fan-out and
+Queue sources; D1 state/incident CAS; wire the runtime repository
 into evaluator Cron with repository-controlled successful-run and same-run
 proof; dedicated alert Queue/DLQ; Email Service adapter; admin
 acknowledge/resolve/replay operations; and redaction/race/failure tests. Pure

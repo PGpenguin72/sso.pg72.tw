@@ -53,26 +53,30 @@ const codeOwnedExpressionContexts = Object.freeze([
 ]);
 const codeOwnedPackageRoots = Object.freeze([".", "apps/sso", "apps/test-rp", "wiki"]);
 const codeOwnedWorkflowSourceDigests = Object.freeze({
-  "ci.yml": "5408d19375e9ad871817a589afd5b3e557f0bd16d327789efe8278786898805a",
-  "dast-preview.yml": "357a11ae8a31a068135108459859b0ccb348a701f8686f7de3ffb922b10de180",
+  "ci.yml": "eedcbefb68e7d0a4047a0793013545a95387274d608c4840d86e80360e29f7b0",
+  "dast-preview.yml": "9826177b4315c8f0ca29fe812508349d1ac0fcab6e3cce9d1e0772c9c124e711",
 });
 const codeOwnedReachablePackageScriptDigest =
   "04c31e7ea87041f5841a7904a5cba6dc28c32355ae03c93364ec191139a7b98f";
+const codeOwnedCompletePackageScriptDigest =
+  "8f70fedf8ed6cc7a476ba9773f30a4ee5b0e27800b32b86b5701a194691e524b";
 const codeOwnedWorkflowRuns = Object.freeze({
   "ci.yml": Object.freeze({
-    "verify:3": "pnpm install --frozen-lockfile",
-    "verify:4": "pnpm check",
-    "verify:5": "pnpm security:tools:install",
-    "verify:6": "pnpm security:check",
-    "verify:7": "pnpm dast:local",
+    "verify:1": "node scripts/security/release-identity.mjs",
+    "verify:4": "pnpm install --frozen-lockfile",
+    "verify:5": "pnpm check",
+    "verify:6": "pnpm security:tools:install",
+    "verify:7": "pnpm security:check",
+    "verify:8": "pnpm dast:local",
   }),
   "dast-preview.yml": Object.freeze({
-    "safe-dast:1": "node scripts/security/dast.mjs --authorize-only --preview",
-    "safe-dast:4": "pnpm install --frozen-lockfile",
-    "safe-dast:5": "pnpm dast:preview",
+    "safe-dast:1": "node scripts/security/release-identity.mjs",
+    "safe-dast:2": "node scripts/security/dast.mjs --authorize-only --preview",
+    "safe-dast:5": "pnpm install --frozen-lockfile",
+    "safe-dast:6": "pnpm dast:preview",
   }),
 });
-const codeOwnedPackageScripts = Object.freeze({
+const codeOwnedReachablePackageScripts = Object.freeze({
   ".": Object.freeze({
     check: "pnpm test:clean-dist && pnpm --filter @pg72/id check && pnpm --filter @pg72/test-rp check && pnpm --filter @pg72/wiki check",
     "dast:local": "node scripts/security/dast-local.mjs",
@@ -110,6 +114,57 @@ const codeOwnedPackageScripts = Object.freeze({
     test: "node --test scripts/summary.test.mjs",
   }),
 });
+const codeOwnedPackageScripts = Object.freeze({
+  ".": Object.freeze({
+    build: "pnpm -r --if-present build",
+    check: "pnpm test:clean-dist && pnpm --filter @pg72/id check && pnpm --filter @pg72/test-rp check && pnpm --filter @pg72/wiki check",
+    "dast:local": "node scripts/security/dast-local.mjs",
+    "dast:preview": "node scripts/security/dast.mjs --preview",
+    dev: "pnpm --filter @pg72/id dev",
+    "dev:rp": "pnpm --filter @pg72/test-rp dev",
+    "dev:wiki": "pnpm --filter @pg72/wiki dev",
+    "security:artifact": "node scripts/security/artifact-gate.mjs",
+    "security:audit": "node scripts/security/accepted-advisories.mjs",
+    "security:check": "pnpm test:security && pnpm security:static && pnpm security:secrets && pnpm security:config && pnpm security:audit && pnpm security:artifact && pnpm security:inventory",
+    "security:config": "node scripts/security/workflow-config.mjs && node scripts/security/wrangler-config.mjs",
+    "security:inventory": "node scripts/security/dependency-inventory.mjs",
+    "security:secrets": "node scripts/security/secret-scan.mjs",
+    "security:static": "oxlint --type-aware apps/sso/worker apps/test-rp/worker",
+    "security:tools:install": "node scripts/security/install-tools.mjs",
+    test: "pnpm -r --if-present test",
+    "test:clean-dist": "node --test scripts/clean-package-dist.test.mjs",
+    "test:security": "node --test scripts/security/*.test.mjs",
+    typecheck: "pnpm -r --if-present typecheck",
+  }),
+  "apps/sso": Object.freeze({
+    build: "node ../../scripts/clean-package-dist.mjs && vite build && node scripts/remove-built-dev-vars.mjs",
+    "cf-typegen": "wrangler types --strict-vars false",
+    check: "pnpm typecheck && pnpm test && pnpm build",
+    "db:migrate:local": "wrangler d1 migrations apply PG72_ID_DB --local",
+    "db:seed-test-rp:local": "wrangler d1 execute PG72_ID_DB --local --file seed/test-rp-client.sql",
+    dev: "vite",
+    test: "vitest run",
+    typecheck: "pnpm cf-typegen && pnpm typecheck:raw",
+    "typecheck:raw": "tsc --build --pretty false",
+  }),
+  "apps/test-rp": Object.freeze({
+    build: "node ../../scripts/clean-package-dist.mjs && wrangler deploy --dry-run --outdir dist",
+    "cf-typegen": "wrangler types --strict-vars false",
+    check: "pnpm typecheck && pnpm test && pnpm build",
+    "db:migrate:local": "wrangler d1 migrations apply TEST_RP_DB --local",
+    dev: "wrangler dev --port 5174",
+    test: "vitest run",
+    typecheck: "pnpm cf-typegen && pnpm typecheck:raw",
+    "typecheck:raw": "tsc --noEmit --pretty false",
+  }),
+  wiki: Object.freeze({
+    build: "vitepress build .",
+    check: "pnpm run test && pnpm run build && node scripts/validate-build.mjs",
+    dev: "vitepress dev .",
+    preview: "vitepress preview .",
+    test: "node --test scripts/summary.test.mjs",
+  }),
+});
 const codeOwnedLeafCommands = Object.freeze([
   "node ../../scripts/clean-package-dist.mjs",
   "node --test scripts/clean-package-dist.test.mjs",
@@ -123,6 +178,7 @@ const codeOwnedLeafCommands = Object.freeze([
   "node scripts/security/dast.mjs --preview",
   "node scripts/security/dependency-inventory.mjs",
   "node scripts/security/install-tools.mjs",
+  "node scripts/security/release-identity.mjs",
   "node scripts/security/secret-scan.mjs",
   "node scripts/security/workflow-config.mjs",
   "node scripts/security/wrangler-config.mjs",
@@ -148,6 +204,7 @@ const codeOwnedLocalScripts = Object.freeze([
   "scripts/security/dast.mjs",
   "scripts/security/dependency-inventory.mjs",
   "scripts/security/install-tools.mjs",
+  "scripts/security/release-identity.mjs",
   "scripts/security/secret-scan.mjs",
   "scripts/security/workflow-config.mjs",
   "scripts/security/wrangler-config.mjs",
@@ -156,7 +213,7 @@ const codeOwnedLocalScripts = Object.freeze([
 ]);
 const codeOwnedArtifactUpload = Object.freeze({
   filename: "ci.yml",
-  step: "verify:8",
+  step: "verify:9",
   name: "Upload release assurance inventories",
   uses: "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
   with: Object.freeze({
@@ -166,6 +223,10 @@ const codeOwnedArtifactUpload = Object.freeze({
     "retention-days": 7,
     "include-hidden-files": false,
   }),
+});
+const codeOwnedEarlyIdentityStep = Object.freeze({
+  name: "Verify release identities before setup",
+  run: "node scripts/security/release-identity.mjs",
 });
 
 function sha256(value) {
@@ -393,6 +454,37 @@ export function validateWorkflowEnvironment(document, filename, policy = workflo
   return [...new Set(errors)];
 }
 
+export function validateEarlyIdentityStep(document, filename) {
+  const basename = path.basename(filename);
+  const errors = [];
+  if (!Object.hasOwn(codeOwnedWorkflowRuns, basename)) {
+    return [`${basename} lacks an early identity contract`];
+  }
+  for (const [jobName, job] of entries(document.jobs)) {
+    const steps = job.steps ?? [];
+    const identityIndexes = steps
+      .map((step, index) => (step.run === codeOwnedEarlyIdentityStep.run ? index : -1))
+      .filter((index) => index >= 0);
+    if (
+      !steps[0]?.uses?.startsWith("actions/checkout@") ||
+      identityIndexes.length !== 1 ||
+      identityIndexes[0] !== 1
+    ) {
+      errors.push(`${jobName} must run the early identity check immediately after checkout`);
+      continue;
+    }
+    const identity = steps[1];
+    if (
+      identity.name !== codeOwnedEarlyIdentityStep.name ||
+      identity.run !== codeOwnedEarlyIdentityStep.run ||
+      JSON.stringify(Object.keys(identity).sort()) !== JSON.stringify(["name", "run"])
+    ) {
+      errors.push(`${jobName} early identity step differs from the exact command contract`);
+    }
+  }
+  return errors;
+}
+
 export function validateWorkflowDocument(
   document,
   filename,
@@ -416,6 +508,7 @@ export function validateWorkflowDocument(
     errors.push("concurrency must define a group and cancel-in-progress: true");
   }
   errors.push(...validateWorkflowEnvironment(document, filename, policy));
+  errors.push(...validateEarlyIdentityStep(document, filename));
 
   for (const [jobName, job] of entries(document.jobs)) {
     if (job.uses !== undefined) errors.push(`${jobName} reusable workflows are forbidden`);
@@ -469,9 +562,12 @@ export function validateWorkflowDocument(
       }
       if (
         job.steps?.[0]?.uses?.split("@")[0] !== "actions/checkout" ||
-        job.steps?.[1]?.run !== "node scripts/security/dast.mjs --authorize-only --preview"
+        job.steps?.[1]?.run !== "node scripts/security/release-identity.mjs" ||
+        job.steps?.[2]?.run !== "node scripts/security/dast.mjs --authorize-only --preview"
       ) {
-        errors.push(`${jobName} must run the repository Preview authorization immediately after checkout`);
+        errors.push(
+          `${jobName} must run early identity before repository Preview authorization`,
+        );
       }
     }
     if (
@@ -563,13 +659,9 @@ function localScriptError(command, packageRoot) {
   return allowed ? null : `uses an unapproved local script: ${resolved}`;
 }
 
-function expandPackageScript(packageRoot, scriptName, context, state) {
+function expandPackageScriptBody(packageRoot, scriptName, context, state) {
   const key = `${packageRoot}:${scriptName}`;
   state.scripts?.add(key);
-  if (state.stack.includes(key)) {
-    state.errors.push(`package script cycle: ${[...state.stack, key].join(" -> ")}`);
-    return;
-  }
   const packageData = context.packagesByRoot[packageRoot];
   const actual = packageData?.scripts?.[scriptName];
   const approved = codeOwnedPackageScripts[packageRoot]?.[scriptName];
@@ -581,16 +673,46 @@ function expandPackageScript(packageRoot, scriptName, context, state) {
     state.errors.push(`package script ${key} differs from the code-owned exact value`);
     return;
   }
-  state.stack.push(key);
   for (const command of actual.split("&&").map((value) => value.trim())) {
     expandCommand(command, packageRoot, context, state);
   }
+}
+
+function expandPackageScript(packageRoot, scriptName, context, state) {
+  const key = `${packageRoot}:${scriptName}`;
+  if (state.stack.includes(key)) {
+    state.errors.push(`package script cycle: ${[...state.stack, key].join(" -> ")}`);
+    return;
+  }
+  state.stack.push(key);
+  const scripts = context.packagesByRoot[packageRoot]?.scripts ?? {};
+  for (const lifecycleName of [`pre${scriptName}`, scriptName, `post${scriptName}`]) {
+    if (lifecycleName === scriptName || typeof scripts[lifecycleName] === "string") {
+      expandPackageScriptBody(packageRoot, lifecycleName, context, state);
+    }
+  }
   state.stack.pop();
+}
+
+function expandInstallLifecycle(context, state) {
+  for (const packageRoot of codeOwnedPackageRoots) {
+    const scripts = context.packagesByRoot[packageRoot]?.scripts ?? {};
+    for (const lifecycleName of ["preinstall", "install", "postinstall", "prepare"]) {
+      if (typeof scripts[lifecycleName] === "string") {
+        expandPackageScriptBody(packageRoot, lifecycleName, context, state);
+      }
+    }
+  }
 }
 
 function expandCommand(command, packageRoot, context, state) {
   state.errors.push(...dangerousCommandErrors(command));
   if (!codeOwnedCommandFragments.has(normalizeCommand(command).value)) return;
+  if (command === "pnpm install --frozen-lockfile") {
+    state.leaves.push(`${packageRoot}:${command}`);
+    expandInstallLifecycle(context, state);
+    return;
+  }
   if (codeOwnedLeafCommands.includes(command)) {
     const localError = localScriptError(command, packageRoot);
     if (localError) state.errors.push(localError);
@@ -639,11 +761,39 @@ export function reachablePackageScriptDigest(context) {
   return sha256(canonicalJson(reachablePackageScriptSnapshot(context).snapshot));
 }
 
+export function completePackageScriptDigest(context) {
+  const snapshot = {};
+  for (const packageRoot of codeOwnedPackageRoots) {
+    snapshot[packageRoot] = context.packagesByRoot[packageRoot]?.scripts ?? null;
+  }
+  return sha256(canonicalJson(snapshot));
+}
+
+export function validateCompletePackageScriptIdentity(context) {
+  const errors = [];
+  if (
+    JSON.stringify(Object.keys(context.packagesByRoot).sort()) !==
+    JSON.stringify([...codeOwnedPackageRoots].sort())
+  ) {
+    errors.push("workspace package roots differ from the code-owned exact set");
+  }
+  if (
+    sha256(canonicalJson(codeOwnedPackageScripts)) !==
+    codeOwnedCompletePackageScriptDigest
+  ) {
+    errors.push("code-owned complete package-script definition digest drifted");
+  }
+  if (completePackageScriptDigest(context) !== codeOwnedCompletePackageScriptDigest) {
+    errors.push("complete workspace package-script maps differ from the code-owned contract");
+  }
+  return errors;
+}
+
 export function validateReachablePackageScriptIdentity(context) {
   const errors = [];
   const actual = reachablePackageScriptSnapshot(context);
   errors.push(...actual.errors);
-  const expectedKeys = Object.entries(codeOwnedPackageScripts)
+  const expectedKeys = Object.entries(codeOwnedReachablePackageScripts)
     .flatMap(([packageRoot, scripts]) =>
       Object.keys(scripts).map((scriptName) => `${packageRoot}:${scriptName}`),
     )
@@ -652,7 +802,10 @@ export function validateReachablePackageScriptIdentity(context) {
   if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys)) {
     errors.push("reachable package-script names differ from the code-owned exact graph");
   }
-  if (sha256(canonicalJson(codeOwnedPackageScripts)) !== codeOwnedReachablePackageScriptDigest) {
+  if (
+    sha256(canonicalJson(codeOwnedReachablePackageScripts)) !==
+    codeOwnedReachablePackageScriptDigest
+  ) {
     errors.push("code-owned reachable package-script definition digest drifted");
   }
   if (sha256(canonicalJson(actual.snapshot)) !== codeOwnedReachablePackageScriptDigest) {
@@ -708,6 +861,7 @@ export function validateWorkflowCommands(document, filename, context) {
   const errors = [
     ...validateWorkflowEnvironment(document, filename, context.policy),
     ...validateCommandPolicyDefinition(context.policy),
+    ...validateCompletePackageScriptIdentity(context),
     ...validateReachablePackageScriptIdentity(context),
     ...validateArtifactUploads(document, filename),
   ];
@@ -781,6 +935,7 @@ function main() {
     errors.push("DAST policy default ref must be refs/heads/main");
   }
   const commandContext = loadWorkflowCommandContext();
+  errors.push(...validateCompletePackageScriptIdentity(commandContext));
   for (const name of files) {
     const filename = path.join(workflowDirectory, name);
     const source = readFileSync(filename);

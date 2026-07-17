@@ -4,11 +4,14 @@ import test from "node:test";
 import YAML from "yaml";
 
 import {
+  completePackageScriptDigest,
   dangerousCommandErrors,
   expectedPreviewJobCondition,
   loadWorkflowCommandContext,
   reachablePackageScriptDigest,
   validateArtifactUploads,
+  validateCompletePackageScriptIdentity,
+  validateEarlyIdentityStep,
   validateReachablePackageScriptIdentity,
   validateWorkflowCommands,
   validateWorkflowDocument,
@@ -37,6 +40,10 @@ function workflow() {
           {
             uses: `actions/checkout@${"a".repeat(40)}`,
             with: { "persist-credentials": false },
+          },
+          {
+            name: "Verify release identities before setup",
+            run: "node scripts/security/release-identity.mjs",
           },
         ],
       },
@@ -182,6 +189,84 @@ test("pins reachable package-script names and complete values to one code-owned 
     const context = structuredClone(baseline);
     mutate(context);
     assert.notDeepEqual(validateReachablePackageScriptIdentity(context), []);
+  }
+});
+
+test("pins every workspace scripts object including otherwise unreachable names", () => {
+  const baseline = loadWorkflowCommandContext();
+  assert.equal(
+    completePackageScriptDigest(baseline),
+    "8f70fedf8ed6cc7a476ba9773f30a4ee5b0e27800b32b86b5701a194691e524b",
+  );
+  assert.deepEqual(validateCompletePackageScriptIdentity(baseline), []);
+
+  for (const mutate of [
+    (context) => (context.packagesByRoot["."].scripts.unreviewed = "node scripts/unreviewed.mjs"),
+    (context) => delete context.packagesByRoot["apps/sso"].scripts.dev,
+    (context) => (context.packagesByRoot["apps/test-rp"].scripts["db:migrate:local"] += " --remote"),
+    (context) => (context.packagesByRoot.wiki.scripts.preview = "vitepress preview ./other"),
+  ]) {
+    const context = structuredClone(baseline);
+    mutate(context);
+    assert.notDeepEqual(validateCompletePackageScriptIdentity(context), []);
+  }
+});
+
+test("models implicit pre/post hooks for root and filtered pnpm scripts", () => {
+  const ci = YAML.parse(
+    readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8"),
+  );
+  for (const [packageRoot, hook] of [
+    [".", "precheck"],
+    [".", "postcheck"],
+    ["apps/sso", "precheck"],
+    ["apps/sso", "postcheck"],
+  ]) {
+    const context = structuredClone(loadWorkflowCommandContext());
+    context.packagesByRoot[packageRoot].scripts[hook] = "node scripts/unreviewed.mjs";
+    const errors = validateWorkflowCommands(ci, "ci.yml", context);
+    assert.ok(
+      errors.some((error) => error.includes(`package script ${packageRoot}:${hook}`)),
+      `${packageRoot}:${hook}`,
+    );
+  }
+});
+
+test("models every install lifecycle in root and filtered workspaces", () => {
+  const ci = YAML.parse(
+    readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8"),
+  );
+  for (const packageRoot of [".", "apps/test-rp"]) {
+    for (const hook of ["preinstall", "install", "postinstall", "prepare"]) {
+      const context = structuredClone(loadWorkflowCommandContext());
+      context.packagesByRoot[packageRoot].scripts[hook] = "node scripts/unreviewed.mjs";
+      const errors = validateWorkflowCommands(ci, "ci.yml", context);
+      assert.ok(
+        errors.some((error) => error.includes(`package script ${packageRoot}:${hook}`)),
+        `${packageRoot}:${hook}`,
+      );
+    }
+  }
+});
+
+test("requires early identity immediately after checkout in every workflow", () => {
+  for (const filename of ["ci.yml", "dast-preview.yml"]) {
+    const baseline = YAML.parse(
+      readFileSync(new URL(`../../.github/workflows/${filename}`, import.meta.url), "utf8"),
+    );
+    assert.deepEqual(validateEarlyIdentityStep(baseline, filename), []);
+    const job = Object.values(baseline.jobs)[0];
+
+    const removed = structuredClone(baseline);
+    Object.values(removed.jobs)[0].steps.splice(1, 1);
+    assert.notDeepEqual(validateEarlyIdentityStep(removed, filename), []);
+
+    const reordered = structuredClone(baseline);
+    const reorderedSteps = Object.values(reordered.jobs)[0].steps;
+    [reorderedSteps[1], reorderedSteps[2]] = [reorderedSteps[2], reorderedSteps[1]];
+    assert.notDeepEqual(validateEarlyIdentityStep(reordered, filename), []);
+
+    assert.equal(job.steps[1].run, "node scripts/security/release-identity.mjs");
   }
 });
 
@@ -455,7 +540,7 @@ test("enforces exact Preview actor/ref condition and authorization step order", 
     mutate(changed);
     assert.ok(
       validateWorkflowDocument(changed, "dast-preview.yml").some((error) =>
-        /actor and default-branch|authorization immediately after checkout/.test(error),
+        /actor and default-branch|early identity|identity check immediately/.test(error),
       ),
     );
   }

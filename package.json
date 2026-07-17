@@ -14,6 +14,7 @@
     "dev:wiki": "pnpm --filter @pg72/wiki dev",
     "test": "pnpm -r --if-present test",
     "test:clean-dist": "node --test scripts/clean-package-dist.test.mjs",
+    "test:public-readiness": "node --test scripts/public-readiness/*.test.mjs",
     "typecheck": "pnpm -r --if-present typecheck"
   }
 }

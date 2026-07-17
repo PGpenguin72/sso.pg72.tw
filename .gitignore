@@ -9,6 +9,7 @@ wiki/.vitepress/cache/
 .env.*
 !.env.example
 coverage/
+.artifacts/
 worker-configuration.d.ts
 *.tsbuildinfo
 *.log

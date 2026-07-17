@@ -13,8 +13,18 @@ function cooldownAfter(evaluatedAt: string): string {
   return new Date(Date.parse(evaluatedAt) + 30 * 60 * 1000).toISOString();
 }
 
+function encodeBase64url32(bytes: Uint8Array): string {
+  if (bytes.byteLength !== 32) throw new Error("expected exactly 32 bytes");
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/, "");
+}
+
 function opaque43(): string {
-  return `${crypto.randomUUID().replaceAll("-", "")}${"A".repeat(11)}`;
+  return encodeBase64url32(crypto.getRandomValues(new Uint8Array(32)));
 }
 
 function nonCanonical43(): string {
@@ -55,7 +65,9 @@ async function insertAlertState(
     observedDenominator?: number | null;
     observedNumerator?: number | null;
     observedValue?: number;
+    provider?: string | null;
     queueName?: string | null;
+    reason?: string | null;
     ruleId?: string;
     revision?: number;
     secondaryMetricKind?: string | null;
@@ -65,14 +77,26 @@ async function insertAlertState(
     secondaryThreshold?: number | null;
     sourceKind?: "d1_exact" | "queue_approximate";
     subjectRef?: string | null;
+    surface?: string | null;
     warningThreshold?: number | null;
   } = {},
 ): Promise<string> {
   const id = crypto.randomUUID();
+  const warningThreshold = options.warningThreshold === undefined
+    ? 10
+    : options.warningThreshold;
+  const criticalThreshold = options.criticalThreshold === undefined
+    ? 40
+    : options.criticalThreshold;
+  const breachSeverity = options.breachSeverity === undefined
+    ? warningThreshold === null ? "critical" : "warning"
+    : options.breachSeverity;
+  const consecutiveBreaches = options.consecutiveBreaches ??
+    (breachSeverity === null ? 0 : 1);
   await env.PG72_ID_DB.prepare(
     `INSERT INTO alert_state
       (id, rule_id, environment, source_kind, dedupe_key, subject_ref, hash_version,
-       queue_name,
+       provider, queue_name, reason, surface,
        window_seconds, metric_name, metric_kind, metric_unit, observed_value,
        observed_numerator, observed_denominator, minimum_sample_count,
        minimum_numerator_count, warning_threshold, critical_threshold,
@@ -82,7 +106,7 @@ async function insertAlertState(
        current_severity, generation, revision, cooldown_until,
        last_notification_scheduled_at,
        last_evaluated_at, created_at, updated_at)
-     VALUES (?, ?, 'local', ?, ?, ?, ?, ?, 900,
+     VALUES (?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, 900,
              ?, ?, ?, ?,
              ?, ?, ?, ?,
              ?, ?,
@@ -97,7 +121,10 @@ async function insertAlertState(
       options.dedupeKey ?? opaque43(),
       options.subjectRef ?? null,
       options.hashVersion ?? null,
+      options.provider ?? null,
       options.queueName ?? null,
+      options.reason ?? null,
+      options.surface ?? null,
       options.metricName ?? "count",
       options.metricKind ?? "count",
       options.metricUnit ?? "events",
@@ -106,15 +133,15 @@ async function insertAlertState(
       options.observedDenominator ?? null,
       options.minimumSampleCount ?? 0,
       options.minimumNumeratorCount ?? null,
-      options.warningThreshold === undefined ? 10 : options.warningThreshold,
-      options.criticalThreshold === undefined ? 40 : options.criticalThreshold,
+      warningThreshold,
+      criticalThreshold,
       options.secondaryMetricName ?? null,
       options.secondaryMetricKind ?? null,
       options.secondaryMetricUnit ?? null,
       options.secondaryObservedValue ?? null,
       options.secondaryThreshold ?? null,
-      options.consecutiveBreaches ?? 0,
-      options.breachSeverity ?? null,
+      consecutiveBreaches,
+      breachSeverity,
       options.consecutiveClears ?? 0,
       options.currentSeverity ?? "none",
       options.generation ?? 0,
@@ -308,6 +335,27 @@ async function clearAlertState(stateId: string): Promise<void> {
   await fifthClear.run();
 }
 
+async function expireAlertCooldown(stateId: string): Promise<void> {
+  const cooldownUntil = await env.PG72_ID_DB.prepare(
+    "SELECT cooldown_until FROM alert_state WHERE id = ?",
+  )
+    .bind(stateId)
+    .first<string>("cooldown_until");
+  expect(cooldownUntil).not.toBeNull();
+  evaluationTick = Math.max(
+    evaluationTick,
+    (Date.parse(cooldownUntil!) - Date.parse(NOW)) / 1000,
+  );
+  await env.PG72_ID_DB.prepare(
+    `UPDATE alert_state
+        SET cooldown_until = NULL, revision = revision + 1,
+            last_evaluated_at = ?, updated_at = ?
+      WHERE id = ?`,
+  )
+    .bind(cooldownUntil, cooldownUntil, stateId)
+    .run();
+}
+
 interface OutboxOptions {
   acceptedAt?: string | null;
   alertId: string;
@@ -334,6 +382,9 @@ interface OutboxOptions {
   observedDenominator?: number | null;
   observedNumerator?: number | null;
   observedValue?: number;
+  provider?: string | null;
+  queueName?: string | null;
+  reason?: string | null;
   ruleId?: string;
   replayCount?: number;
   severity?: "warning" | "critical";
@@ -345,6 +396,7 @@ interface OutboxOptions {
   sourceKind?: "d1_exact" | "queue_approximate";
   status?: "pending" | "processing" | "retry" | "accepted" | "dead";
   subjectRef?: string | null;
+  surface?: string | null;
   threshold?: number;
 }
 
@@ -352,9 +404,18 @@ async function insertOutbox(options: OutboxOptions): Promise<number> {
   const resolvedDeliveryKey = options.deliveryKey ?? deliveryKey();
   const status = options.status ?? "pending";
   const eventKind = options.eventKind ?? "opened";
-  const eventSequence = options.eventSequence ?? 1;
   const channel = options.channel ?? "email";
   const generation = options.generation ?? 1;
+  const eventSequence = options.eventSequence ?? (eventKind === "reminder"
+    ? await env.PG72_ID_DB.prepare(
+      `SELECT coalesce(max(event_sequence) + 1, 1) AS next_sequence
+         FROM alert_outbox
+        WHERE alert_id = ? AND generation = ?
+          AND event_kind = 'reminder' AND channel = ?`,
+    )
+      .bind(options.alertId, generation, channel)
+      .first<number>("next_sequence") ?? 1
+    : 1);
   const idempotencyKey = options.idempotencyKey ?? opaque43();
   const incidentStatus = options.incidentStatus ?? "open";
   const severity = options.severity ?? "warning";
@@ -377,6 +438,10 @@ async function insertOutbox(options: OutboxOptions): Promise<number> {
   const secondaryThreshold = options.secondaryThreshold ?? null;
   const subjectRef = options.subjectRef ?? null;
   const hashVersion = options.hashVersion ?? null;
+  const provider = options.provider ?? null;
+  const queueName = options.queueName ?? null;
+  const reason = options.reason ?? null;
+  const surface = options.surface ?? null;
   const payload = JSON.stringify({
     schemaVersion: 1,
     templateVersion: 1,
@@ -411,16 +476,17 @@ async function insertOutbox(options: OutboxOptions): Promise<number> {
     secondaryThreshold,
     subjectRef,
     hashVersion,
-    provider: null,
-    queue: null,
-    reason: null,
-    surface: null,
+    provider,
+    queue: queueName,
+    reason,
+    surface,
   });
   await env.PG72_ID_DB.prepare(
     `INSERT INTO alert_outbox
       (delivery_key, alert_id, generation, event_kind, event_sequence, channel,
       idempotency_key, payload_json, payload_sha256, rule_id, environment,
        source_kind, severity, incident_status, subject_ref, hash_version,
+       provider, queue_name, reason, surface,
        first_seen_at, last_seen_at, window_seconds,
        metric_name, metric_kind, metric_unit, observed_value,
        observed_numerator, observed_denominator, minimum_sample_count,
@@ -429,7 +495,7 @@ async function insertOutbox(options: OutboxOptions): Promise<number> {
        secondary_observed_value, secondary_threshold,
        status, attempts, replay_count, next_attempt_at, lease_id, lease_expires_at,
        accepted_at, dead_at, last_error_code, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 900,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 900,
              ?, ?, ?, ?, ?, ?, ?, ?, ?,
              ?, ?, ?, ?, ?,
              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -451,6 +517,10 @@ async function insertOutbox(options: OutboxOptions): Promise<number> {
       incidentStatus,
       subjectRef,
       hashVersion,
+      provider,
+      queueName,
+      reason,
+      surface,
       NOW,
       NOW,
       metricName,
@@ -561,6 +631,18 @@ describe("alert observability migration", () => {
       "security_alert",
       "security_alert_unresolved_state_idx",
     ]);
+    for (const table of [
+      "alert_delivery_attempt",
+      "alert_hash_key_sentinel",
+      "alert_outbox",
+      "alert_runtime_status",
+      "alert_state",
+      "security_alert",
+    ]) {
+      expect(schema.results.find(({ name }) => name === table)?.sql).toContain(
+        "typeof(",
+      );
+    }
     expect(
       schema.results.find(({ name }) => name === "alert_outbox_due_idx")?.sql,
     ).toContain('("status", "next_attempt_at", "lease_expires_at")');
@@ -700,6 +782,20 @@ describe("alert observability migration", () => {
     await expect(insertActorEvent(opaque43(), null)).rejects.toThrow();
     await expect(insertActorEvent(nonCanonical43(), 1)).rejects.toThrow();
     await insertActorEvent(opaque43(), 1);
+    const noRefReportId = crypto.randomUUID();
+    const noRefActorEventId = crypto.randomUUID();
+    await env.PG72_ID_DB.batch([
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO oauth_client_report
+          (id, reporter_user_id, client_id, reason, created_at)
+         VALUES (?, ?, 'schema-no-ref-client', 'phishing', ?)`,
+      ).bind(noRefReportId, sourceUserId, NOW),
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO audit_event
+          (id, event_type, actor_user_id, outcome, occurred_at)
+         VALUES (?, 'admin.schema_no_ref', ?, 'success', ?)`,
+      ).bind(noRefActorEventId, sourceUserId, NOW),
+    ]);
     await expect(
       env.PG72_ID_DB.prepare(
         "UPDATE audit_event SET actor_ref_hash_version = NULL WHERE id = ?",
@@ -740,11 +836,35 @@ describe("alert observability migration", () => {
       .first<{ actor_ref: string; actor_user_id: string | null }>();
     expect(actorAfterDelete?.actor_user_id).toBeNull();
     expect(actorAfterDelete?.actor_ref).toHaveLength(43);
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE oauth_client_report
+            SET reporter_ref = ?, reporter_ref_hash_version = 1
+          WHERE id = ?`,
+      )
+        .bind(opaque43(), noRefReportId)
+        .run(),
+    ).rejects.toThrow();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE audit_event
+            SET actor_ref = ?, actor_ref_hash_version = 1
+          WHERE id = ?`,
+      )
+        .bind(opaque43(), noRefActorEventId)
+        .run(),
+    ).rejects.toThrow();
     await env.PG72_ID_DB.prepare("DELETE FROM oauth_client_report WHERE id = ?")
       .bind(reportId)
       .run();
     await env.PG72_ID_DB.prepare("DELETE FROM audit_event WHERE id = ?")
       .bind(actorEventId)
+      .run();
+    await env.PG72_ID_DB.prepare("DELETE FROM oauth_client_report WHERE id = ?")
+      .bind(noRefReportId)
+      .run();
+    await env.PG72_ID_DB.prepare("DELETE FROM audit_event WHERE id = ?")
+      .bind(noRefActorEventId)
       .run();
     await env.PG72_ID_DB.prepare("DELETE FROM user WHERE id = ?")
       .bind(otherUserId)
@@ -766,6 +886,23 @@ describe("alert observability migration", () => {
     )
       .bind(opaque43(), NOW)
       .run();
+    const originalFingerprint = await env.PG72_ID_DB.prepare(
+      "SELECT fingerprint_ref FROM alert_hash_key_sentinel WHERE id = 1",
+    ).first<string>("fingerprint_ref");
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `INSERT OR REPLACE INTO alert_hash_key_sentinel
+          (id, domain, fingerprint_ref, hash_version, created_at)
+         VALUES (1, 'pgid.alert_subject_hash_key.v1', ?, 1, ?)`,
+      )
+        .bind(opaque43(), NOW)
+        .run(),
+    ).rejects.toThrow();
+    expect(
+      await env.PG72_ID_DB.prepare(
+        "SELECT fingerprint_ref FROM alert_hash_key_sentinel WHERE id = 1",
+      ).first<string>("fingerprint_ref"),
+    ).toBe(originalFingerprint);
     await expect(
       env.PG72_ID_DB.prepare(
         "UPDATE alert_hash_key_sentinel SET fingerprint_ref = ? WHERE id = 1",
@@ -801,9 +938,31 @@ describe("alert observability migration", () => {
     ).toBe(0);
   });
 
+  it("accepts every canonical tail produced by a real 32-byte encoding", async () => {
+    const encodings = Array.from({ length: 16 }, (_, lowNibble) => {
+      const bytes = new Uint8Array(32);
+      bytes[31] = lowNibble;
+      return encodeBase64url32(bytes);
+    });
+    expect(encodings.map((value) => value.at(-1))).toEqual([
+      "A", "E", "I", "M", "Q", "U", "Y", "c",
+      "g", "k", "o", "s", "w", "0", "4", "8",
+    ]);
+    for (const dedupeKey of encodings) {
+      await expect(insertTransientAlertState({ dedupeKey })).resolves.toHaveLength(36);
+    }
+  });
+
   it("rejects invalid rule, threshold, and subject-hash state", async () => {
     await expect(insertAlertState({ ruleId: "arbitrary_rule" })).rejects.toThrow();
     await expect(insertAlertState({ criticalThreshold: 5 })).rejects.toThrow();
+    await expect(
+      insertAlertState({ breachSeverity: null, consecutiveBreaches: 0 }),
+    ).rejects.toThrow();
+    await expect(insertAlertState({ observedValue: 12.5 })).rejects.toThrow();
+    await expect(insertAlertState({ provider: "apple" })).rejects.toThrow();
+    await expect(insertAlertState({ reason: "rotation_failed" })).rejects.toThrow();
+    await expect(insertAlertState({ surface: "archive" })).rejects.toThrow();
     await expect(
       insertAlertState({ dedupeKey: nonCanonical43() }),
     ).rejects.toThrow();
@@ -1038,10 +1197,10 @@ describe("alert observability migration", () => {
       }),
     ).resolves.toHaveLength(36);
     await expect(
-      insertAlertState({ breachSeverity: "warning" }),
+      insertAlertState({ breachSeverity: "warning", consecutiveBreaches: 0 }),
     ).rejects.toThrow();
     await expect(
-      insertAlertState({ consecutiveBreaches: 1 }),
+      insertAlertState({ breachSeverity: null, consecutiveBreaches: 1 }),
     ).rejects.toThrow();
     await expect(
       insertAlertState({
@@ -1264,6 +1423,36 @@ describe("alert observability migration", () => {
         warningThreshold: null,
       }),
     ).rejects.toThrow();
+    await expect(
+      insertAlertState({
+        criticalThreshold: 5,
+        hashVersion: 1,
+        observedValue: 5,
+        ruleId: restrictedRule,
+        secondaryMetricKind: "count",
+        secondaryMetricName: "known_surfaces",
+        secondaryMetricUnit: "events",
+        secondaryObservedValue: 6,
+        secondaryThreshold: 2,
+        subjectRef: restrictedSubjectRef,
+        warningThreshold: null,
+      }),
+    ).rejects.toThrow();
+    await expect(
+      insertAlertState({
+        criticalThreshold: 10,
+        hashVersion: 1,
+        observedValue: 10,
+        ruleId: restrictedRule,
+        secondaryMetricKind: "count",
+        secondaryMetricName: "known_surfaces",
+        secondaryMetricUnit: "events",
+        secondaryObservedValue: 8,
+        secondaryThreshold: 2,
+        subjectRef: restrictedSubjectRef,
+        warningThreshold: null,
+      }),
+    ).rejects.toThrow();
 
     const restrictedStateId = await insertAlertState({
       criticalThreshold: 5,
@@ -1289,6 +1478,19 @@ describe("alert observability migration", () => {
         secondaryObservedValue: 2,
         secondaryThreshold: 2,
         threshold: 6,
+      }),
+    ).rejects.toThrow();
+    await expect(
+      insertSecurityAlert(restrictedStateId, 1, {
+        observedValue: 5,
+        ruleId: restrictedRule,
+        severity: "critical",
+        secondaryMetricKind: "count",
+        secondaryMetricName: "known_surfaces",
+        secondaryMetricUnit: "events",
+        secondaryObservedValue: 6,
+        secondaryThreshold: 2,
+        threshold: 5,
       }),
     ).rejects.toThrow();
     const restrictedAlertId = await insertSecurityAlert(restrictedStateId, 1, {
@@ -1360,6 +1562,23 @@ describe("alert observability migration", () => {
         secondaryMetricName: "known_surfaces",
         secondaryMetricUnit: "events",
         secondaryObservedValue: 3,
+        secondaryThreshold: 2,
+        severity: "critical",
+        subjectRef: restrictedSubjectRef,
+        threshold: 5,
+      }),
+    ).rejects.toThrow();
+    await expect(
+      insertOutbox({
+        alertId: restrictedAlertId,
+        deliveryKey: deliveryKey("6"),
+        hashVersion: 1,
+        observedValue: 5,
+        ruleId: restrictedRule,
+        secondaryMetricKind: "count",
+        secondaryMetricName: "known_surfaces",
+        secondaryMetricUnit: "events",
+        secondaryObservedValue: 6,
         secondaryThreshold: 2,
         severity: "critical",
         subjectRef: restrictedSubjectRef,
@@ -1566,6 +1785,7 @@ describe("alert observability migration", () => {
         .bind(NOW, firstAlertId)
         .run(),
     ).rejects.toThrow();
+    await expireAlertCooldown(stateId);
     const resetAt = nextEvaluationTime();
     await env.PG72_ID_DB.prepare(
       `UPDATE alert_state
@@ -1831,6 +2051,7 @@ describe("alert observability migration", () => {
       env.PG72_ID_DB.prepare(
         `UPDATE alert_state
             SET current_severity = 'critical', generation = 1, revision = 1,
+                breach_severity = NULL, consecutive_breaches = 0,
                 last_notification_scheduled_at = ?, last_breached_at = ?,
                 last_evaluated_at = ?, updated_at = ?
           WHERE id = ?`,
@@ -1871,6 +2092,31 @@ describe("alert observability migration", () => {
       severity: "critical",
       threshold: 10,
     });
+    const rejectedAutomaticClearAt = nextEvaluationTime();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE alert_state
+            SET consecutive_clears = 1, revision = revision + 1,
+                last_evaluated_at = ?, updated_at = ?
+          WHERE id = ?`,
+      )
+        .bind(
+          rejectedAutomaticClearAt,
+          rejectedAutomaticClearAt,
+          fanoutStateId,
+        )
+        .run(),
+    ).rejects.toThrow();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE security_alert
+            SET status = 'resolved', resolved_at = ?,
+                resolution_code = 'healthy', updated_at = ?
+          WHERE id = ?`,
+      )
+        .bind(NOW, NOW, fanoutAlertId)
+        .run(),
+    ).rejects.toThrow();
     const manualClear = () => {
       const evaluatedAt = nextEvaluationTime();
       return env.PG72_ID_DB.prepare(
@@ -1921,6 +2167,91 @@ describe("alert observability migration", () => {
       threshold: 10,
     });
     await expect(manualClear()).rejects.toThrow();
+  });
+
+  it("keeps warning cooldown closed until its exact expiry", async () => {
+    const stateId = await insertAlertState();
+    const alertId = await insertSecurityAlert(stateId);
+    await clearAlertState(stateId);
+    const cooldownUntil = await env.PG72_ID_DB.prepare(
+      "SELECT cooldown_until FROM alert_state WHERE id = ?",
+    )
+      .bind(stateId)
+      .first<string>("cooldown_until");
+    expect(cooldownUntil).not.toBeNull();
+
+    const earlyClearAt = nextEvaluationTime();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE alert_state
+            SET cooldown_until = NULL, revision = revision + 1,
+                last_evaluated_at = ?, updated_at = ?
+          WHERE id = ?`,
+      )
+        .bind(earlyClearAt, earlyClearAt, stateId)
+        .run(),
+    ).rejects.toThrow();
+
+    const pendingAt = nextEvaluationTime();
+    await env.PG72_ID_DB.prepare(
+      `UPDATE alert_state
+          SET breach_severity = 'warning', consecutive_breaches = 1,
+              revision = revision + 1, last_evaluated_at = ?, updated_at = ?
+        WHERE id = ?`,
+    )
+      .bind(pendingAt, pendingAt, stateId)
+      .run();
+    const earlyConfirmAt = nextEvaluationTime();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE alert_state
+            SET current_severity = 'warning', generation = generation + 1,
+                breach_severity = NULL, consecutive_breaches = 0,
+                cooldown_until = NULL, last_notification_scheduled_at = ?,
+                last_breached_at = ?, revision = revision + 1,
+                last_evaluated_at = ?, updated_at = ?
+          WHERE id = ?`,
+      )
+        .bind(
+          earlyConfirmAt,
+          earlyConfirmAt,
+          earlyConfirmAt,
+          earlyConfirmAt,
+          stateId,
+        )
+        .run(),
+    ).rejects.toThrow();
+
+    evaluationTick = Math.max(
+      evaluationTick,
+      (Date.parse(cooldownUntil!) - Date.parse(NOW)) / 1000,
+    );
+    await env.PG72_ID_DB.prepare(
+      `UPDATE alert_state
+          SET current_severity = 'warning', generation = generation + 1,
+              breach_severity = NULL, consecutive_breaches = 0,
+              cooldown_until = NULL, last_notification_scheduled_at = ?,
+              last_breached_at = ?, revision = revision + 1,
+              last_evaluated_at = ?, updated_at = ?
+        WHERE id = ?`,
+    )
+      .bind(
+        cooldownUntil,
+        cooldownUntil,
+        cooldownUntil,
+        cooldownUntil,
+        stateId,
+      )
+      .run();
+    await env.PG72_ID_DB.prepare(
+      `UPDATE security_alert
+          SET status = 'resolved', resolved_at = ?, resolution_code = 'healthy',
+              updated_at = ?
+        WHERE id = ?`,
+    )
+      .bind(NOW, NOW, alertId)
+      .run();
+    await expect(insertSecurityAlert(stateId, 2)).resolves.toHaveLength(36);
   });
 
   it("rejects acknowledgement and delivery snapshots from stale state", async () => {
@@ -1976,6 +2307,7 @@ describe("alert observability migration", () => {
     )
       .bind(NOW, NOW, alertId)
       .run();
+    await expireAlertCooldown(stateId);
     await insertSecurityAlert(stateId, 2);
     await expect(
       insertOutbox({
@@ -2196,6 +2528,14 @@ describe("alert observability migration", () => {
         eventKind: "reminder",
         eventSequence: 1_000_000_000,
       }),
+    ).rejects.toThrow();
+    await expect(
+      insertOutbox({
+        alertId,
+        deliveryKey: deliveryKey("3"),
+        eventKind: "reminder",
+        eventSequence: 3,
+      }),
     ).resolves.toBeTypeOf("number");
     await expect(
       insertOutbox({
@@ -2293,7 +2633,7 @@ describe("alert observability migration", () => {
       alertId,
       deliveryKey: deliveryKey("j"),
       eventKind: "reminder",
-      eventSequence: 20,
+      eventSequence: 1,
       nextAttemptAt: "2026-07-17T10:01:00.000Z",
     });
     await expect(
@@ -2307,7 +2647,7 @@ describe("alert observability migration", () => {
       alertId,
       deliveryKey: deliveryKey("k"),
       eventKind: "reminder",
-      eventSequence: 21,
+      eventSequence: 2,
     });
     await expect(
       claimOutbox(expiredLeaseId, crypto.randomUUID(), NOW),
@@ -2402,9 +2742,19 @@ describe("alert observability migration", () => {
     )
       .bind(crypto.randomUUID(), processingOutboxId, processingLeaseId, NOW)
       .run();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE alert_delivery_attempt
+            SET outcome = 'retry', resulting_status = 'retry',
+                error_code = 'payload_integrity', completed_at = ?
+          WHERE outbox_id = ? AND replay_count = 0 AND attempt_number = 1`,
+      )
+        .bind(NOW, processingOutboxId)
+        .run(),
+    ).rejects.toThrow();
     await env.PG72_ID_DB.prepare(
       `UPDATE alert_delivery_attempt
-          SET outcome = 'retry', resulting_status = 'retry',
+          SET outcome = 'dead', resulting_status = 'dead',
               error_code = 'payload_integrity', completed_at = ?
         WHERE outbox_id = ? AND replay_count = 0 AND attempt_number = 1`,
     )
@@ -2418,17 +2768,17 @@ describe("alert observability migration", () => {
                 updated_at = ?
           WHERE delivery_key = ?`,
       )
-        .bind("2026-07-17T09:59:59.000Z", NOW, deliveryKey("K"))
+        .bind("2026-07-17T10:01:00.000Z", NOW, deliveryKey("K"))
         .run(),
     ).rejects.toThrow();
     await env.PG72_ID_DB.prepare(
       `UPDATE alert_outbox
-          SET status = 'retry', next_attempt_at = ?, lease_id = NULL,
-              lease_expires_at = NULL,
+          SET status = 'dead', next_attempt_at = NULL, lease_id = NULL,
+              lease_expires_at = NULL, dead_at = ?,
               last_error_code = 'payload_integrity', updated_at = ?
         WHERE delivery_key = ?`,
     )
-      .bind("2026-07-17T10:01:00.000Z", NOW, deliveryKey("K"))
+      .bind(NOW, NOW, deliveryKey("K"))
       .run();
     await expect(
       env.PG72_ID_DB.prepare(
@@ -2790,6 +3140,185 @@ describe("alert observability migration", () => {
         "2026-07-17T10:01:00.000Z",
         outboxId,
       )
+      .run();
+  });
+
+  it("bounds runtime clocks, integer samples, and lease ownership", async () => {
+    for (const [column, extraColumns, extraValues] of [
+      ["last_started_at", "", ""],
+      ["last_success_at", "", ""],
+      ["last_error_at", ", last_error_code", ", 'evaluator_failed'"],
+    ] as const) {
+      await expect(
+        env.PG72_ID_DB.prepare(
+          `INSERT INTO alert_runtime_status
+            (component, ${column}${extraColumns}, updated_at)
+           VALUES ('evaluator', ?${extraValues}, ?)`,
+        )
+          .bind("2026-07-17T10:00:01.000Z", NOW)
+          .run(),
+      ).rejects.toThrow();
+    }
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO alert_runtime_status
+          (component, last_success_at, watermark_at, updated_at)
+         VALUES ('evaluator', ?, '2026-07-17T10:00:01.000Z', ?)`,
+      )
+        .bind(NOW, NOW)
+        .run(),
+    ).rejects.toThrow();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO alert_runtime_status
+          (component, status, metric_sampled_at, backlog_count, backlog_bytes,
+           oldest_message_age_seconds, nonzero_since_at,
+           consecutive_nonzero_samples, updated_at)
+         VALUES ('alert_queue', 'degraded', ?, 1.5, 10, 5, ?, 1, ?)`,
+      )
+        .bind(NOW, NOW, NOW)
+        .run(),
+    ).rejects.toThrow();
+
+    await env.PG72_ID_DB.batch([
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO alert_runtime_status
+          (component, status, last_started_at, last_success_at, watermark_at,
+           updated_at)
+         VALUES ('evaluator', 'healthy', ?, ?, ?, ?)`,
+      ).bind(NOW, NOW, NOW, NOW),
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO alert_runtime_status (component, updated_at)
+         VALUES ('delivery', ?)`,
+      ).bind(NOW),
+    ]);
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE alert_runtime_status
+            SET last_started_at = '2026-07-17T10:01:00.000Z', revision = 1,
+                updated_at = '2026-07-17T10:00:30.000Z'
+          WHERE component = 'evaluator'`,
+      ).run(),
+    ).rejects.toThrow();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE alert_runtime_status
+            SET last_success_at = '2026-07-17T09:59:00.000Z', revision = 1,
+                updated_at = '2026-07-17T10:00:30.000Z'
+          WHERE component = 'evaluator'`,
+      ).run(),
+    ).rejects.toThrow();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE alert_runtime_status
+            SET last_started_at = '2026-07-17T10:00:20.000Z',
+                last_success_at = '2026-07-17T10:00:10.000Z', revision = 1,
+                updated_at = '2026-07-17T10:00:30.000Z'
+          WHERE component = 'evaluator'`,
+      ).run(),
+    ).rejects.toThrow();
+
+    const firstLease = crypto.randomUUID();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE alert_runtime_status
+            SET generation = 1, revision = 1, lease_id = ?,
+                lease_expires_at = '2026-07-17T09:59:00.000Z',
+                updated_at = '2026-07-17T10:00:01.000Z'
+          WHERE component = 'delivery'`,
+      )
+        .bind(firstLease)
+        .run(),
+    ).rejects.toThrow();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE alert_runtime_status
+            SET generation = 1, revision = 1, lease_id = ?,
+                lease_expires_at = '2026-07-17T10:05:02.000Z',
+                updated_at = '2026-07-17T10:00:01.000Z'
+          WHERE component = 'delivery'`,
+      )
+        .bind(firstLease)
+        .run(),
+    ).rejects.toThrow();
+    await env.PG72_ID_DB.prepare(
+      `UPDATE alert_runtime_status
+          SET generation = 1, revision = 1, lease_id = ?,
+              lease_expires_at = '2026-07-17T10:05:01.000Z',
+              updated_at = '2026-07-17T10:00:01.000Z'
+        WHERE component = 'delivery'`,
+    )
+      .bind(firstLease)
+      .run();
+
+    const secondLease = crypto.randomUUID();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE alert_runtime_status
+            SET generation = 2, revision = 2, lease_id = ?,
+                lease_expires_at = '2026-07-17T10:05:02.000Z',
+                updated_at = '2026-07-17T10:00:02.000Z'
+          WHERE component = 'delivery'`,
+      )
+        .bind(secondLease)
+        .run(),
+    ).rejects.toThrow();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE alert_runtime_status
+            SET revision = 2, lease_expires_at = '2026-07-17T10:04:00.000Z',
+                updated_at = '2026-07-17T10:01:00.000Z'
+          WHERE component = 'delivery'`,
+      ).run(),
+    ).rejects.toThrow();
+    await env.PG72_ID_DB.prepare(
+      `UPDATE alert_runtime_status
+          SET revision = 2, lease_expires_at = '2026-07-17T10:06:00.000Z',
+              updated_at = '2026-07-17T10:01:00.000Z'
+        WHERE component = 'delivery'`,
+    ).run();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE alert_runtime_status
+            SET revision = 3, lease_id = NULL, lease_expires_at = NULL,
+                updated_at = '2026-07-17T10:06:00.000Z'
+          WHERE component = 'delivery'`,
+      ).run(),
+    ).rejects.toThrow();
+    await env.PG72_ID_DB.prepare(
+      `UPDATE alert_runtime_status
+          SET revision = 3, lease_id = NULL, lease_expires_at = NULL,
+              updated_at = '2026-07-17T10:02:00.000Z'
+        WHERE component = 'delivery'`,
+    ).run();
+    await env.PG72_ID_DB.prepare(
+      `UPDATE alert_runtime_status
+          SET generation = 2, revision = 4, lease_id = ?,
+              lease_expires_at = '2026-07-17T10:07:01.000Z',
+              updated_at = '2026-07-17T10:02:01.000Z'
+        WHERE component = 'delivery'`,
+    )
+      .bind(secondLease)
+      .run();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE alert_runtime_status
+            SET generation = 3, revision = 5, lease_id = ?,
+                lease_expires_at = '2026-07-17T10:12:00.000Z',
+                updated_at = '2026-07-17T10:07:00.000Z'
+          WHERE component = 'delivery'`,
+      )
+        .bind(crypto.randomUUID())
+        .run(),
+    ).rejects.toThrow();
+    await env.PG72_ID_DB.prepare(
+      `UPDATE alert_runtime_status
+          SET generation = 3, revision = 5, lease_id = ?,
+              lease_expires_at = '2026-07-17T10:12:01.000Z',
+              updated_at = '2026-07-17T10:07:01.000Z'
+        WHERE component = 'delivery'`,
+    )
+      .bind(crypto.randomUUID())
       .run();
   });
 

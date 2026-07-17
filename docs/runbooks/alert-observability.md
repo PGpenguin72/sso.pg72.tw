@@ -17,13 +17,14 @@ provenance, and defines one key-continuity sentinel:
 - `security_alert`: incident generations with one unresolved row per dedupe
   state and closed open/acknowledged/resolved transitions;
 - `alert_outbox`: D1-first Email-only delivery work with a canonical payload,
-  SHA-256 field, stable idempotency key, recurring notification sequence bounded
-  to `1..1,000,000,000`, lease, attempts, replay generation, and a closed
-  transition graph;
+  SHA-256 field, stable idempotency key, recurring notification sequence that
+  starts at one and remains contiguous within `1..1,000,000,000`, lease,
+  attempts, replay generation, and a closed transition graph;
 - `alert_delivery_attempt`: pre-I/O attempt evidence bound to the exact active
   replay/attempt/lease, with unique `(outbox_id, replay_count, attempt_number)`
   tuples and immutable terminal outcomes;
-- `alert_runtime_status`: bounded evaluator/delivery/Queue health watermarks.
+- `alert_runtime_status`: bounded evaluator/delivery/Queue health watermarks,
+  monotonic clocks, and five-minute maximum ownership leases;
 - `audit_event.actor_ref`/`actor_ref_hash_version` and
   `oauth_client_report.reporter_ref`/`reporter_ref_hash_version`: nullable
   persistent provenance for rows whose raw actor/reporter FK may later become
@@ -55,10 +56,19 @@ of `security_events_dlq`, `logout_deliveries_dlq`, `alert_deliveries_dlq`, or
 `logout_dlq`, `alert_dlq`, and `audit_archive_dlq`. Metric-bearing runtime
 components are the corresponding four Queue/DLQ pairs, including exact
 `audit_archive_queue` and `audit_archive_dlq` names. Runtime updates increment
-`revision` exactly once. Samples cannot regress; a positive sample increments
-only at an exact 60-second interval, a late/missing sample restarts at one, and
-zero resets both continuity fields. Schema presence does not prove that the
-sampling loop exists.
+`revision` exactly once. No runtime clock or watermark may exceed `updated_at`.
+Lease acquisition increments generation, renewal keeps the same owner before
+expiry, release is permitted only by an unexpired owner, and takeover requires
+the prior lease to have expired; every acquired or renewed lease expires no
+more than five minutes after its update. Samples cannot regress; a positive
+sample increments only at an exact 60-second interval, a late/missing sample
+restarts at one, and zero resets both continuity fields. Schema presence does
+not prove that the sampling loop exists. In particular, D1 cannot prove that an
+inserted `healthy`/`last_success_at` pair came from executed evaluator work. Only
+the future evaluator repository may publish that pair inside its controlled
+successful-run transaction, and consumers must require the
+`repository_controlled_successful_run_only` parser contract; status, generation,
+or revision alone is not bootstrap evidence.
 
 Logout health has two different time domains. `dead` counts every row currently
 dead until replay changes its state, and `oldest_unresolved_age_seconds` scans
@@ -87,23 +97,30 @@ not change current writers or perform a remote backfill.
 Raw actor/reporter FKs cannot be reassigned after insert. The only identity
 change allowed is their existing non-null-to-null `ON DELETE SET NULL` action;
 the paired HMAC reference survives that deletion and, once populated, is
-immutable. This preserves account deletion semantics without permitting a row
-to be attributed to a different identity.
+immutable. If a raw ID is already null and no reference exists, a later writer
+cannot invent one; that row remains explicitly incomplete. This preserves
+account deletion semantics without permitting a row to be attributed to a
+different identity.
 
-Lifecycle state is restart-safe and compare-and-swap shaped. Every row starts at
-inactive generation/revision zero with no cooldown. The first positive
-evaluation persists a typed warning/critical candidate; the next matching
-evaluation opens or escalates. Four persisted clear evaluations remain active,
+Lifecycle state is restart-safe and compare-and-swap shaped. No pristine
+none/unknown row is stored: the first positive evaluation creates an inactive
+generation/revision-zero row carrying exactly one typed warning/critical
+candidate; the next matching evaluation opens or escalates. Four persisted
+clear evaluations remain active,
 and the fifth resolves with a cooldown exactly 30 minutes after that evaluation.
-Inactive updates may preserve or clear that cooldown but cannot create, extend,
-or slide it. Every revision has a strictly newer `last_evaluated_at`, preventing
+Inactive updates preserve that cooldown until its exact expiry, then may clear
+it; they cannot clear early, create, extend, or slide it. A pending warning also
+cannot confirm while cooldown remains active, while canonical immediate
+critical causes retain their break-glass path. Every revision has a strictly newer
+`last_evaluated_at`, preventing
 the same Cron `asOf` from incrementing a streak twice. Counter/generation jumps
 and candidate-free transitions are rejected. Only logout `dead` and runtime
 `evaluator_missing`/`dead_outbox` may enter critical immediately. A reviewed
 manual resolution code permits active-to-inactive only after the same-generation
 incident is resolved with a versioned operator reference; `healthy` automatic
 resolution carries no operator reference, still requires the fifth clear, and
-no old generation is a bypass.
+no old generation is a bypass. Fanout-gap is manual-only: it cannot accumulate
+automatic clear samples or use `healthy` resolution.
 Active warning or critical state also requires a canonical
 `last_notification_scheduled_at`; inactive/pending state requires it to be null.
 
@@ -111,7 +128,9 @@ The two current all-of expressions additionally store one fixed secondary
 count/events component: `count` then `known_surfaces` for restricted sensitive
 denials, or `high_risk_count` then `distinct_reporters` for OAuth client reports.
 The five secondary fields are all-null or all-present, meet their own threshold,
-and are matched exactly into the immutable Email payload. This schema version
+and are matched exactly into the immutable Email payload. Restricted
+`known_surfaces` is additionally no greater than the primary denied count or the
+closed seven-surface domain. This schema version
 supports at most two ordered components; adding a three-component expression
 requires a reviewed migration and payload version.
 
@@ -123,8 +142,9 @@ channel. Its canonical JSON must equal all persisted snapshot columns, and an
 insert trigger requires those columns to match the exact incident evidence and
 immutable state dimensions. The future Email adapter must recompute and verify
 `payload_sha256` before delivery. A mismatch is permanently classified as
-`payload_integrity` in both attempt and outbox evidence, not collapsed into an
-arbitrary provider error.
+`payload_integrity` in both attempt and outbox evidence and may transition only
+to `dead`, not retry, rather than being collapsed into an arbitrary provider
+error.
 
 Semantic state identity is unique across rule, environment, source kind, and
 the closed subject/Queue dimension; a writer cannot create parallel incidents by
@@ -132,7 +152,11 @@ changing an opaque dedupe hash or context fields. Restricted sensitive denial,
 OAuth report, and admin rules require a canonical version-1 HMAC subject
 reference; recovery Passkey, Passkey step-up, and logout may carry one; all
 remaining non-Queue rules forbid it. All 32-byte base64url references use the
-canonical 43-character encoding, including its restricted final character.
+canonical 43-character encoding, including the complete 16-character final
+alphabet `A/E/I/M/Q/U/Y/c/g/k/o/s/w/0/4/8`. The evaluator's current dimensions
+do not include provider/reason/surface context, so those reserved snapshot
+columns remain null. Numeric fields declared as integers also require SQLite
+integer storage, preventing REAL values from passing affinity-based range checks.
 
 The future delivery Worker must use ordered D1 batches for both sides of the
 attempt contract. New work starts pending, due, attempt/replay zero, and without
@@ -189,7 +213,8 @@ table was introduced.
 Source presence alone must report observability as
 `source_present_unverified`, leaving continuity and drills blocked. A later
 reviewed slice must add the deterministic evaluator, versioned rule definitions,
-same-run proof, dedicated alert Queue/DLQ, Email Service adapter, admin
+repository-controlled successful-run projection/parser and same-run proof,
+dedicated alert Queue/DLQ, Email Service adapter, admin
 acknowledge/resolve/replay operations, and redaction/race/failure tests.
 
 Isolated Preview must then apply the ordered migration ledger, tune thresholds,

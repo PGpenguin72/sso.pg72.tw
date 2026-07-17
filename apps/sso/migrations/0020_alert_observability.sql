@@ -13,12 +13,17 @@ ALTER TABLE "audit_event" ADD COLUMN "actor_ref" text CHECK (
   OR (
     length("actor_ref") = 43
     AND "actor_ref" NOT GLOB '*[^A-Za-z0-9_-]*'
-    AND substr("actor_ref", -1) IN ('A', 'Q', 'g', 'w')
+    AND substr("actor_ref", -1) IN (
+      'A', 'E', 'I', 'M', 'Q', 'U', 'Y', 'c',
+      'g', 'k', 'o', 's', 'w', '0', '4', '8'
+    )
   )
 );
 
 ALTER TABLE "audit_event" ADD COLUMN "actor_ref_hash_version" integer CHECK (
-  "actor_ref_hash_version" IS NULL OR "actor_ref_hash_version" = 1
+  "actor_ref_hash_version" IS NULL
+  OR (typeof("actor_ref_hash_version") = 'integer'
+    AND "actor_ref_hash_version" = 1)
 );
 
 CREATE TRIGGER "audit_event_actor_ref_insert_guard"
@@ -31,6 +36,9 @@ END;
 CREATE TRIGGER "audit_event_actor_ref_update_guard"
 BEFORE UPDATE OF "actor_ref", "actor_ref_hash_version" ON "audit_event"
 WHEN (NEW."actor_ref" IS NULL) <> (NEW."actor_ref_hash_version" IS NULL)
+  OR (OLD."actor_ref" IS NULL
+    AND OLD."actor_user_id" IS NULL
+    AND NEW."actor_ref" IS NOT NULL)
   OR (OLD."actor_ref" IS NOT NULL AND (
     NEW."actor_ref" IS NOT OLD."actor_ref"
     OR NEW."actor_ref_hash_version" IS NOT OLD."actor_ref_hash_version"
@@ -54,13 +62,18 @@ ALTER TABLE "oauth_client_report" ADD COLUMN "reporter_ref" text CHECK (
   OR (
     length("reporter_ref") = 43
     AND "reporter_ref" NOT GLOB '*[^A-Za-z0-9_-]*'
-    AND substr("reporter_ref", -1) IN ('A', 'Q', 'g', 'w')
+    AND substr("reporter_ref", -1) IN (
+      'A', 'E', 'I', 'M', 'Q', 'U', 'Y', 'c',
+      'g', 'k', 'o', 's', 'w', '0', '4', '8'
+    )
   )
 );
 
 ALTER TABLE "oauth_client_report"
   ADD COLUMN "reporter_ref_hash_version" integer CHECK (
-    "reporter_ref_hash_version" IS NULL OR "reporter_ref_hash_version" = 1
+    "reporter_ref_hash_version" IS NULL
+    OR (typeof("reporter_ref_hash_version") = 'integer'
+      AND "reporter_ref_hash_version" = 1)
   );
 
 CREATE TRIGGER "oauth_client_report_ref_insert_guard"
@@ -74,6 +87,9 @@ CREATE TRIGGER "oauth_client_report_ref_update_guard"
 BEFORE UPDATE OF "reporter_ref", "reporter_ref_hash_version"
 ON "oauth_client_report"
 WHEN (NEW."reporter_ref" IS NULL) <> (NEW."reporter_ref_hash_version" IS NULL)
+  OR (OLD."reporter_ref" IS NULL
+    AND OLD."reporter_user_id" IS NULL
+    AND NEW."reporter_ref" IS NOT NULL)
   OR (OLD."reporter_ref" IS NOT NULL AND (
     NEW."reporter_ref" IS NOT OLD."reporter_ref"
     OR NEW."reporter_ref_hash_version" IS NOT OLD."reporter_ref_hash_version"
@@ -93,17 +109,29 @@ BEGIN
 END;
 
 CREATE TABLE "alert_hash_key_sentinel" (
-  "id" integer PRIMARY KEY NOT NULL CHECK ("id" = 1),
+  "id" integer PRIMARY KEY NOT NULL
+    CHECK (typeof("id") = 'integer' AND "id" = 1),
   "domain" text NOT NULL
     CHECK ("domain" = 'pgid.alert_subject_hash_key.v1'),
   "fingerprint_ref" text NOT NULL CHECK (
     length("fingerprint_ref") = 43
     AND "fingerprint_ref" NOT GLOB '*[^A-Za-z0-9_-]*'
-    AND substr("fingerprint_ref", -1) IN ('A', 'Q', 'g', 'w')
+    AND substr("fingerprint_ref", -1) IN (
+      'A', 'E', 'I', 'M', 'Q', 'U', 'Y', 'c',
+      'g', 'k', 'o', 's', 'w', '0', '4', '8'
+    )
   ),
-  "hash_version" integer NOT NULL CHECK ("hash_version" = 1),
+  "hash_version" integer NOT NULL
+    CHECK (typeof("hash_version") = 'integer' AND "hash_version" = 1),
   "created_at" date NOT NULL CHECK (unixepoch("created_at") IS NOT NULL)
 );
+
+CREATE TRIGGER "alert_hash_key_sentinel_insert_guard"
+BEFORE INSERT ON "alert_hash_key_sentinel"
+WHEN EXISTS (SELECT 1 FROM "alert_hash_key_sentinel")
+BEGIN
+  SELECT RAISE(ABORT, 'alert hash-key sentinel is immutable');
+END;
 
 CREATE TRIGGER "alert_hash_key_sentinel_update_guard"
 BEFORE UPDATE ON "alert_hash_key_sentinel"
@@ -145,14 +173,20 @@ CREATE TABLE "alert_state" (
   "dedupe_key" text NOT NULL UNIQUE CHECK (
     length("dedupe_key") = 43
     AND "dedupe_key" NOT GLOB '*[^A-Za-z0-9_-]*'
-    AND substr("dedupe_key", -1) IN ('A', 'Q', 'g', 'w')
+    AND substr("dedupe_key", -1) IN (
+      'A', 'E', 'I', 'M', 'Q', 'U', 'Y', 'c',
+      'g', 'k', 'o', 's', 'w', '0', '4', '8'
+    )
   ),
   "subject_ref" text CHECK (
     "subject_ref" IS NULL
     OR (
       length("subject_ref") = 43
       AND "subject_ref" NOT GLOB '*[^A-Za-z0-9_-]*'
-      AND substr("subject_ref", -1) IN ('A', 'Q', 'g', 'w')
+      AND substr("subject_ref", -1) IN (
+        'A', 'E', 'I', 'M', 'Q', 'U', 'Y', 'c',
+        'g', 'k', 'o', 's', 'w', '0', '4', '8'
+      )
     )
   ),
   "hash_version" integer CHECK ("hash_version" IS NULL OR "hash_version" = 1),
@@ -282,9 +316,37 @@ CREATE TABLE "alert_state" (
   "updated_at" date NOT NULL CHECK (unixepoch("updated_at") IS NOT NULL),
   UNIQUE ("id", "rule_id", "environment", "source_kind"),
   CHECK (
+    typeof("window_seconds") = 'integer'
+    AND typeof("observed_value") = 'integer'
+    AND ("observed_numerator" IS NULL
+      OR typeof("observed_numerator") = 'integer')
+    AND ("observed_denominator" IS NULL
+      OR typeof("observed_denominator") = 'integer')
+    AND typeof("minimum_sample_count") = 'integer'
+    AND ("minimum_numerator_count" IS NULL
+      OR typeof("minimum_numerator_count") = 'integer')
+    AND ("warning_threshold" IS NULL
+      OR typeof("warning_threshold") = 'integer')
+    AND ("critical_threshold" IS NULL
+      OR typeof("critical_threshold") = 'integer')
+    AND ("secondary_observed_value" IS NULL
+      OR typeof("secondary_observed_value") = 'integer')
+    AND ("secondary_threshold" IS NULL
+      OR typeof("secondary_threshold") = 'integer')
+    AND typeof("consecutive_breaches") = 'integer'
+    AND typeof("consecutive_clears") = 'integer'
+    AND typeof("generation") = 'integer'
+    AND typeof("revision") = 'integer'
+    AND ("hash_version" IS NULL OR typeof("hash_version") = 'integer')
+  ),
+  CHECK (
     ("subject_ref" IS NULL AND "hash_version" IS NULL)
     OR ("subject_ref" IS NOT NULL AND "hash_version" IS 1)
   ),
+  -- The canonical evaluator has only global, hashed-subject/client/actor, and
+  -- Queue dimensions. These reserved context columns remain null until a
+  -- versioned rule explicitly adds one to its dimension contract.
+  CHECK ("provider" IS NULL AND "reason" IS NULL AND "surface" IS NULL),
   CHECK (
     ("rule_id" IN (
         'pgid.restricted.sensitive_denied.v1',
@@ -445,6 +507,11 @@ CREATE TABLE "alert_state" (
       AND "metric_name" = 'high_risk_count'
       AND "secondary_metric_name" = 'distinct_reporters')
   ),
+  CHECK (
+    "secondary_metric_name" IS NOT 'known_surfaces'
+    OR ("secondary_observed_value" <= "observed_value"
+      AND "secondary_observed_value" <= 7)
+  ),
   CHECK ("warning_threshold" IS NOT NULL OR "critical_threshold" IS NOT NULL),
   CHECK (
     "warning_threshold" IS NULL
@@ -489,6 +556,10 @@ CREATE TABLE "alert_state" (
     OR "current_severity" = 'none'
   ),
   CHECK ("consecutive_breaches" = 0 OR "consecutive_clears" = 0),
+  CHECK (
+    "rule_id" <> 'pgid.security.fanout_gap.v1'
+    OR "consecutive_clears" = 0
+  ),
   CHECK ("current_severity" <> 'none' OR "consecutive_clears" = 0),
   CHECK ("current_severity" = 'none' OR "generation" >= 1),
   CHECK ("current_severity" = 'none' OR "cooldown_until" IS NULL),
@@ -539,10 +610,8 @@ WHEN NEW."current_severity" <> 'none'
   OR NEW."consecutive_clears" <> 0
   OR NEW."cooldown_until" IS NOT NULL
   OR NEW."last_notification_scheduled_at" IS NOT NULL
-  OR NOT (
-    (NEW."breach_severity" IS NULL AND NEW."consecutive_breaches" = 0)
-    OR (NEW."breach_severity" IS NOT NULL AND NEW."consecutive_breaches" = 1)
-  )
+  OR NEW."breach_severity" IS NULL
+  OR NEW."consecutive_breaches" <> 1
 BEGIN
   SELECT RAISE(ABORT, 'alert state must start inactive');
 END;
@@ -565,7 +634,9 @@ WHEN NEW."revision" <> OLD."revision" + 1
     AND NOT (
       NEW."cooldown_until" IS OLD."cooldown_until"
       OR (OLD."cooldown_until" IS NOT NULL
-        AND NEW."cooldown_until" IS NULL)
+        AND NEW."cooldown_until" IS NULL
+        AND unixepoch(NEW."last_evaluated_at")
+          >= unixepoch(OLD."cooldown_until"))
     ))
   OR (OLD."last_notification_scheduled_at" IS NOT NULL
     AND NEW."last_notification_scheduled_at" IS NOT NULL
@@ -580,6 +651,9 @@ WHEN NEW."revision" <> OLD."revision" + 1
       AND NEW."generation" = OLD."generation" + 1
       AND OLD."breach_severity" = 'warning'
       AND OLD."consecutive_breaches" = 1
+      AND (OLD."cooldown_until" IS NULL
+        OR unixepoch(NEW."last_evaluated_at")
+          >= unixepoch(OLD."cooldown_until"))
       AND NEW."breach_severity" IS NULL
       AND NEW."consecutive_breaches" = 0
       AND NEW."consecutive_clears" = 0)
@@ -618,7 +692,8 @@ WHEN NEW."revision" <> OLD."revision" + 1
       AND NEW."current_severity" = 'none'
       AND NEW."generation" = OLD."generation"
       AND (
-        OLD."consecutive_clears" = 4
+        (NEW."rule_id" <> 'pgid.security.fanout_gap.v1'
+          AND OLD."consecutive_clears" = 4)
         OR EXISTS (
             SELECT 1
               FROM "security_alert" AS incident
@@ -642,7 +717,8 @@ WHEN NEW."revision" <> OLD."revision" + 1
       AND NEW."current_severity" = 'none'
       AND NEW."generation" = OLD."generation"
       AND (
-        OLD."consecutive_clears" = 4
+        (NEW."rule_id" <> 'pgid.security.fanout_gap.v1'
+          AND OLD."consecutive_clears" = 4)
         OR EXISTS (
             SELECT 1
               FROM "security_alert" AS incident
@@ -678,6 +754,7 @@ WHEN OLD."current_severity" = NEW."current_severity"
       AND NEW."consecutive_breaches" = 0
       AND NEW."consecutive_clears" = 0)
     OR (OLD."current_severity" IN ('warning', 'critical')
+      AND NEW."rule_id" <> 'pgid.security.fanout_gap.v1'
       AND OLD."breach_severity" IS NULL
       AND OLD."consecutive_breaches" = 0
       AND NEW."breach_severity" IS NULL
@@ -772,7 +849,10 @@ CREATE TABLE "security_alert" (
     OR (
       length("acknowledged_by_ref") = 43
       AND "acknowledged_by_ref" NOT GLOB '*[^A-Za-z0-9_-]*'
-      AND substr("acknowledged_by_ref", -1) IN ('A', 'Q', 'g', 'w')
+      AND substr("acknowledged_by_ref", -1) IN (
+        'A', 'E', 'I', 'M', 'Q', 'U', 'Y', 'c',
+        'g', 'k', 'o', 's', 'w', '0', '4', '8'
+      )
     )
   ),
   "acknowledged_by_hash_version" integer CHECK (
@@ -786,7 +866,10 @@ CREATE TABLE "security_alert" (
     OR (
       length("resolved_by_ref") = 43
       AND "resolved_by_ref" NOT GLOB '*[^A-Za-z0-9_-]*'
-      AND substr("resolved_by_ref", -1) IN ('A', 'Q', 'g', 'w')
+      AND substr("resolved_by_ref", -1) IN (
+        'A', 'E', 'I', 'M', 'Q', 'U', 'Y', 'c',
+        'g', 'k', 'o', 's', 'w', '0', '4', '8'
+      )
     )
   ),
   "resolved_by_hash_version" integer CHECK (
@@ -807,6 +890,27 @@ CREATE TABLE "security_alert" (
     REFERENCES "alert_state" (
       "id", "rule_id", "environment", "source_kind"
     ) ON DELETE RESTRICT,
+  CHECK (
+    typeof("generation") = 'integer'
+    AND typeof("window_seconds") = 'integer'
+    AND typeof("observed_value") = 'integer'
+    AND ("observed_numerator" IS NULL
+      OR typeof("observed_numerator") = 'integer')
+    AND ("observed_denominator" IS NULL
+      OR typeof("observed_denominator") = 'integer')
+    AND typeof("minimum_sample_count") = 'integer'
+    AND ("minimum_numerator_count" IS NULL
+      OR typeof("minimum_numerator_count") = 'integer')
+    AND typeof("threshold") = 'integer'
+    AND ("secondary_observed_value" IS NULL
+      OR typeof("secondary_observed_value") = 'integer')
+    AND ("secondary_threshold" IS NULL
+      OR typeof("secondary_threshold") = 'integer')
+    AND ("acknowledged_by_hash_version" IS NULL
+      OR typeof("acknowledged_by_hash_version") = 'integer')
+    AND ("resolved_by_hash_version" IS NULL
+      OR typeof("resolved_by_hash_version") = 'integer')
+  ),
   CHECK (
     ("metric_name" = 'ratio'
       AND "metric_kind" = 'ratio'
@@ -927,6 +1031,11 @@ CREATE TABLE "security_alert" (
       AND "metric_name" = 'high_risk_count'
       AND "secondary_metric_name" = 'distinct_reporters')
   ),
+  CHECK (
+    "secondary_metric_name" IS NOT 'known_surfaces'
+    OR ("secondary_observed_value" <= "observed_value"
+      AND "secondary_observed_value" <= 7)
+  ),
   CHECK ("observed_value" >= "threshold"),
   CHECK (
     "secondary_metric_name" IS NULL
@@ -974,6 +1083,13 @@ CREATE TABLE "security_alert" (
     OR ("resolution_code" IN (
       'manual_false_positive', 'approved_test', 'operator_resolved'
     ) AND "resolved_by_ref" IS NOT NULL)
+  ),
+  CHECK (
+    "rule_id" <> 'pgid.security.fanout_gap.v1'
+    OR "resolution_code" IS NULL
+    OR "resolution_code" IN (
+      'manual_false_positive', 'approved_test', 'operator_resolved'
+    )
   ),
   CHECK (
     ("status" = 'open'
@@ -1162,7 +1278,10 @@ CREATE TABLE "alert_outbox" (
     length("delivery_key") = 51
     AND substr("delivery_key", 1, 8) = 'pgid_ad_'
     AND substr("delivery_key", 9) NOT GLOB '*[^A-Za-z0-9_-]*'
-    AND substr("delivery_key", -1) IN ('A', 'Q', 'g', 'w')
+    AND substr("delivery_key", -1) IN (
+      'A', 'E', 'I', 'M', 'Q', 'U', 'Y', 'c',
+      'g', 'k', 'o', 's', 'w', '0', '4', '8'
+    )
   ),
   "alert_id" text NOT NULL,
   "generation" integer NOT NULL
@@ -1175,7 +1294,10 @@ CREATE TABLE "alert_outbox" (
   "idempotency_key" text NOT NULL UNIQUE CHECK (
     length("idempotency_key") = 43
     AND "idempotency_key" NOT GLOB '*[^A-Za-z0-9_-]*'
-    AND substr("idempotency_key", -1) IN ('A', 'Q', 'g', 'w')
+    AND substr("idempotency_key", -1) IN (
+      'A', 'E', 'I', 'M', 'Q', 'U', 'Y', 'c',
+      'g', 'k', 'o', 's', 'w', '0', '4', '8'
+    )
   ),
   "payload_version" integer NOT NULL DEFAULT 1 CHECK ("payload_version" = 1),
   "template_version" integer NOT NULL DEFAULT 1 CHECK ("template_version" = 1),
@@ -1221,7 +1343,10 @@ CREATE TABLE "alert_outbox" (
     OR (
       length("subject_ref") = 43
       AND "subject_ref" NOT GLOB '*[^A-Za-z0-9_-]*'
-      AND substr("subject_ref", -1) IN ('A', 'Q', 'g', 'w')
+      AND substr("subject_ref", -1) IN (
+        'A', 'E', 'I', 'M', 'Q', 'U', 'Y', 'c',
+        'g', 'k', 'o', 's', 'w', '0', '4', '8'
+      )
     )
   ),
   "hash_version" integer CHECK ("hash_version" IS NULL OR "hash_version" = 1),
@@ -1350,6 +1475,30 @@ CREATE TABLE "alert_outbox" (
     "id", "generation", "rule_id", "environment", "source_kind"
   ) ON DELETE RESTRICT,
   CHECK (
+    typeof("id") = 'integer'
+    AND typeof("generation") = 'integer'
+    AND typeof("event_sequence") = 'integer'
+    AND typeof("payload_version") = 'integer'
+    AND typeof("template_version") = 'integer'
+    AND ("hash_version" IS NULL OR typeof("hash_version") = 'integer')
+    AND typeof("window_seconds") = 'integer'
+    AND typeof("observed_value") = 'integer'
+    AND ("observed_numerator" IS NULL
+      OR typeof("observed_numerator") = 'integer')
+    AND ("observed_denominator" IS NULL
+      OR typeof("observed_denominator") = 'integer')
+    AND typeof("minimum_sample_count") = 'integer'
+    AND ("minimum_numerator_count" IS NULL
+      OR typeof("minimum_numerator_count") = 'integer')
+    AND typeof("threshold") = 'integer'
+    AND ("secondary_observed_value" IS NULL
+      OR typeof("secondary_observed_value") = 'integer')
+    AND ("secondary_threshold" IS NULL
+      OR typeof("secondary_threshold") = 'integer')
+    AND typeof("attempts") = 'integer'
+    AND typeof("replay_count") = 'integer'
+  ),
+  CHECK (
     "payload_json" = json_object(
       'schemaVersion', "payload_version",
       'templateVersion', "template_version",
@@ -1394,6 +1543,7 @@ CREATE TABLE "alert_outbox" (
     ("subject_ref" IS NULL AND "hash_version" IS NULL)
     OR ("subject_ref" IS NOT NULL AND "hash_version" IS 1)
   ),
+  CHECK ("provider" IS NULL AND "reason" IS NULL AND "surface" IS NULL),
   CHECK (
     ("rule_id" = 'pgid.queue.dlq_approximate.v1'
       AND "source_kind" = 'queue_approximate')
@@ -1528,6 +1678,11 @@ CREATE TABLE "alert_outbox" (
       AND "metric_name" = 'high_risk_count'
       AND "secondary_metric_name" = 'distinct_reporters')
   ),
+  CHECK (
+    "secondary_metric_name" IS NOT 'known_surfaces'
+    OR ("secondary_observed_value" <= "observed_value"
+      AND "secondary_observed_value" <= 7)
+  ),
   CHECK ("observed_value" >= "threshold"),
   CHECK (
     "secondary_metric_name" IS NULL
@@ -1564,12 +1719,33 @@ CREATE TABLE "alert_outbox" (
     OR ("status" NOT IN ('retry', 'dead') AND "last_error_code" IS NULL)
   ),
   CHECK (
+    "last_error_code" IS NOT 'payload_integrity'
+    OR "status" = 'dead'
+  ),
+  CHECK (
     ("status" = 'pending' AND "attempts" = 0)
     OR ("status" = 'processing' AND "attempts" BETWEEN 1 AND 5)
     OR ("status" = 'retry' AND "attempts" BETWEEN 1 AND 4)
     OR ("status" IN ('accepted', 'dead') AND "attempts" BETWEEN 1 AND 5)
   )
 );
+
+-- D1 serializes writes, so this trigger and the unique event tuple make the
+-- next reminder sequence a single atomic decision for each incident generation.
+CREATE TRIGGER "alert_outbox_reminder_sequence_guard"
+BEFORE INSERT ON "alert_outbox"
+WHEN NEW."event_kind" = 'reminder'
+  AND NEW."event_sequence" <> coalesce((
+    SELECT max(existing."event_sequence") + 1
+      FROM "alert_outbox" AS existing
+     WHERE existing."alert_id" = NEW."alert_id"
+       AND existing."generation" = NEW."generation"
+       AND existing."event_kind" = 'reminder'
+       AND existing."channel" = NEW."channel"
+  ), 1)
+BEGIN
+  SELECT RAISE(ABORT, 'alert reminder sequence must be contiguous');
+END;
 
 CREATE TRIGGER "alert_outbox_snapshot_immutable"
 BEFORE UPDATE ON "alert_outbox"
@@ -1766,6 +1942,11 @@ CREATE TABLE "alert_delivery_attempt" (
   ),
   UNIQUE ("outbox_id", "replay_count", "attempt_number"),
   CHECK (
+    typeof("outbox_id") = 'integer'
+    AND typeof("replay_count") = 'integer'
+    AND typeof("attempt_number") = 'integer'
+  ),
+  CHECK (
     "completed_at" IS NULL
     OR unixepoch("completed_at") >= unixepoch("started_at")
   ),
@@ -1797,6 +1978,10 @@ CREATE TABLE "alert_delivery_attempt" (
   CHECK (
     "outcome" IN ('in_flight', 'accepted', 'lease_expired')
     OR "error_code" IS NOT NULL
+  ),
+  CHECK (
+    "error_code" IS NOT 'payload_integrity'
+    OR ("outcome" = 'dead' AND "resulting_status" = 'dead')
   )
 );
 
@@ -1858,6 +2043,10 @@ END;
 CREATE INDEX "alert_delivery_attempt_time_idx"
   ON "alert_delivery_attempt" ("started_at" DESC);
 
+-- This table constrains persisted chronology and ownership, but cannot prove
+-- that evaluator work ran. Only the future evaluator repository may publish
+-- healthy + last_success_at in its controlled successful-run transaction;
+-- consumers must not treat an inserted status string as execution proof.
 CREATE TABLE "alert_runtime_status" (
   "component" text PRIMARY KEY NOT NULL CHECK (
     "component" IN (
@@ -1928,8 +2117,23 @@ CREATE TABLE "alert_runtime_status" (
     AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at") = "updated_at"
   ),
   CHECK (
+    typeof("generation") = 'integer'
+    AND typeof("revision") = 'integer'
+    AND ("backlog_count" IS NULL OR typeof("backlog_count") = 'integer')
+    AND ("backlog_bytes" IS NULL OR typeof("backlog_bytes") = 'integer')
+    AND ("oldest_message_age_seconds" IS NULL
+      OR typeof("oldest_message_age_seconds") = 'integer')
+    AND ("consecutive_nonzero_samples" IS NULL
+      OR typeof("consecutive_nonzero_samples") = 'integer')
+  ),
+  CHECK (
     ("lease_id" IS NULL AND "lease_expires_at" IS NULL)
     OR ("lease_id" IS NOT NULL AND "lease_expires_at" IS NOT NULL)
+  ),
+  CHECK (
+    "lease_id" IS NULL
+    OR (unixepoch("lease_expires_at") > unixepoch("updated_at")
+      AND unixepoch("lease_expires_at") <= unixepoch("updated_at") + 300)
   ),
   CHECK (
     ("last_error_at" IS NULL AND "last_error_code" IS NULL)
@@ -1963,6 +2167,23 @@ CREATE TABLE "alert_runtime_status" (
   CHECK (
     "metric_sampled_at" IS NULL
     OR unixepoch("metric_sampled_at") <= unixepoch("updated_at")
+  ),
+  CHECK (
+    "last_started_at" IS NULL
+    OR unixepoch("last_started_at") <= unixepoch("updated_at")
+  ),
+  CHECK (
+    "last_success_at" IS NULL
+    OR unixepoch("last_success_at") <= unixepoch("updated_at")
+  ),
+  CHECK (
+    "last_error_at" IS NULL
+    OR unixepoch("last_error_at") <= unixepoch("updated_at")
+  ),
+  CHECK (
+    "watermark_at" IS NULL
+    OR ("last_success_at" IS NOT NULL
+      AND unixepoch("watermark_at") <= unixepoch("last_success_at"))
   )
 );
 
@@ -1984,14 +2205,62 @@ CREATE TRIGGER "alert_runtime_status_transition_guard"
 BEFORE UPDATE ON "alert_runtime_status"
 WHEN NEW."component" <> OLD."component"
   OR NEW."revision" <> OLD."revision" + 1
-  OR unixepoch(NEW."updated_at") < unixepoch(OLD."updated_at")
+  OR unixepoch(NEW."updated_at") <= unixepoch(OLD."updated_at")
   OR NOT (
-    (NEW."generation" = OLD."generation"
-      AND (NEW."lease_id" IS OLD."lease_id" OR NEW."lease_id" IS NULL))
-    OR (NEW."generation" = OLD."generation" + 1
+    (OLD."lease_id" IS NULL
+      AND NEW."lease_id" IS NULL
+      AND NEW."generation" = OLD."generation")
+    OR (OLD."lease_id" IS NULL
       AND NEW."lease_id" IS NOT NULL
-      AND NEW."lease_id" IS NOT OLD."lease_id")
+      AND NEW."generation" = OLD."generation" + 1)
+    OR (OLD."lease_id" IS NOT NULL
+      AND NEW."lease_id" IS OLD."lease_id"
+      AND NEW."generation" = OLD."generation"
+      AND unixepoch(NEW."updated_at") < unixepoch(OLD."lease_expires_at")
+      AND unixepoch(NEW."lease_expires_at")
+        >= unixepoch(OLD."lease_expires_at"))
+    OR (OLD."lease_id" IS NOT NULL
+      AND NEW."lease_id" IS NULL
+      AND NEW."generation" = OLD."generation"
+      AND unixepoch(NEW."updated_at") < unixepoch(OLD."lease_expires_at"))
+    OR (OLD."lease_id" IS NOT NULL
+      AND NEW."lease_id" IS NOT NULL
+      AND NEW."lease_id" IS NOT OLD."lease_id"
+      AND NEW."generation" = OLD."generation" + 1
+      AND unixepoch(NEW."updated_at") >= unixepoch(OLD."lease_expires_at"))
   )
+  OR (OLD."last_started_at" IS NOT NULL AND (
+    NEW."last_started_at" IS NULL
+    OR unixepoch(NEW."last_started_at") < unixepoch(OLD."last_started_at")
+  ))
+  OR (OLD."last_success_at" IS NOT NULL AND (
+    NEW."last_success_at" IS NULL
+    OR unixepoch(NEW."last_success_at") < unixepoch(OLD."last_success_at")
+  ))
+  OR (OLD."last_error_at" IS NOT NULL AND (
+    NEW."last_error_at" IS NULL
+    OR unixepoch(NEW."last_error_at") < unixepoch(OLD."last_error_at")
+  ))
+  OR (OLD."watermark_at" IS NOT NULL AND (
+    NEW."watermark_at" IS NULL
+    OR unixepoch(NEW."watermark_at") < unixepoch(OLD."watermark_at")
+  ))
+  OR NOT (
+    (NEW."last_error_at" IS OLD."last_error_at"
+      AND NEW."last_error_code" IS OLD."last_error_code")
+    OR (NEW."last_error_at" IS NOT NULL
+      AND (OLD."last_error_at" IS NULL
+        OR unixepoch(NEW."last_error_at") > unixepoch(OLD."last_error_at"))
+      AND NEW."last_error_code" IS NOT NULL)
+  )
+  OR (NEW."last_success_at" IS NOT OLD."last_success_at" AND (
+    NEW."last_started_at" IS NULL
+    OR unixepoch(NEW."last_success_at") < unixepoch(NEW."last_started_at")
+  ))
+  OR (NEW."last_error_at" IS NOT OLD."last_error_at" AND (
+    NEW."last_started_at" IS NULL
+    OR unixepoch(NEW."last_error_at") < unixepoch(NEW."last_started_at")
+  ))
   OR (OLD."metric_sampled_at" IS NOT NULL
     AND NEW."metric_sampled_at" IS NULL)
   OR (OLD."metric_sampled_at" IS NOT NULL

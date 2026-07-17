@@ -64,6 +64,8 @@ function createDependencyFixture() {
      ALTER TABLE "oauth_client_report"
        ADD COLUMN "reporter_ref_hash_version" integer;
      CREATE TABLE "alert_hash_key_sentinel" (id integer);
+     CREATE TRIGGER "alert_hash_key_sentinel_insert_guard"
+       BEFORE INSERT ON "alert_hash_key_sentinel" BEGIN SELECT 1; END;
      CREATE TRIGGER "audit_event_actor_identity_update_guard"
        AFTER UPDATE ON "alert_hash_key_sentinel" BEGIN SELECT 1; END;
      CREATE TRIGGER "oauth_client_report_identity_update_guard"
@@ -91,6 +93,8 @@ function createDependencyFixture() {
        AFTER UPDATE ON "alert_state" BEGIN SELECT 1; END;
      CREATE TRIGGER "security_alert_insert_state_guard"
        AFTER INSERT ON "security_alert" BEGIN SELECT 1; END;
+     CREATE TRIGGER "alert_outbox_reminder_sequence_guard"
+       BEFORE INSERT ON "alert_outbox" BEGIN SELECT 1; END;
      CREATE TRIGGER "alert_delivery_attempt_insert_guard"
        AFTER INSERT ON "alert_delivery_attempt" BEGIN SELECT 1; END;
      CREATE TRIGGER "alert_delivery_attempt_transition_guard"

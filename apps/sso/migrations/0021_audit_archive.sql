@@ -643,10 +643,20 @@ CREATE TABLE "audit_archive_attempt" (
     )
   ),
   "r2_version" text CHECK (
-    "r2_version" IS NULL OR length("r2_version") BETWEEN 1 AND 256
+    "r2_version" IS NULL OR (
+      length("r2_version") BETWEEN 1 AND 256
+      AND instr("r2_version", char(0)) = 0
+      AND instr("r2_version", char(10)) = 0
+      AND instr("r2_version", char(13)) = 0
+    )
   ),
   "r2_etag" text CHECK (
-    "r2_etag" IS NULL OR length("r2_etag") BETWEEN 1 AND 256
+    "r2_etag" IS NULL OR (
+      length("r2_etag") BETWEEN 1 AND 256
+      AND instr("r2_etag", char(0)) = 0
+      AND instr("r2_etag", char(10)) = 0
+      AND instr("r2_etag", char(13)) = 0
+    )
   ),
   "r2_readback_sha256" text CHECK (
     "r2_readback_sha256" IS NULL OR (
@@ -697,6 +707,11 @@ CREATE TABLE "audit_archive_attempt" (
   ),
   UNIQUE ("batch_key", "dispatch_generation", "attempt_number"),
   CHECK ("completed_at" IS NULL OR "completed_at" >= "started_at"),
+  CHECK (
+    "next_attempt_at" IS NULL OR (
+      "completed_at" IS NOT NULL AND "next_attempt_at" >= "completed_at"
+    )
+  ),
   CHECK (
     ("r2_version" IS NULL AND "r2_etag" IS NULL
       AND "r2_readback_sha256" IS NULL AND "r2_readback_at" IS NULL)
@@ -765,6 +780,10 @@ CREATE INDEX "audit_archive_attempt_outcome_idx"
 CREATE TRIGGER "audit_archive_batch_item_insert_guard"
 BEFORE INSERT ON "audit_archive_batch_item"
 WHEN EXISTS (
+  SELECT 1 FROM "audit_archive_batch"
+   WHERE "batch_key" = NEW."batch_key"
+)
+OR EXISTS (
   SELECT 1 FROM "audit_archive_batch_item"
    WHERE ("batch_key" = NEW."batch_key" AND "ordinal" = NEW."ordinal")
       OR "source_sequence" = NEW."source_sequence"
@@ -790,7 +809,9 @@ OR NOT EXISTS (
      AND event."occurred_at" = NEW."occurred_at"
 )
 BEGIN
-  SELECT RAISE(ABORT, 'audit archive item does not match live source');
+  SELECT RAISE(
+    ABORT, 'audit archive item must precede parent and match live source'
+  );
 END;
 
 CREATE TRIGGER "audit_archive_batch_item_update_guard"

@@ -38,7 +38,9 @@ both source and `audit_event` identity when SQLite runs with
 
 A future repository must insert one bounded canonical record array through one
 `json_each(?)` item statement, then insert its parent batch in the same
-`D1Database.batch()`. The parent trigger requires:
+`D1Database.batch()`. Item insertion is permanently sealed as soon as that
+parent exists, including while it is pending and after it is archived. The
+parent trigger requires:
 
 - the exact current checkpoint revision and predecessor sequence;
 - a nonempty head prefix with ordinals `1..event_count`;
@@ -56,7 +58,9 @@ A due pending/retry claim increments the attempt number, installs a new
 five-minute-maximum lease and trigger-inserts its unique in-flight attempt.
 Canonical timestamps compare at millisecond precision; work completed 400 ms
 before expiry is still before expiry, while `lease_expired` is accepted exactly
-at expiry.
+at expiry. A retry due time cannot precede its terminal completion time. An
+equal millisecond is valid persisted evidence, but cannot be reclaimed at that
+same instant because every batch transition must advance `updated_at`.
 
 Only the matching in-flight attempt may terminalize. Retry is bounded to
 attempts one through four; attempt five becomes dead. Integrity/object

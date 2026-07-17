@@ -177,6 +177,68 @@ const itemInsertSql = `INSERT INTO audit_archive_batch_item
         length(CAST(entry.value AS blob))
    FROM json_each(?) AS entry`;
 
+const singleItemInsertSql = `INSERT INTO audit_archive_batch_item
+  (batch_key, ordinal, source_sequence, event_id, event_type,
+   actor_user_id, actor_ref, actor_ref_hash_version, subject_id,
+   client_id, session_id, outcome, ip_hash, user_agent_hash,
+   metadata_json, occurred_at, canonical_record_json, canonical_record_bytes)
+ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+function prepareSingleItemInsert(
+  batchKey: string,
+  ordinal: number,
+  record: AuditArchiveRecordV1,
+): D1PreparedStatement {
+  const canonicalRecord = JSON.stringify(record);
+  return env.PG72_ID_DB.prepare(singleItemInsertSql).bind(
+    batchKey,
+    ordinal,
+    record.sequence,
+    record.eventId,
+    record.eventType,
+    record.actorUserId,
+    record.actorRef,
+    record.actorRefHashVersion,
+    record.subjectId,
+    record.clientId,
+    record.sessionId,
+    record.outcome,
+    record.ipHash,
+    record.userAgentHash,
+    record.metadataJson,
+    record.occurredAt,
+    canonicalRecord,
+    new TextEncoder().encode(canonicalRecord).byteLength,
+  );
+}
+
+async function expectParentSealedAppendRejected(
+  batchKey: string,
+  ordinal: number,
+  record: AuditArchiveRecordV1,
+  expectedCount: number,
+): Promise<void> {
+  await expect(
+    prepareSingleItemInsert(batchKey, ordinal, record).run(),
+  ).rejects.toThrow(/audit archive item must precede parent/);
+  expect(
+    await env.PG72_ID_DB.prepare(
+      `SELECT count(*) AS count FROM audit_archive_batch_item
+        WHERE batch_key = ?`,
+    )
+      .bind(batchKey)
+      .first<number>("count"),
+  ).toBe(expectedCount);
+  expect(
+    await env.PG72_ID_DB.prepare(
+      `SELECT count(*) AS count FROM audit_archive_batch_item
+        WHERE event_id = ?`,
+    )
+      .bind(record.eventId)
+      .first<number>("count"),
+  ).toBe(0);
+}
+
 const parentInsertSql = `INSERT INTO audit_archive_batch
   (batch_key, batch_generation, checkpoint_revision,
    checkpoint_from_sequence, schema_version, contract, manifest_json,
@@ -280,6 +342,33 @@ async function claimBatch(
   return leaseId;
 }
 
+async function expectClaimRejected(
+  batchKey: string,
+  attempt: number,
+  updatedAt: string,
+  expiresAt: string,
+): Promise<void> {
+  const leaseId = reference();
+  await expect(
+    env.PG72_ID_DB.prepare(
+      `UPDATE audit_archive_batch
+          SET status = 'processing', attempts = ?, next_attempt_at = NULL,
+              lease_id = ?, lease_expires_at = ?, last_error_code = NULL,
+              updated_at = ?
+        WHERE batch_key = ?`,
+    )
+      .bind(attempt, leaseId, expiresAt, updatedAt, batchKey)
+      .run(),
+  ).rejects.toThrow(/invalid audit archive batch transition/);
+  expect(
+    await env.PG72_ID_DB.prepare(
+      "SELECT count(*) AS count FROM audit_archive_attempt WHERE id = ?",
+    )
+      .bind(leaseId)
+      .first<number>("count"),
+  ).toBe(0);
+}
+
 async function assertIntegrity(): Promise<void> {
   expect(
     (await env.PG72_ID_DB.prepare("PRAGMA foreign_key_check").all()).results,
@@ -341,6 +430,7 @@ describe("audit archive 0021 schema", () => {
       "2026-01-01T24:00:00.000Z",
     ];
     for (const [index, invalidTimestamp] of invalidTimestamps.entries()) {
+      const keyVersion = `v${index + 1}`;
       await expect(
         env.PG72_ID_DB.prepare(
           `INSERT INTO audit_archive_key_sentinel
@@ -348,9 +438,17 @@ describe("audit archive 0021 schema", () => {
              created_at)
            VALUES (?, 'pgid.audit_archive_kek_fingerprint.v1', ?, 1, ?)`,
         )
-          .bind(`invalid-${index}`, reference(100 + index), invalidTimestamp)
+          .bind(keyVersion, reference(100 + index), invalidTimestamp)
           .run(),
-      ).rejects.toThrow();
+      ).rejects.toThrow(/CHECK constraint failed: length\("created_at"\) = 24/);
+      expect(
+        await env.PG72_ID_DB.prepare(
+          `SELECT count(*) AS count FROM audit_archive_key_sentinel
+            WHERE key_version = ?`,
+        )
+          .bind(keyVersion)
+          .first<number>("count"),
+      ).toBe(0);
     }
     expect(
       await env.PG72_ID_DB.prepare(
@@ -483,6 +581,22 @@ describe("audit archive 0021 schema", () => {
         .bind(build.batchKey)
         .first<number>("count"),
     ).toBe(2);
+    const pendingAppend = await insertAuditEvent(4, {
+      occurredAt: at(5_000),
+    });
+    const pendingAppendRecord = (await outstandingRecords()).find(
+      ({ eventId }) => eventId === pendingAppend.eventId,
+    );
+    if (!pendingAppendRecord) throw new Error("missing pending append record");
+    await expectParentSealedAppendRejected(
+      build.batchKey,
+      3,
+      pendingAppendRecord,
+      2,
+    );
+    await env.PG72_ID_DB.prepare("DELETE FROM audit_event WHERE id = ?")
+      .bind(pendingAppend.eventId)
+      .run();
     await expect(
       env.PG72_ID_DB.prepare(
         `UPDATE audit_archive_batch_item SET ordinal = ordinal
@@ -547,6 +661,22 @@ describe("audit archive 0021 schema", () => {
         completedAt,
         lease,
       )
+      .run();
+    const archivedAppend = await insertAuditEvent(5, {
+      occurredAt: at(310_000),
+    });
+    const archivedAppendRecord = (await outstandingRecords()).find(
+      ({ eventId }) => eventId === archivedAppend.eventId,
+    );
+    if (!archivedAppendRecord) throw new Error("missing archived append record");
+    await expectParentSealedAppendRejected(
+      build.batchKey,
+      3,
+      archivedAppendRecord,
+      2,
+    );
+    await env.PG72_ID_DB.prepare("DELETE FROM audit_event WHERE id = ?")
+      .bind(archivedAppend.eventId)
       .run();
     await assertIntegrity();
   });
@@ -678,6 +808,175 @@ describe("audit archive 0021 schema", () => {
     await assertIntegrity();
   });
 
+  it("orders retry scheduling at exact terminal milliseconds", async () => {
+    await installSentinel(at(500));
+    await insertAuditEvent(600);
+    const build = await buildBatch(at(710_000));
+    await persistBatch(build);
+    const lease = await claimBatch(
+      build.batchKey,
+      1,
+      at(710_100),
+      at(1_010_100),
+    );
+    const completedAt = at(710_500);
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE audit_archive_attempt
+            SET outcome = 'retry', resulting_status = 'retry',
+                next_attempt_at = ?, error_code = 'r2_transient',
+                completed_at = ?
+          WHERE id = ?`,
+      )
+        .bind(at(710_499), completedAt, lease)
+        .run(),
+    ).rejects.toThrow(/CHECK constraint failed: next_attempt_at/);
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT outcome, next_attempt_at, completed_at
+           FROM audit_archive_attempt WHERE id = ?`,
+      )
+        .bind(lease)
+        .first(),
+    ).toEqual({ completed_at: null, next_attempt_at: null, outcome: "in_flight" });
+
+    await env.PG72_ID_DB.prepare(
+      `UPDATE audit_archive_attempt
+          SET outcome = 'retry', resulting_status = 'retry',
+              next_attempt_at = ?, error_code = 'r2_transient',
+              completed_at = ?
+        WHERE id = ?`,
+    )
+      .bind(completedAt, completedAt, lease)
+      .run();
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT status, attempts, next_attempt_at, updated_at
+           FROM audit_archive_batch WHERE batch_key = ?`,
+      )
+        .bind(build.batchKey)
+        .first(),
+    ).toEqual({
+      attempts: 1,
+      next_attempt_at: completedAt,
+      status: "retry",
+      updated_at: completedAt,
+    });
+    await expectClaimRejected(
+      build.batchKey,
+      2,
+      completedAt,
+      at(1_010_500),
+    );
+    const secondLease = await claimBatch(
+      build.batchKey,
+      2,
+      at(710_501),
+      at(1_010_501),
+    );
+    const archivedAt = at(799_000);
+    await env.PG72_ID_DB.prepare(
+      `UPDATE audit_archive_attempt
+          SET outcome = 'archived', resulting_status = 'archived',
+              r2_version = 'version-retry', r2_etag = 'etag-retry',
+              r2_readback_sha256 = ?, r2_readback_at = ?, completed_at = ?
+        WHERE id = ?`,
+    )
+      .bind(
+        build.manifest.objectSha256,
+        archivedAt,
+        archivedAt,
+        secondLease,
+      )
+      .run();
+    await assertIntegrity();
+  });
+
+  it("rejects delimiter-bearing R2 evidence on corrupt attempts", async () => {
+    await installSentinel(at(500));
+    await insertAuditEvent(700);
+    const build = await buildBatch(at(800_000));
+    await persistBatch(build);
+    const lease = await claimBatch(
+      build.batchKey,
+      1,
+      at(800_100),
+      at(1_100_100),
+    );
+    const completedAt = at(800_500);
+    const invalidEvidence = [
+      { constraint: "r2_version", etag: "etag", version: "version\u0000suffix" },
+      { constraint: "r2_version", etag: "etag", version: "version\nsuffix" },
+      { constraint: "r2_version", etag: "etag", version: "version\rsuffix" },
+      { constraint: "r2_etag", etag: "etag\u0000suffix", version: "version" },
+      { constraint: "r2_etag", etag: "etag\nsuffix", version: "version" },
+      { constraint: "r2_etag", etag: "etag\rsuffix", version: "version" },
+    ] as const;
+    for (const { constraint, etag, version } of invalidEvidence) {
+      await expect(
+        env.PG72_ID_DB.prepare(
+          `UPDATE audit_archive_attempt
+              SET outcome = 'corrupt', resulting_status = 'corrupt',
+                  r2_version = ?, r2_etag = ?, r2_readback_sha256 = ?,
+                  r2_readback_at = ?, error_code = 'r2_readback_mismatch',
+                  completed_at = ?
+            WHERE id = ?`,
+        )
+          .bind(
+            version,
+            etag,
+            build.manifest.objectSha256,
+            completedAt,
+            completedAt,
+            lease,
+          )
+          .run(),
+      ).rejects.toThrow(new RegExp(`CHECK constraint failed: ${constraint}`));
+      expect(
+        await env.PG72_ID_DB.prepare(
+          `SELECT outcome, r2_version, r2_etag, completed_at
+             FROM audit_archive_attempt WHERE id = ?`,
+        )
+          .bind(lease)
+          .first(),
+      ).toEqual({
+        completed_at: null,
+        outcome: "in_flight",
+        r2_etag: null,
+        r2_version: null,
+      });
+    }
+
+    await env.PG72_ID_DB.prepare(
+      `UPDATE audit_archive_attempt
+          SET outcome = 'archived', resulting_status = 'archived',
+              r2_version = 'version-valid', r2_etag = 'etag-valid',
+              r2_readback_sha256 = ?, r2_readback_at = ?,
+              error_code = NULL, completed_at = ?
+        WHERE id = ?`,
+    )
+      .bind(
+        build.manifest.objectSha256,
+        completedAt,
+        completedAt,
+        lease,
+      )
+      .run();
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT outcome, r2_version, r2_etag FROM audit_archive_attempt
+          WHERE id = ?`,
+      )
+        .bind(lease)
+        .first(),
+    ).toEqual({
+      outcome: "archived",
+      r2_etag: "etag-valid",
+      r2_version: "version-valid",
+    });
+    await assertIntegrity();
+  });
+
   it("uses exact millisecond lease boundaries through attempts one to five", async () => {
     await env.PG72_ID_DB.prepare("PRAGMA recursive_triggers = OFF").run();
     await installSentinel(at(500));
@@ -720,9 +1019,30 @@ describe("audit archive 0021 schema", () => {
           .first<string>("outcome"),
       ).toBe("in_flight");
 
+      if (attempt < 5) {
+        await expect(
+          env.PG72_ID_DB.prepare(
+            `UPDATE audit_archive_attempt
+                SET outcome = 'lease_expired', resulting_status = 'retry',
+                    next_attempt_at = ?, error_code = 'lease_expired',
+                    completed_at = ?
+              WHERE id = ?`,
+          )
+            .bind(at(attemptBase + 300_499), expiresAt, lease)
+            .run(),
+        ).rejects.toThrow(/CHECK constraint failed: next_attempt_at/);
+        expect(
+          await env.PG72_ID_DB.prepare(
+            "SELECT outcome FROM audit_archive_attempt WHERE id = ?",
+          )
+            .bind(lease)
+            .first<string>("outcome"),
+        ).toBe("in_flight");
+      }
+
       const nextAttemptAt = attempt === 5
         ? null
-        : at(attemptBase + 301_500);
+        : expiresAt;
       await env.PG72_ID_DB.prepare(
         `UPDATE audit_archive_attempt
             SET outcome = 'lease_expired',
@@ -744,6 +1064,14 @@ describe("audit archive 0021 schema", () => {
           .bind(build.batchKey)
           .first<string>("status"),
       ).toBe(attempt === 5 ? "dead" : "retry");
+      if (attempt < 5) {
+        await expectClaimRejected(
+          build.batchKey,
+          attempt + 1,
+          expiresAt,
+          at(attemptBase + 600_500),
+        );
+      }
     }
 
     const envelopeBytes = await env.PG72_ID_DB.prepare(

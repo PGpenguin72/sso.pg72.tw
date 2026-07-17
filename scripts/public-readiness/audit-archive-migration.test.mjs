@@ -204,4 +204,22 @@ test("archive lease predicates retain canonical millisecond boundaries", () => {
     source,
     /NEW\."lease_expires_at" <= strftime\([\s\S]*?'\+300 seconds'/,
   );
+  assert.match(
+    source,
+    /"completed_at" IS NOT NULL AND "next_attempt_at" >= "completed_at"/,
+  );
+  for (const field of ["r2_version", "r2_etag"]) {
+    for (const codePoint of [0, 10, 13]) {
+      assert.equal(
+        source.match(
+          new RegExp(`instr\\("${field}", char\\(${codePoint}\\)\\) = 0`, "g"),
+        )?.length,
+        2,
+      );
+    }
+  }
+  assert.match(
+    source,
+    /SELECT 1 FROM "audit_archive_batch"[\s\S]*?"batch_key" = NEW\."batch_key"/,
+  );
 });

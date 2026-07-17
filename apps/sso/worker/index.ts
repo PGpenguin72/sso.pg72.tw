@@ -20,6 +20,7 @@ import {
   fetchTarget,
 } from "./admin-users";
 import {
+  auditEventMutationCommitted,
   auditInsertForInvitationMutationStatement,
   consumeSecurityEventMessage,
   createAuditEvent,
@@ -1421,7 +1422,10 @@ app.post("/api/admin/invitations", async (c) => {
     }),
   ]);
 
-  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+  if (
+    results[0]?.meta.changes !== 1 ||
+    !auditEventMutationCommitted(results[1])
+  ) {
     return c.json({ error: "management_state_changed" }, 409);
   }
   await enqueueSecurityEvent(c.env, event, c.executionCtx);

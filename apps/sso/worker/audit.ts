@@ -42,6 +42,21 @@ export interface WaitUntilContext {
   waitUntil(promise: Promise<unknown>): void;
 }
 
+interface AuditEventMutationResult {
+  meta: { changes: number };
+}
+
+/**
+ * Migration 0021 captures every audit row in audit_archive_source. D1 reports
+ * both the audit_event mutation and its trigger/cascade in meta.changes, so a
+ * committed single-row insert or compensation delete has exactly two changes.
+ */
+export function auditEventMutationCommitted(
+  result: AuditEventMutationResult | undefined,
+): boolean {
+  return result?.meta.changes === 2;
+}
+
 export interface RecordAuditInput {
   eventType: string;
   outcome: AuditOutcome;

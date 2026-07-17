@@ -131,6 +131,25 @@ function createDependencyFixture() {
        ON "alert_state" (id);`,
   );
   writeFixture(
+    path.join(identityRoot, "migrations", "0021_audit_archive.sql"),
+    `CREATE TABLE "audit_archive_source" (id integer);
+     CREATE TABLE "audit_archive_key_sentinel" (id integer);
+     CREATE TABLE "audit_archive_checkpoint" (id integer);
+     CREATE TABLE "audit_archive_batch" (id integer);
+     CREATE TABLE "audit_archive_batch_item" (id integer);
+     CREATE TABLE "audit_archive_attempt" (id integer);
+     CREATE TRIGGER "audit_archive_source_insert_guard"
+       BEFORE INSERT ON "audit_archive_source" BEGIN SELECT 1; END;
+     CREATE TRIGGER "audit_event_archive_identity_insert_guard"
+       BEFORE INSERT ON "audit_archive_source" BEGIN SELECT 1; END;
+     CREATE TRIGGER "audit_archive_batch_item_insert_guard"
+       BEFORE INSERT ON "audit_archive_batch_item" BEGIN SELECT 1; END;
+     CREATE TRIGGER "audit_archive_attempt_apply_terminal"
+       AFTER UPDATE ON "audit_archive_attempt" BEGIN SELECT 1; END;
+     CREATE TRIGGER "audit_archive_batch_advance_checkpoint"
+       AFTER UPDATE ON "audit_archive_batch" BEGIN SELECT 1; END;`,
+  );
+  writeFixture(
     path.join(identityRoot, "worker", "audit-archive.ts"),
     `export const PUBLIC_READINESS_ARCHIVE_CONTRACT = "pgid-audit-archive-v1";
      export async function archiveAuditBatch() { return true; }
@@ -768,11 +787,33 @@ test("commented and remote R2 config lookalikes are source-invalid", () => {
   }
 });
 
+test("encrypted archive requires the exact 0021 ledger before runtime source", () => {
+  for (const mutation of ["missing", "truncated"]) {
+    const fixture = createDependencyFixture();
+    try {
+      const target = path.join(
+        fixture.identityRoot,
+        "migrations",
+        "0021_audit_archive.sql",
+      );
+      if (mutation === "missing") renameSync(target, `${target}.lookalike`);
+      else writeFileSync(target, 'CREATE TABLE "audit_archive_source" (id integer);');
+      assert.equal(
+        statusOf(dependencyStatus(fixture), "encrypted_r2_archive"),
+        "source_invalid",
+      );
+    } finally {
+      rmSync(fixture.repositoryRoot, { force: true, recursive: true });
+    }
+  }
+});
+
 test("SQL contract markers inside comments cannot satisfy source evidence", () => {
   for (const [name, filename] of [
     ["global_logout_0018", "0018_global_logout.sql"],
     ["recovery_0019", "0019_recovery_codes.sql"],
     ["observability_0020", "0020_alert_observability.sql"],
+    ["encrypted_r2_archive", "0021_audit_archive.sql"],
   ]) {
     const fixture = createDependencyFixture();
     try {

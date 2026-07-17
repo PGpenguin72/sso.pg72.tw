@@ -3,6 +3,7 @@ import { bodyLimit } from "hono/body-limit";
 
 import { requireAdminPermission } from "./admin-gate";
 import {
+  auditEventMutationCommitted,
   auditInsertForOpenOAuthReportStatement,
   createAuditEvent,
   enqueueSecurityEvent,
@@ -274,7 +275,10 @@ adminOauthReportRoutes.post("/:id/resolve", async (c) => {
           AND EXISTS (SELECT 1 FROM audit_event WHERE id = ?)`,
     ).bind(now, gate.actor.userId, id, event.eventId),
   ]);
-  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+  if (
+    !auditEventMutationCommitted(results[0]) ||
+    results[1]?.meta.changes !== 1
+  ) {
     return c.json({ error: "management_state_changed" }, 409);
   }
   await enqueueSecurityEvent(c.env, event, c.executionCtx);

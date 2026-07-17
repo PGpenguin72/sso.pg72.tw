@@ -8,6 +8,7 @@ import { isoBase64URL } from "@simplewebauthn/server/helpers";
 import { Hono, type Context } from "hono";
 
 import {
+  auditEventMutationCommitted,
   createAuditEvent,
   enqueueSecurityEvent,
   recordAudit,
@@ -586,7 +587,7 @@ recoveryRoutes.post("/api/recovery/start", async (c) => {
     ),
   ]);
   const started =
-    results[1]?.meta.changes === 1 &&
+    auditEventMutationCommitted(results[1]) &&
     (results[2]?.meta.changes ?? 0) >= 1 &&
     results[3]?.meta.changes === 1;
   if (!started) {
@@ -925,7 +926,7 @@ recoveryRoutes.post("/api/recovery/passkey/verify", async (c) => {
   const codeEnd = codeStart + RECOVERY_CODE_COUNT;
   const completed =
     results[0]?.meta.changes === 1 &&
-    results[1]?.meta.changes === 1 &&
+    auditEventMutationCommitted(results[1]) &&
     (results[2]?.meta.changes ?? 0) >= 1 &&
     results[3]?.meta.changes === 1 &&
     results.slice(codeStart, codeEnd).every((result) => result.meta.changes === 1);

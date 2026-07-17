@@ -211,18 +211,21 @@ at or after expiry, only `lease_expired` may consume the claim.
 
 ## Audit cursor decision
 
-`0020` does not add an `audit_event` sequence or backfill. Existing audit IDs
-are UUIDs, and guarded mutations may insert then delete an audit row in the same
-D1 batch when a later condition fails. Creating an archive cursor here would
-either leave phantom sequence state or prematurely define retention semantics.
+`0020` itself does not add an `audit_event` sequence or backfill. The additive
+local `0021_audit_archive.sql` slice now owns that separate ledger while
+preserving compensation deletion before an event is snapshotted.
 
 Instead, `0020` adds
 `audit_event_type_subject_time_bounded_idx(event_type, subject_id,
 occurred_at DESC, id)` for deterministic bounded per-subject scans. The existing
 type/time index remains available. Additional covering indexes close the exact
 global/type/actor audit, OAuth reporter, logout delivery, and logout-attempt
-cohort paths used by the future evaluator. The separate encrypted archive slice
-owns its monotonic source ledger and backfill in future migration `0021`.
+cohort paths used by the future evaluator. Migration `0021` owns the monotonic
+source ledger, deterministic backfill, immutable batch snapshots and terminal
+checkpoint transaction described in
+[`audit-archive.md`](./audit-archive.md). It is schema-only: no R2 writer,
+Queue/DLQ, Cron, restore or external backup exists, so encrypted archive remains
+`dependency_missing`.
 
 ## Local verification
 

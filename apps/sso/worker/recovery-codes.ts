@@ -1,6 +1,7 @@
 import { Hono, type Context } from "hono";
 
 import {
+  auditEventMutationCommitted,
   createAuditEvent,
   enqueueSecurityEvent,
   type SecurityEvent,
@@ -453,7 +454,7 @@ recoveryCodeManagementRoutes.post("/api/account/recovery-codes/rotate", async (c
 
   const results = await c.env.PG72_ID_DB.batch(statements);
   const complete =
-    results[0]?.meta.changes === 1 &&
+    auditEventMutationCommitted(results[0]) &&
     results[2]?.meta.changes === 1 &&
     results.slice(3).every((result) => result.meta.changes === 1);
   if (!complete) return c.json({ error: "management_state_changed" }, 409);
@@ -523,7 +524,10 @@ recoveryCodeManagementRoutes.delete("/api/account/recovery-codes", async (c) => 
       event.eventId,
     ),
   ]);
-  if (results[0]?.meta.changes !== 1 || results[1]?.results.length !== 1) {
+  if (
+    !auditEventMutationCommitted(results[0]) ||
+    results[1]?.results.length !== 1
+  ) {
     return c.json({ error: "management_state_changed" }, 409);
   }
   await enqueueSecurityEvent(c.env, event, c.executionCtx);

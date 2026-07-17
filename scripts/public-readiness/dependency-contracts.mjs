@@ -205,6 +205,23 @@ const SQL_CONTRACTS = Object.freeze({
   },
 });
 
+const ARCHIVE_SCHEMA_CONTRACT = Object.freeze({
+  filename: path.join("migrations", "0021_audit_archive.sql"),
+  markers: [
+    /create table\s+"audit_archive_source"/i,
+    /create table\s+"audit_archive_key_sentinel"/i,
+    /create table\s+"audit_archive_checkpoint"/i,
+    /create table\s+"audit_archive_batch"/i,
+    /create table\s+"audit_archive_batch_item"/i,
+    /create table\s+"audit_archive_attempt"/i,
+    /create trigger\s+"audit_archive_source_insert_guard"/i,
+    /create trigger\s+"audit_event_archive_identity_insert_guard"/i,
+    /create trigger\s+"audit_archive_batch_item_insert_guard"/i,
+    /create trigger\s+"audit_archive_attempt_apply_terminal"/i,
+    /create trigger\s+"audit_archive_batch_advance_checkpoint"/i,
+  ],
+});
+
 function fileState(filename) {
   if (!existsSync(filename)) return { state: "missing" };
   try {
@@ -988,9 +1005,16 @@ function parseJsonc(filename) {
 }
 
 function archiveContractState(identityRoot) {
+  const schemaState = sqlContractState(identityRoot, ARCHIVE_SCHEMA_CONTRACT);
   const moduleFilename = path.join(identityRoot, "worker", "audit-archive.ts");
   const configFilename = path.join(identityRoot, "wrangler.jsonc");
   const source = allFilesPresent([moduleFilename, configFilename]);
+  if (schemaState === "source_invalid") return "source_invalid";
+  if (schemaState === "dependency_missing") {
+    return source.state === "dependency_missing"
+      ? "dependency_missing"
+      : "source_invalid";
+  }
   if (source.state !== "present") return source.state;
   const module = moduleExports(moduleFilename);
   const config = parseJsonc(configFilename);

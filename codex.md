@@ -7,7 +7,7 @@
 
 ## 0. Phase 0 實作狀態
 
-截至 2026-07-17，repository source 包含 SSO Worker、React 帳號中心、D1 migrations `0001`–`0019`、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理、ID-token central `sid` contract、durable global logout ledger/outbox/Queue delivery、Mail Path A introspection prerequisite、Passkey client-mutation step-up、Telegram verified-email enrollment boundary、全域 provider-identity 唯一 ownership、Turnstile-backed public-registration intent、版本化法律同意紀錄、公開新帳號 restricted access 與 abuse-response runbook，以及預設關閉、hash-only 的 recovery-code/Passkey replacement flow 與使用 `oauth4webapi` 的獨立 test RP。每個 release candidate 都必須重跑本 repository 的 typecheck、workerd suite、production build 與 test RP protocol gate；本地通過不得寫成遠端已部署。
+截至 2026-07-17，repository source 包含 SSO Worker、React 帳號中心、D1 migrations `0001`–`0020`、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理、ID-token central `sid` contract、durable global logout ledger/outbox/Queue delivery、Mail Path A introspection prerequisite、Passkey client-mutation step-up、Telegram verified-email enrollment boundary、全域 provider-identity 唯一 ownership、Turnstile-backed public-registration intent、版本化法律同意紀錄、公開新帳號 restricted access 與 abuse-response runbook，以及預設關閉、hash-only 的 recovery-code/Passkey replacement flow 與使用 `oauth4webapi` 的獨立 test RP。每個 release candidate 都必須重跑本 repository 的 typecheck、workerd suite、production build 與 test RP protocol gate；本地通過不得寫成遠端已部署。
 
 `0013_confidential_client_secret_post.sql` 將既有 confidential client metadata 正規化為 `client_secret_post`；它不旋轉 secret、不改 grant/token。`0014_passkey_step_up.sql` 新增 session step-up timestamp 與短效 challenge table。兩者都不代表 production 已套用；現有 deployment record 仍只確認 production D1 至 `0012`，必須由 owner 在維護窗口依序確認與執行。
 
@@ -20,6 +20,8 @@
 `0018_global_logout.sql` 新增 client back-channel URI、實際 `(sid, client_id)` visit ledger、durable logout delivery/attempt evidence 與 access-token visit trigger；舊而未被 runtime 使用的 delivery table 會保留為 `logout_delivery_legacy_0018`。任何含 global-logout Worker 的環境都必須先套用 `0018`，並 provision 專用 logout Queue/DLQ。Production 尚未套用 `0018`、部署此 Worker、provision 專用 Queue，或完成任何 production RP receiver 驗收。
 
 `0019_recovery_codes.sql` 新增 recovery code set、一次性 code hash、獨立短效 recovery session 與 Passkey registration challenge；既有使用者不會自動取得 recovery code。Migration 不會自行啟用功能，runtime 仍由 `RECOVERY_MODE` 控制。Production deployment record 仍只確認至 `0012`，尚未套用 `0019`、綁定 recovery limiter、啟用 recovery、完成獨立 review 或執行 lost-device/rollback drill。
+
+`0020_alert_observability.sql` 只新增 redacted alert state、incident、immutable Email delivery snapshot/attempt 與 runtime-status schema，並加入 nullable persistent audit actor/OAuth reporter HMAC reference、immutable alert-key continuity sentinel，以及 audit/OAuth/logout 的 bounded evaluator indexes。它不執行 actor/reporter backfill、建立 sentinel row，也沒有 evaluator、Queue dispatcher、Email Service adapter、admin API/UI 或同輪 execution proof；actor/reporter coverage 不完整或 sentinel missing/mismatch 時必須保持 unknown/blocked，continuity 因此只能標記 `source_present_unverified`，不能標記 `verified`。Migration 本身不啟用告警或外部傳送；schema-only 邊界見 [`docs/runbooks/alert-observability.md`](./docs/runbooks/alert-observability.md)。Encrypted R2 archive 仍由未實作的獨立 `0021` migration/contract 負責。
 
 ### 0.1 Provider Identity Migration Preflight
 
@@ -356,7 +358,8 @@ access:                  standard <-> restricted
 - [ ] 負載測試、備份還原演練、key rotation 與 Queue retry/DLQ 演練。
 - [x] Source-local fail-closed continuity/load tooling：固定 literal-loopback target、clean Git commit attribution、fresh D1 migration/export/restore、完整 ordered migration ledger、synthetic Passkey/session/consent/JWK overlap-retirement、固定六 scenario／每項 16 request 的 bounded profile、mode-`0600` redacted schema-v2 report 與 cleanup regression；命令與報告格式見 [`docs/runbooks/continuity.md`](./docs/runbooks/continuity.md) 與 [`docs/runbooks/load-failure-drills.md`](./docs/runbooks/load-failure-drills.md)。這只代表工具已進 source，不代表 dependency 或演練已通過。
 - [x] Recovery `0019` 與 release automation 已整合進 local candidate；兩個 local command 會在同一 process 內分別要求 exact recovery 4-suite/20-test proof 與 exact release 9-file/89-test proof，才可把其 dependency 從 `source_present_unverified` 升為 `verified`。這只記錄 candidate source 與可重跑 proof，尚不代表 final independent integration review、final Worker artifact identity 或 Preview gate 已完成。
-- [ ] 整合並獨立 review observability `0020` 與 encrypted R2 archive；兩個 local report 對任何非 `verified` dependency 都必須維持 blocked + nonzero，全部五項到位後才可記錄 synthetic local pass。
+- [x] Observability `0020` 的 schema-only slice 已加入 local source，包含 D1 constraints、migration ledger 與負面測試；尚無 evaluator/delivery/provider/admin execution proof，所以 dependency 必須維持 `source_present_unverified`。
+- [ ] 完成並獨立 review observability evaluator/delivery proof 與 encrypted R2 archive `0021`；兩個 local report 對任何非 `verified` dependency 都必須維持 blocked + nonzero，全部五項到位後才可記錄 synthetic local pass。
 - [ ] 在隔離 Preview 另行執行核准 budget 的 D1 restore、signing-key rotation、recovery、Queue retry/DLQ、R2 archive/restore、外部 alert delivery、failure rollback 與 RP smoke；local synthetic report 不可勾除此項。
 - [x] Local source 的 persistent restricted-account state、request guards、D1 race guards、admin controls 與 workerd regression。
 - [ ] 套用 `0017`、部署 restricted-account Worker 至隔離 Preview，完成獨立 review、race/rollback/ordinary-OIDC smoke，再納入 production rollout；不得因 local gate 通過而宣稱已部署。
@@ -733,6 +736,8 @@ Better Auth 曾出現 OAuth/OIDC 與 account linking 相關安全公告。因此
 告警不得直接包含完整 Email、IP、token、authorization code 或 credential ID。
 
 本清單是目標，不代表 repository 已配置外部 dashboard、paging 或自動封鎖。Public-registration 的持久 evidence 與人工初始門檻見 [`docs/runbooks/public-registration-abuse.md`](./docs/runbooks/public-registration-abuse.md)；global logout 的 D1 evidence、Preview acceptance、manual replay 與 rollback 見 [`docs/runbooks/global-logout.md`](./docs/runbooks/global-logout.md)；recovery migration、lost-device acceptance 與 rollback 見 [`docs/runbooks/account-recovery.md`](./docs/runbooks/account-recovery.md)。在隔離 Preview 驗證門檻、指派 operator 並測試 alert delivery 前，不得把任一 runbook 寫成 operational monitoring 已完成。
+
+Local migration `0020` 目前只提供 fail-closed schema 與查詢索引，狀態明確是 source-present-unverified；詳細邊界見 [`docs/runbooks/alert-observability.md`](./docs/runbooks/alert-observability.md)。它不會自行排程 evaluator、建立 incident、送 Queue、呼叫 Email Service 或提供 operator endpoint。
 
 ## 18. Service Integration Patterns
 

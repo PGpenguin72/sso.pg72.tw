@@ -70,6 +70,54 @@ test("renders a private synthetic fixture through every integrated migration", a
     assert.equal(
       sqlite(
         database,
+        `SELECT COUNT(*) FROM sqlite_schema
+          WHERE type = 'table'
+            AND name IN (
+              'alert_state', 'security_alert', 'alert_outbox',
+              'alert_delivery_attempt', 'alert_runtime_status'
+            );`,
+      ),
+      "5",
+    );
+    assert.equal(
+      sqlite(
+        database,
+        `SELECT COUNT(*) FROM sqlite_schema
+          WHERE type = 'index' AND name = 'alert_outbox_due_idx';`,
+      ),
+      "1",
+    );
+    assert.equal(
+      sqlite(
+        database,
+        `SELECT COUNT(*) FROM sqlite_schema
+          WHERE name = 'audit_event_sequence';`,
+      ),
+      "0",
+    );
+    sqlite(
+      database,
+      `INSERT INTO audit_event (id, event_type, outcome, occurred_at)
+       VALUES (
+         '99999999-0000-4000-8000-000000000001',
+         'observability.migration_test',
+         'success',
+         '2026-07-17T10:00:00.000Z'
+       );
+       DELETE FROM audit_event
+        WHERE id = '99999999-0000-4000-8000-000000000001';`,
+    );
+    assert.equal(
+      sqlite(
+        database,
+        `SELECT COUNT(*) FROM audit_event
+          WHERE id = '99999999-0000-4000-8000-000000000001';`,
+      ),
+      "0",
+    );
+    assert.equal(
+      sqlite(
+        database,
         `SELECT
           (SELECT COUNT(*) FROM user) || '|' ||
           (SELECT COUNT(*) FROM session) || '|' ||
@@ -138,11 +186,11 @@ test("derives the complete migration ledger from the integrated source sequence"
   );
 });
 
-test("integrated migration proof requires exact 0019 count and head", () => {
+test("integrated migration proof requires exact 0020 count and head", () => {
   assert.doesNotThrow(() =>
     assertIntegratedMigrationLedger({
-      count: 19,
-      head: "0019_recovery_codes.sql",
+      count: 20,
+      head: "0020_alert_observability.sql",
     }),
   );
   assert.throws(() =>
@@ -153,8 +201,8 @@ test("integrated migration proof requires exact 0019 count and head", () => {
   );
   assert.throws(() =>
     assertIntegratedMigrationLedger({
-      count: 19,
-      head: "0019_lookalike.sql",
+      count: 20,
+      head: "0020_lookalike.sql",
     }),
   );
 });

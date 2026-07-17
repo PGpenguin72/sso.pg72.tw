@@ -31,6 +31,7 @@ The canonical architecture and migration decisions are in [`codex.md`](./codex.m
 | [`docs/runbooks/public-registration-abuse.md`](./docs/runbooks/public-registration-abuse.md) | Local public-registration abuse thresholds, triage, account containment, false-positive handling, and rollback. |
 | [`docs/runbooks/global-logout.md`](./docs/runbooks/global-logout.md) | Global-logout migration checks, Preview acceptance, delivery triage/replay, failure drills, and rollback. |
 | [`docs/runbooks/account-recovery.md`](./docs/runbooks/account-recovery.md) | Recovery migration checks, isolated Preview acceptance, incident triage, enablement, and rollback. |
+| [`docs/runbooks/release-security.md`](./docs/runbooks/release-security.md) | Reproducible source, advisory, dry-run artifact, inventory, and safe DAST release gates. |
 | [`wiki/`](./wiki/SUMMARY.md) | GitBook-compatible tutorial site (content source for `wiki.sso.pg72.tw`): user guides and developer walkthroughs. |
 
 ## Registration Policy
@@ -50,7 +51,18 @@ Current safeguards in public mode:
 - Suspended accounts and deleted (missing) users are blocked at session creation, so public mode does not bypass suspension. A deleted user who re-registers receives a brand-new `sub`.
 - Registration denials never reveal whether an account exists.
 
-Known-incomplete gates that block opening registration (tracked in `codex.md` §9.2): production deployment/configuration and independent review of the local Turnstile/legal-acceptance and restricted-account slices, owner approval of the live policy version identifiers, Preview validation of the documented abuse thresholds plus an assigned operator and external alert delivery, OIDC conformance/security testing, DAST, SAST/secret/IaC scan gates, load testing, backup-restore and key-rotation drills, and full back-channel logout rollout. The local global-logout implementation and both runbooks do not claim operational monitoring or production delivery exists.
+Known-incomplete gates that block opening registration (tracked in `codex.md`
+§9.2) include production deployment/configuration and independent review of the
+local Turnstile/legal-acceptance and restricted-account slices, owner approval
+of the live policy version identifiers, Preview validation of the documented
+abuse thresholds plus an assigned operator and external alert delivery, OIDC
+conformance/security testing, authenticated isolated-Preview DAST, load testing,
+backup-restore and key-rotation drills, full back-channel logout rollout, and
+the default-disabled recovery path's Preview/rollback drills. Automated SAST,
+secret, dependency, workflow/Wrangler config, artifact, and localhost
+public-surface DAST gates now exist, but they do not prove those operational
+gates. The local implementations and runbooks do not claim production delivery
+or operational monitoring exists.
 
 ## Workspace
 
@@ -142,7 +154,9 @@ The local test RP is a public client. It has no client secret; its transaction s
 
 ```bash
 pnpm check
-pnpm audit --audit-level high
+pnpm security:tools:install
+pnpm security:check
+pnpm dast:local
 ```
 
 `pnpm check` is the canonical repository gate. It runs the clean-build-output
@@ -150,13 +164,73 @@ regression and workspace package checks, covering type checks, workerd and
 relying-party protocol tests, Wiki route/link/header validation, and production
 and static builds.
 
-The audit covers runtime, build, and development dependencies so tooling
-advisories cannot bypass the High or Critical release gate.
+`pnpm security:check` runs type-aware Promise analysis over both Workers,
+required checksum-pinned Gitleaks history scanning, a redacted bounded scanner
+over tracked/untracked files and ignored sensitive filenames, captured
+Secretlint, recursive workflow/package-script allowlists with exact
+workflow/job/step environment scopes, exact source/generated Wrangler binding
+targets, the dependency advisory policy, a production
+`wrangler deploy --dry-run --outdir` artifact gate, a path-free
+dependency/license inventory, and negative tests for the automation itself.
+JavaScript and TypeScript assignments are parsed with the pinned TypeScript
+compiler AST and a bounded static evaluator for literals, static templates,
+parentheses, and string concatenation. The line-oriented dotenv/config parser
+separately supports `export`, `const`, `let`, and `var`; bounded UTF-8,
+UTF-16LE/BE, and NUL-interleaved representations share the same token,
+private-key, assignment, and high-entropy families. Source fixtures and
+generated enum/metadata exceptions require an exact raw path, normalized key,
+and complete value. Better Auth's generated fallback additionally requires all
+three exact literal digests, literal forms, and AST contexts; marker substrings
+do not waive a finding. Immediately after checkout, both workflows run a
+dependency-free Node standard-library identity check before authorization,
+package-manager setup/install, or any other repository script. It pins the
+exact workflow file set/raw LF bytes, all four manifest/script-map identities,
+the complete `pnpm-workspace.yaml` lifecycle/build policy, the frozen lockfile,
+and the exact `patches/` file set and raw digests. It also requires both pnpm
+workspace hook filenames, project `.npmrc`, `binding.gyp`, and pre-existing
+`node_modules` paths to be absent at every code-owned package root. The later
+gate rechecks those workflow bytes before YAML/structural validation and
+separately pins both every complete workspace `scripts` object and the
+recursively reachable graph. It models implicit `pre*`/`post*` hooks plus
+`preinstall`/`install`/`postinstall`/`prepare` across root and filtered
+workspaces; policy cannot extend any contract. The upload step is fixed to
+`.artifacts/release` with error-on-missing, hidden-file
+exclusion, and seven-day retention. Workflow environment policy can select only
+code-owned `DAST_*`, `CI`, and `NO_COLOR` values; `CLOUDFLARE_*`, legacy `CF_*`,
+and `WRANGLER_*` remain hard-denied even if policy and workflow are changed
+together. The deterministic production Wrangler `index.js` is also pinned by a
+code-owned whole-file SHA-256 before the structural artifact and AST secret
+scanners run. Runtime, dependency, bundler, or build-chain changes therefore
+require human review and two matching clean build/dry-run outputs before that
+digest is deliberately updated; the gate never learns a new digest from policy
+or its current output. Current matching evidence is local to the measured
+toolchain; Linux entry-digest equality remains unverified, not disproven.
+Diagnostics normalize
+safe relative paths and replace sensitive, secret-bearing, absolute/outside, or
+terminal-unsafe paths with a short SHA-256 identifier. The audit covers runtime,
+build, and development dependencies so tooling advisories cannot bypass the
+gate.
 
-The audit currently reports the accepted Moderate `GHSA-p2fr-6hmx-4528`. Its constrained exposure and temporary controls are documented in [`SECURITY.md`](./SECURITY.md). A High or Critical advisory fails the release gate.
+The audit currently reports the accepted Moderate `GHSA-p2fr-6hmx-4528`.
+[`security/accepted-advisories.json`](./security/accepted-advisories.json)
+records its exact package/version, rationale, controls, owner, expiry, and
+review command. The gate fails if the advisory changes, disappears while its
+waiver remains, expires, or is joined by any unrecorded finding. High and
+Critical advisories cannot be waived by this file.
+
+`pnpm dast:local` creates fresh temporary local D1 state, starts ephemeral PGID
+and test-RP Workers only at literal `127.0.0.1:5173`/`:5174`, and runs
+credential-free public/error probes without following redirects or permitting
+Host overrides. It terminates both process groups and deletes the synthetic
+state afterward.
+
+The protected manual Preview path and its limitations are documented in the
+[release-security runbook](./docs/runbooks/release-security.md); it has not been
+run by this source change.
 
 These commands verify local source only. They do not deploy, migrate remote D1,
-provision clients, or provide a production smoke-test record.
+provision clients, exercise authenticated Preview/production flows, or provide
+a production smoke-test record.
 
 ## Cloudflare Provisioning
 

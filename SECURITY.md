@@ -24,21 +24,100 @@ Changes to the deployed invite beta require:
 
 - strict TypeScript, workerd tests, production builds, dependency audit, and secret scan appropriate to the change;
 - no open Critical or High finding;
-- every Medium finding recorded with an owner, compensating control, and target date;
+- every accepted Moderate finding recorded with an owner, compensating control, and expiry;
 - affected Google, Passkey, OIDC negative/replay, revoke, and request-abort checks;
 - an explicit rollback path and post-release smoke checks.
 
 Passing this narrower gate permits an invite-beta release only. It does not authorize public registration or a full Production GO claim.
+
+## Automated Source Assurance
+
+Run the tracked local gates from a frozen install:
+
+```bash
+pnpm check
+pnpm security:tools:install
+pnpm security:check
+pnpm dast:local
+```
+
+`pnpm security:check` combines type-aware Worker Promise analysis, required
+checksum-pinned Gitleaks full-history scanning, an explicit bounded/redacted
+tracked/untracked/ignored-sensitive-path scan plus captured Secretlint,
+actionlint and recursive workflow/package-script allowlists with exact scoped
+environment key/value and expression contracts, exact source and generated
+Wrangler binding/resource contracts, dependency-advisory
+reconciliation, a production Worker dry-run artifact scan, and a
+dependency/license inventory. The artifact gate uses the same redacted secret
+families for bounded UTF-8, UTF-16LE/BE, and NUL-interleaved strings and rejects
+source maps, private machine paths, unexpected files, binding/config drift, and
+size regressions. CI keeps only the redacted inventories for seven days.
+JavaScript/TypeScript keys and values come from the pinned compiler AST and a
+bounded static evaluator; the separate line/dotenv parser handles export and
+declaration forms. Source fixture and reviewed generated enum/metadata
+allowances are exact path/key/value contracts. The generated Better Auth
+fallback must retain its three exact digests, literal forms, occurrence counts,
+and AST contexts. Both workflows run a dependency-free Node standard-library
+identity check immediately after checkout, before Preview authorization,
+package installation, or any other repository script. It pins exact workflow
+raw bytes/file set, all manifest and complete script-map identities, and the
+pnpm workspace lifecycle/build policy. It also pins the frozen lockfile and
+exact `patches/` file set/digests, and rejects workspace pnpm hooks or project
+`.npmrc` files before pnpm starts. Every code-owned package root must also lack
+`binding.gyp` and pre-existing `node_modules`, preventing implicit native builds
+and dependency-tree lifecycle hooks. The later validator independently pins
+every complete workspace `scripts` object and the reachable graph while
+expanding implicit `pre*`/`post*` and
+`preinstall`/`install`/`postinstall`/`prepare` execution. Policy cannot extend
+these contracts. The release upload is exactly `.artifacts/release` with fixed
+missing-file, hidden-file, and retention behavior. Workflow environment
+keys/values are restricted by a code-owned allowlist; all
+`CLOUDFLARE_*`, legacy `CF_*`, and `WRANGLER_*` keys are independently denied.
+The production Wrangler `index.js` must match its code-owned whole-file SHA-256
+before file, secret-family, and AST checks run. A runtime, dependency, bundler,
+or build-chain change requires human review and two byte-identical clean
+build/dry-run results before deliberately updating that digest; no policy or
+generated artifact can update it automatically. Linux equality for the current
+entry digest has not yet been measured; it is neither claimed nor disproven.
+Unsafe diagnostic paths are normalized and represented only by a short SHA-256
+identifier.
+
+`pnpm dast:local` starts only ephemeral loopback Workers with synthetic values
+and fresh local D1 state. Its credential-free probes cover health/readiness,
+discovery, JWKS public-key shape, OIDC error surfaces, resource-indicator
+rejection, dynamic-registration denial, logout/admin unauthenticated behavior,
+security/cache headers, and a cross-Origin mutation denial. This baseline does
+not cover real login, consent, authenticated admin/gateway/logout behavior,
+abuse/load testing, or an independent review.
+
+The separate `Isolated Preview DAST` workflow is manual and targets only the
+exact origin committed to `security/dast-policy.json` and repeated in the
+protected `isolated-preview` environment. A job-level guard permits only owner
+`PGpenguin72` on `refs/heads/main`, including reruns, before any step starts.
+The approved origin is intentionally `null` until the owner commits the actual
+`pg72-id-preview.<account-subdomain>.workers.dev` origin, so the workflow
+currently fails before any DAST HTTP request. Production, custom domains,
+Pages, lookalikes, credentials, and URL paths are rejected. This workflow has
+not been run or treated as Preview evidence by this source change. See
+[`docs/runbooks/release-security.md`](./docs/runbooks/release-security.md).
 
 ## Full Production GO and Public Registration Gate
 
 Before enabling `REGISTRATION_MODE=public` or declaring full Production GO, complete and record:
 
 - independent security review and OIDC conformance/security testing;
-- DAST across auth, OIDC, admin, gateway, and logout endpoints;
-- automated SAST, dependency, secret, and IaC/config scanning;
-- independently review and deploy the locally implemented central visited-client ledger and replay-safe back-channel logout after applying migration `0018`; provision and exercise its dedicated Queue/DLQ, external retry/dead-delivery alerting, and production RP verification;
-- independently review migration `0019` and the local recovery path, then complete an isolated Preview lost-device, concurrency, rollback, session/token revocation, and RP logout-delivery drill before any owner-approved enablement;
+- authenticated DAST across auth, OIDC, admin, gateway, and logout endpoints in
+  an isolated Preview, in addition to the credential-free local baseline;
+- run and retain the automated SAST, dependency, secret, workflow/IaC/config,
+  and dry-run artifact gates for the exact release candidate;
+- independently review and deploy the locally implemented central visited-client
+  ledger and replay-safe back-channel logout after applying migration `0018`;
+  provision and exercise its dedicated Queue/DLQ, external retry/dead-delivery
+  alerting, and production RP verification;
+- independently review migration `0019` and the default-disabled recovery path,
+  then complete an isolated Preview lost-device, concurrency, rollback,
+  session/token revocation, and RP logout-delivery drill before any
+  owner-approved enablement;
 - signing-key rotation, D1 restore, and Queue retry/DLQ drills;
 - deploy, configure, independently review, and smoke-test the locally implemented Turnstile, versioned Terms/Privacy acceptance, and restricted-account paths after applying migrations `0016` and `0017`; the owner must approve the exact live policy versions, validate the initial abuse thresholds in Preview, assign an operator, and test external alert delivery;
 - deploy and independently review the locally implemented Passkey step-up for high-risk system-client provisioning and secret rotation; production must apply migration `0014`, and the session-age freshness check remains an additional condition rather than a substitute;
@@ -106,7 +185,7 @@ Vite 8 dependency and does not add Vite as a direct Wiki dependency.
 - Compatibility control: Vite 6.4.3 is outside VitePress 1.6.4's declared
   range. Every lockfile change must run a frozen install, the complete Wiki
   parser/build/link/asset/header gate, the Chrome desktop/mobile dark/light
-  crawl, and `pnpm audit --audit-level high`. An audit ignore is not allowed.
+  crawl, and `pnpm security:audit`. An audit ignore is not allowed.
 - Exit condition: remove this override when an audited stable VitePress release
   used by PGID officially supports a Vite version patched for this advisory;
   exact-pin that release and rerun the same compatibility and browser gates.
@@ -114,6 +193,13 @@ Vite 8 dependency and does not add Vite as a direct Wiki dependency.
 ## Accepted Phase 0 Finding
 
 `GHSA-p2fr-6hmx-4528` affects `@better-auth/oauth-provider@1.6.23`. The stable `1.6.x` line has no patched release; the current fix is pre-release only.
+
+The canonical machine-readable acceptance is
+[`security/accepted-advisories.json`](./security/accepted-advisories.json). CI
+requires the live `pnpm audit --json` result to match every recorded advisory
+field and installed version exactly; stale, changed, expired, or unrecorded
+findings fail. The maximum waiver duration is 180 days, and High/Critical
+findings are never accepted by this mechanism.
 
 - Severity: Moderate.
 - Owner: PGID maintainer.

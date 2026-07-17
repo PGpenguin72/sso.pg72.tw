@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 2,
+  "local": {
+    "defaultOrigin": "http://127.0.0.1:5173",
+    "rpOrigin": "http://127.0.0.1:5174",
+    "allowedPorts": [5173, 5174]
+  },
+  "preview": {
+    "environment": "isolated-preview",
+    "approvedActors": ["PGpenguin72"],
+    "defaultRef": "refs/heads/main",
+    "projectPrefix": "pg72-id-preview",
+    "hostnamePattern": "^pg72-id-preview\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.workers\\.dev$",
+    "approvedOrigin": null,
+    "optInValue": "owner-approved-isolated-preview"
+  },
+  "forbiddenOrigins": ["https://sso.pg72.tw"]
+}

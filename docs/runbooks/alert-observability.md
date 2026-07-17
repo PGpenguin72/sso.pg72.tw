@@ -1,13 +1,12 @@
 # Alert observability source boundary
 
 > Status: local schema, pure evaluator/parser, evaluator runtime-status/lease/
-> bootstrap repository, archive crypto, and `0021` archive-ledger source. The
-> repository is not imported by the Worker entry point or a scheduler. Full D1
-> audit/other metric-source aggregation, `alert_state`/`security_alert`/
-> `alert_outbox` CAS repositories, Cron, alert/archive Queue/DLQ, Email/admin
-> delivery, same-run proof, R2 archive runtime, bounded restore, external
-> backup, and deployment remain absent. Production records remain through
-> migration `0012`.
+> bootstrap and alert state/incident/outbox CAS repositories, archive crypto,
+> and `0021` archive-ledger source. Neither repository is imported by the
+> Worker entry point or a scheduler. Full D1 audit/other metric-source
+> aggregation, Cron, alert/archive Queue/DLQ, Email/admin delivery, same-run
+> proof, R2 archive runtime, bounded restore, external backup, and deployment
+> remain absent. Production records remain through migration `0012`.
 
 ## What `0020` provides
 
@@ -247,6 +246,19 @@ module, `AUDIT_ARCHIVE` R2 binding/writer, Queue/DLQ, Cron, bounded restore,
 retention exercise, or external backup. `encrypted_r2_archive` therefore
 remains `dependency_missing`.
 
+The local `alert-state-repository` accepts one already-evaluated pure lifecycle
+decision and an exact expected state revision/generation/watermark plus current
+incident identity. One ordered D1 batch applies the guarded state transition,
+incident insert/update, and optional immutable Email outbox snapshot. Every
+dependent write is gated by the preceding mutation, so a stale writer performs
+no partial incident or delivery work. The result is explicitly `applied`,
+`conflict`, or `duplicate`; response-loss retries preserve one incident and one
+canonical delivery/idempotency identity. Payload bytes use the exact schema key
+order and are hashed before insertion. The API accepts only global, Queue, or
+versioned HMAC dimensions and never accepts a raw actor, subject, or client ID.
+This repository does not read metric sources, schedule evaluation, claim or
+deliver outbox work, or provide operator mutation APIs.
+
 ## Local verification
 
 From a clean worktree with the frozen dependency set:
@@ -254,6 +266,7 @@ From a clean worktree with the frozen dependency set:
 ```bash
 pnpm --filter @pg72/id exec vitest run \
   test/observability-schema.spec.ts test/alert-runtime-repository.spec.ts \
+  test/alert-state-repository.spec.ts \
   test/audit-archive-schema.spec.ts
 pnpm --filter @pg72/id exec vitest run \
   test/alert-evaluator.spec.ts test/alert-rules.spec.ts \
@@ -281,20 +294,23 @@ separate source ledger is added. The archive schema/migration suites apply the
 ordered ledger through `0021`, verify its six-table transaction contract, and
 retain that compensation behavior. The pure evaluator suites verify the exact
 15-rule matrix, redacted dimensions, source projections, deterministic lifecycle
-and persistence shape without scheduling work. The runtime repository suite
-verifies only D1 lease/status/bootstrap persistence. The archive-crypto suite
-verifies the record/envelope and checkpoint binding without R2 or Queue I/O.
+and persistence shape without scheduling work. The state repository suite uses
+real Workerd D1 to verify stale-revision races, duplicate evaluations, trigger
+rollback, critical/warning/cooldown/manual-only transitions, contiguous
+reminders, canonical payload digests, and HMAC-only dimensions. The runtime
+repository suite verifies only D1 lease/status/bootstrap persistence. The
+archive-crypto suite verifies the record/envelope and checkpoint binding without
+R2 or Queue I/O.
 
 ## Remaining gates
 
-Schema, pure evaluator/parser, and the unwired evaluator runtime-status
-repository must still report observability as `source_present_unverified`,
-leaving continuity and drills blocked. A later reviewed slice must add full D1
-audit/other metric-source aggregation and
-`alert_state`/`security_alert`/`alert_outbox` CAS repositories, wire the runtime
-repository into evaluator Cron with same-run proof, and add dedicated alert
-Queue/DLQ, an Email Service adapter, admin acknowledge/resolve/replay operations, and
-redaction/race/failure tests. Archive crypto plus the `0021` ledger does not
+Schema, pure evaluator/parser, and the two unwired evaluator repositories must
+still report observability as `source_present_unverified`, leaving continuity
+and drills blocked. A later reviewed slice must add full D1 audit/other
+metric-source aggregation, wire both repositories into evaluator Cron with
+same-run proof, and add dedicated alert Queue/DLQ, an Email Service adapter,
+admin acknowledge/resolve/replay operations, and redaction/race/failure tests.
+Archive crypto plus the `0021` ledger does not
 satisfy the separate encrypted archive dependency; `encrypted_r2_archive`
 remains `dependency_missing` until the disabled repository, R2 writer/bounded
 restore, Queue/DLQ, Cron redrive, retention proof, and external-backup exercise

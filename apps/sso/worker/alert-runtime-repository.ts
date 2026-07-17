@@ -1,15 +1,17 @@
 import {
+  ALERT_RUNTIME_GENERATION_MAX,
+  ALERT_RUNTIME_REVISION_MAX,
   ALERT_RUNTIME_SOURCE_QUERY,
   parseAlertRuntimeSourceCompleteness,
   type AlertRuntimeThresholdInput,
 } from "./alert-rules";
 
 const EVALUATOR_COMPONENT = "evaluator";
-// Generation rollover remains an explicit operational migration dependency.
-const MAX_GENERATION = 1_000_000;
-const MAX_REVISION = 1_000_000_000;
+const MAX_GENERATION = ALERT_RUNTIME_GENERATION_MAX;
+const MAX_REVISION = ALERT_RUNTIME_REVISION_MAX;
 // An active lease must retain one revision for its terminal success or failure.
 const MAX_ACTIVE_LEASE_REVISION = MAX_REVISION - 1;
+const COUNTER_HEADROOM_WARNING = 1_000_000;
 const MAX_LEASE_SECONDS = 300;
 
 export type AlertEvaluatorFailureStatus =
@@ -64,6 +66,7 @@ export interface AlertEvaluatorSuccessResult {
 }
 
 export type AlertRuntimeRepositoryErrorCode =
+  | "counter_exhausted"
   | "invalid_input"
   | "source_invalid"
   | "source_unavailable"
@@ -89,6 +92,11 @@ interface LeaseProjection {
   revision: number;
   started_at: string;
   updated_at: string;
+}
+
+interface RuntimeCounterProjection {
+  generation: number;
+  revision: number;
 }
 
 interface RuntimeSourceProjection {
@@ -138,6 +146,7 @@ function isRepositoryErrorCode(
   value: unknown,
 ): value is AlertRuntimeRepositoryErrorCode {
   return (
+    value === "counter_exhausted" ||
     value === "invalid_input" ||
     value === "source_invalid" ||
     value === "source_unavailable" ||
@@ -222,6 +231,59 @@ function boundedInteger(
     fail("invalid_input");
   }
   return value;
+}
+
+function persistedRuntimeCounter(value: unknown): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    value > Number.MAX_SAFE_INTEGER
+  ) {
+    fail("write_failed");
+  }
+  return value;
+}
+
+function reportCounterHeadroom(generation: number, revision: number): void {
+  const generationRemaining = MAX_GENERATION - generation;
+  const revisionRemaining = MAX_REVISION - revision;
+  if (
+    generationRemaining > COUNTER_HEADROOM_WARNING &&
+    revisionRemaining > COUNTER_HEADROOM_WARNING
+  ) {
+    return;
+  }
+  const code = generationRemaining === 0 || revisionRemaining === 0
+    ? "counter_exhausted"
+    : "counter_headroom_low";
+  console.error(JSON.stringify({
+    code,
+    component: EVALUATOR_COMPONENT,
+    generationRemaining,
+    revisionRemaining,
+  }));
+}
+
+async function classifyLeaseMiss(database: D1Database): Promise<null> {
+  const row = await database.prepare(
+    `SELECT generation AS generation, revision AS revision
+       FROM alert_runtime_status
+      WHERE component = ?`,
+  )
+    .bind(EVALUATOR_COMPONENT)
+    .first<RuntimeCounterProjection>();
+  if (row === null) fail("write_failed");
+  const generation = persistedRuntimeCounter(row.generation);
+  const revision = persistedRuntimeCounter(row.revision);
+  if (
+    generation >= MAX_GENERATION ||
+    revision >= MAX_ACTIVE_LEASE_REVISION
+  ) {
+    reportCounterHeadroom(generation, revision);
+    fail("counter_exhausted");
+  }
+  return null;
 }
 
 function isFailureStatus(
@@ -373,7 +435,10 @@ export async function acquireAlertEvaluatorLease(
         startedAt.iso,
       )
       .first<LeaseProjection>();
-    return row === null ? null : parseLeaseProjection(row);
+    if (row === null) return await classifyLeaseMiss(database);
+    const lease = parseLeaseProjection(row);
+    reportCounterHeadroom(lease.generation, lease.revision);
+    return lease;
   } catch (error) {
     throw redactedRepositoryError(error, "write_failed");
   }
@@ -398,10 +463,13 @@ export async function renewAlertEvaluatorLease(
     if (
       renewedAt.time <= new Date(current.updatedAt).getTime() ||
       renewedAt.time >= new Date(current.leaseExpiresAt).getTime() ||
-      new Date(expiresAt).getTime() < new Date(current.leaseExpiresAt).getTime() ||
-      current.revision >= MAX_ACTIVE_LEASE_REVISION
+      new Date(expiresAt).getTime() < new Date(current.leaseExpiresAt).getTime()
     ) {
       fail("invalid_input");
+    }
+    if (current.revision >= MAX_ACTIVE_LEASE_REVISION) {
+      reportCounterHeadroom(current.generation, current.revision);
+      fail("counter_exhausted");
     }
     const row = await database.prepare(
       `UPDATE alert_runtime_status
@@ -431,7 +499,10 @@ export async function renewAlertEvaluatorLease(
         current.updatedAt,
       )
       .first<LeaseProjection>();
-    return row === null ? null : parseLeaseProjection(row);
+    if (row === null) return null;
+    const renewed = parseLeaseProjection(row);
+    reportCounterHeadroom(renewed.generation, renewed.revision);
+    return renewed;
   } catch (error) {
     throw redactedRepositoryError(error, "write_failed");
   }
@@ -519,6 +590,9 @@ export async function recordAlertEvaluatorSuccess(
     ) {
       fail("write_failed");
     }
+    if (updated === 1) {
+      reportCounterHeadroom(current.generation, nextRevision);
+    }
     return {
       bootstrapCreated: bootstrapCreated === 1,
       committed: updated === 1,
@@ -580,6 +654,9 @@ export async function recordAlertEvaluatorFailure(
       .run();
     if (result.meta.changes !== 0 && result.meta.changes !== 1) {
       fail("write_failed");
+    }
+    if (result.meta.changes === 1) {
+      reportCounterHeadroom(current.generation, current.revision + 1);
     }
     return result.meta.changes === 1;
   } catch (error) {

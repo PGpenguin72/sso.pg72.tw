@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   acquireAlertEvaluatorLease,
@@ -10,7 +10,11 @@ import {
   recordAlertEvaluatorSuccess,
   renewAlertEvaluatorLease,
 } from "../worker/alert-runtime-repository";
-import { ALERT_RUNTIME_SOURCE_QUERY } from "../worker/alert-rules";
+import {
+  ALERT_RUNTIME_GENERATION_MAX,
+  ALERT_RUNTIME_REVISION_MAX,
+  ALERT_RUNTIME_SOURCE_QUERY,
+} from "../worker/alert-rules";
 
 const BASE_TIME = new Date("2026-07-18T00:00:00.000Z").getTime();
 
@@ -73,10 +77,17 @@ function transformProjectionDatabase(
   });
 }
 
-function replaceRuntimeTableDatabase(tableName: string): D1Database {
+function replaceRuntimeTableDatabase(
+  tableName: string,
+  bootstrapTableName = "alert_evaluator_bootstrap",
+): D1Database {
   return proxyDatabase({
     prepare(target, query) {
-      return target.prepare(query.replaceAll("alert_runtime_status", tableName));
+      return target.prepare(
+        query
+          .replaceAll("alert_runtime_status", tableName)
+          .replaceAll("alert_evaluator_bootstrap", bootstrapTableName),
+      );
     },
   });
 }
@@ -483,6 +494,19 @@ describe.sequential("alert evaluator runtime repository", () => {
     if (!exactExpiryLease) throw new Error("expected exact-expiry takeover");
     expect(exactExpiryLease.generation).toBe(sameSecondLease.generation + 1);
     expect(
+      await renewAlertEvaluatorLease(env.PG72_ID_DB, sameSecondLease, {
+        leaseDurationSeconds: 1,
+        renewedAt: atMilliseconds(21_200),
+      }),
+    ).toBeNull();
+    expect(
+      await recordAlertEvaluatorFailure(env.PG72_ID_DB, sameSecondLease, {
+        completedAt: atMilliseconds(21_400),
+        errorCode: "evaluator_failed",
+        status: "degraded",
+      }),
+    ).toBe(false);
+    expect(
       await recordAlertEvaluatorFailure(env.PG72_ID_DB, exactExpiryLease, {
         completedAt: atMilliseconds(22_000),
         errorCode: "evaluator_failed",
@@ -542,27 +566,30 @@ describe.sequential("alert evaluator runtime repository", () => {
       )`,
     ).run();
 
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       await env.PG72_ID_DB.prepare(
         `INSERT INTO ${tableName}
           (component, status, generation, revision, updated_at)
-         VALUES ('evaluator', 'healthy', 1, 999999999, ?)`,
+         VALUES ('evaluator', 'healthy', 1, ?, ?)`,
       )
-        .bind(at(30))
+        .bind(Number.MAX_SAFE_INTEGER - 1, at(30))
         .run();
-      expect(
-        await acquireAlertEvaluatorLease(boundaryDatabase, {
+      await expect(
+        acquireAlertEvaluatorLease(boundaryDatabase, {
           leaseDurationSeconds: 120,
           startedAt: at(31),
         }),
-      ).toBeNull();
+      ).rejects.toEqual(
+        new AlertRuntimeRepositoryError("counter_exhausted"),
+      );
 
       const maxMinusOneLease = {
         component: "evaluator" as const,
         generation: 1,
         leaseExpiresAt: at(60),
         leaseId: crypto.randomUUID(),
-        revision: 999_999_999,
+        revision: Number.MAX_SAFE_INTEGER - 1,
         startedAt: at(31),
         updatedAt: at(31),
       };
@@ -584,16 +611,18 @@ describe.sequential("alert evaluator runtime repository", () => {
           leaseDurationSeconds: 120,
           renewedAt: at(32),
         }),
-      ).rejects.toEqual(new AlertRuntimeRepositoryError("invalid_input"));
+      ).rejects.toEqual(
+        new AlertRuntimeRepositoryError("counter_exhausted"),
+      );
 
       await env.PG72_ID_DB.prepare(
         `UPDATE ${tableName}
-            SET revision = 999999998, lease_id = NULL,
+            SET revision = ?, lease_id = NULL,
                 lease_expires_at = NULL, last_started_at = NULL,
                 updated_at = ?
           WHERE component = 'evaluator'`,
       )
-        .bind(at(30))
+        .bind(Number.MAX_SAFE_INTEGER - 2, at(30))
         .run();
       const lastLegalLease = await acquireAlertEvaluatorLease(
         boundaryDatabase,
@@ -601,7 +630,7 @@ describe.sequential("alert evaluator runtime repository", () => {
       );
       expect(lastLegalLease).toMatchObject({
         generation: 2,
-        revision: 999_999_999,
+        revision: Number.MAX_SAFE_INTEGER - 1,
       });
       if (!lastLegalLease) throw new Error("expected the last legal lease");
       expect(
@@ -620,16 +649,123 @@ describe.sequential("alert evaluator runtime repository", () => {
       ).toEqual({
         lease_expires_at: null,
         lease_id: null,
-        revision: 1_000_000_000,
+        revision: Number.MAX_SAFE_INTEGER,
       });
-      expect(
-        await acquireAlertEvaluatorLease(boundaryDatabase, {
+      await expect(
+        acquireAlertEvaluatorLease(boundaryDatabase, {
           leaseDurationSeconds: 120,
           startedAt: at(33),
         }),
-      ).toBeNull();
+      ).rejects.toEqual(
+        new AlertRuntimeRepositoryError("counter_exhausted"),
+      );
+      expect(errorLog).toHaveBeenCalledWith(expect.stringContaining(
+        '"code":"counter_exhausted"',
+      ));
     } finally {
+      errorLog.mockRestore();
       await env.PG72_ID_DB.prepare(`DROP TABLE ${tableName}`).run();
+    }
+  });
+
+  it("commits the last safe generation and revision with an exact bootstrap", async () => {
+    const runtimeTable = "alert_runtime_status_safe_boundary";
+    const bootstrapTable = "alert_evaluator_bootstrap_safe_boundary";
+    const boundaryDatabase = replaceRuntimeTableDatabase(
+      runtimeTable,
+      bootstrapTable,
+    );
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    await env.PG72_ID_DB.prepare(
+      `CREATE TABLE ${runtimeTable} (
+        component TEXT PRIMARY KEY NOT NULL,
+        status TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        revision INTEGER NOT NULL,
+        lease_id TEXT,
+        lease_expires_at TEXT,
+        last_started_at TEXT,
+        last_success_at TEXT,
+        last_error_at TEXT,
+        last_error_code TEXT,
+        watermark_at TEXT,
+        updated_at TEXT NOT NULL
+      )`,
+    ).run();
+    await env.PG72_ID_DB.prepare(
+      `CREATE TABLE ${bootstrapTable} (
+        component TEXT PRIMARY KEY NOT NULL,
+        first_success_at TEXT NOT NULL,
+        source_generation INTEGER NOT NULL,
+        source_revision INTEGER NOT NULL
+      )`,
+    ).run();
+
+    try {
+      await env.PG72_ID_DB.prepare(
+        `INSERT INTO ${runtimeTable}
+          (component, status, generation, revision, updated_at)
+         VALUES ('evaluator', 'healthy', ?, ?, ?)`,
+      )
+        .bind(
+          ALERT_RUNTIME_GENERATION_MAX - 1,
+          ALERT_RUNTIME_REVISION_MAX - 2,
+          at(40),
+        )
+        .run();
+      const lastLease = await acquireAlertEvaluatorLease(boundaryDatabase, {
+        leaseDurationSeconds: 120,
+        startedAt: at(41),
+      });
+      expect(lastLease).toMatchObject({
+        generation: Number.MAX_SAFE_INTEGER,
+        revision: Number.MAX_SAFE_INTEGER - 1,
+      });
+      if (!lastLease) throw new Error("expected the last safe evaluator lease");
+
+      expect(
+        await recordAlertEvaluatorSuccess(boundaryDatabase, lastLease, {
+          completedAt: at(42),
+          watermarkAt: at(41),
+        }),
+      ).toEqual({ bootstrapCreated: true, committed: true });
+      expect(
+        await env.PG72_ID_DB.prepare(
+          `SELECT component, first_success_at, source_generation, source_revision
+             FROM ${bootstrapTable}`,
+        ).first(),
+      ).toEqual({
+        component: "evaluator",
+        first_success_at: at(42),
+        source_generation: Number.MAX_SAFE_INTEGER,
+        source_revision: Number.MAX_SAFE_INTEGER,
+      });
+      expect(
+        await readAlertRuntimeThresholdInput(boundaryDatabase, at(43)),
+      ).toEqual({ evaluatorAgeSeconds: 1 });
+
+      await env.PG72_ID_DB.prepare(
+        `UPDATE ${runtimeTable}
+            SET revision = 1, lease_id = NULL, lease_expires_at = NULL,
+                updated_at = ?
+          WHERE component = 'evaluator'`,
+      )
+        .bind(at(43))
+        .run();
+      const exhausted = await acquireAlertEvaluatorLease(boundaryDatabase, {
+        leaseDurationSeconds: 120,
+        startedAt: at(44),
+      }).catch((error: unknown) => error);
+      expect(exhausted).toEqual(
+        new AlertRuntimeRepositoryError("counter_exhausted"),
+      );
+      expect(String(exhausted)).toBe(
+        "AlertRuntimeRepositoryError: Alert runtime repository failed (counter_exhausted)",
+      );
+    } finally {
+      errorLog.mockRestore();
+      await env.PG72_ID_DB.prepare(`DROP TABLE ${bootstrapTable}`).run();
+      await env.PG72_ID_DB.prepare(`DROP TABLE ${runtimeTable}`).run();
     }
   });
 });

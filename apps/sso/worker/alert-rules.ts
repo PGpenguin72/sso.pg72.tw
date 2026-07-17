@@ -35,6 +35,8 @@ export const ALERT_WINDOW_SECONDS: Readonly<Record<AlertWindowKey, number>> = {
 const MAX_EVIDENCE_VALUE = 1_000_000_000;
 const MAX_RATIO_FIELD = 1_000_000;
 const MAX_QUEUE_BACKLOG_BYTES = 1_000_000_000_000;
+export const ALERT_RUNTIME_GENERATION_MAX = Number.MAX_SAFE_INTEGER;
+export const ALERT_RUNTIME_REVISION_MAX = Number.MAX_SAFE_INTEGER;
 const HMAC_REFERENCE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const RULE_ID_SET = new Set<string>(ALERT_RULE_IDS);
 
@@ -258,12 +260,12 @@ export function parseAlertRuntimeSourceCompleteness(
   const sourceGeneration = runtimeSourceInteger(
     record.source_generation,
     1,
-    MAX_RATIO_FIELD,
+    ALERT_RUNTIME_GENERATION_MAX,
   );
   const sourceRevision = runtimeSourceInteger(
     record.source_revision,
     1,
-    MAX_EVIDENCE_VALUE,
+    ALERT_RUNTIME_REVISION_MAX,
   );
   if (
     record.bootstrap_component !== "evaluator" ||
@@ -278,12 +280,12 @@ export function parseAlertRuntimeSourceCompleteness(
   const runtimeGeneration = runtimeSourceInteger(
     record.runtime_generation,
     0,
-    MAX_RATIO_FIELD,
+    ALERT_RUNTIME_GENERATION_MAX,
   );
   const runtimeRevision = runtimeSourceInteger(
     record.runtime_revision,
     0,
-    MAX_EVIDENCE_VALUE,
+    ALERT_RUNTIME_REVISION_MAX,
   );
   const lastStartedAt = runtimeSourceTimestamp(
     record.runtime_last_started_at,

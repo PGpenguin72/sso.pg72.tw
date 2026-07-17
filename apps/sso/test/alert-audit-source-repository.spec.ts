@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import {
+  ALERT_AUDIT_TRACKED_DIMENSIONS_QUERY,
   ALERT_HASH_KEY_SENTINEL_DOMAIN,
   AlertAuditSourceRepositoryError,
   deriveAlertHashKeyFingerprintV1,
@@ -38,6 +39,7 @@ interface InsertAuditInput {
   actorRefHashVersion?: number | null;
   actorUserId?: string | null;
   eventType: string;
+  id?: string;
   metadata?: Record<string, string | number | boolean> | null;
   occurredAt: string;
   outcome: "denied" | "failure" | "success";
@@ -52,7 +54,7 @@ async function insertAudit(input: InsertAuditInput): Promise<void> {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
-      crypto.randomUUID(),
+      input.id ?? crypto.randomUUID(),
       input.eventType,
       input.actorUserId ?? null,
       input.subjectId ?? null,
@@ -470,6 +472,8 @@ describe.sequential("audit alert source repository", () => {
       actor.userId,
     );
     expect(actorReference.value).not.toBe(subjectReference.value);
+    const retiredSensitiveEventId = crypto.randomUUID();
+    const retiredDirectoryEventId = crypto.randomUUID();
 
     await insertAudit({
       actorUserId: actor.userId,
@@ -488,7 +492,9 @@ describe.sequential("audit alert source repository", () => {
     await insertAudit({
       actorRef: actorReference.value,
       actorRefHashVersion: 1,
+      actorUserId: actor.userId,
       eventType: "user.sessions_revoked",
+      id: retiredSensitiveEventId,
       occurredAt: at(asOf, -60_000),
       outcome: "success",
     });
@@ -510,10 +516,17 @@ describe.sequential("audit alert source repository", () => {
     await insertAudit({
       actorRef: actorReference.value,
       actorRefHashVersion: 1,
+      actorUserId: actor.userId,
       eventType: "admin.users_listed",
+      id: retiredDirectoryEventId,
       occurredAt: at(asOf, -60_000),
       outcome: "success",
     });
+    await env.PG72_ID_DB.prepare(
+      "UPDATE audit_event SET actor_user_id = NULL WHERE id IN (?, ?)",
+    )
+      .bind(retiredSensitiveEventId, retiredDirectoryEventId)
+      .run();
     await insertAudit({
       eventType: "passkey.step_up_failed",
       occurredAt: at(asOf, -60_000),
@@ -635,8 +648,23 @@ describe.sequential("audit alert source repository", () => {
       "subject_hmac",
       "tracked-restricted-dedupe",
     );
+    const completeReference = await deriveAlertReferenceV1(
+      TEST_HMAC_KEY,
+      "subject_hmac",
+      "complete-restricted-subject",
+    );
+    const completeDedupeReference = await deriveAlertReferenceV1(
+      TEST_HMAC_KEY,
+      "subject_hmac",
+      "complete-restricted-dedupe",
+    );
     const stateId = crypto.randomUUID();
-    await env.PG72_ID_DB.prepare(
+    const completeStateId = crypto.randomUUID();
+    const insertTrackedState = (
+      id: string,
+      dedupeKey: string,
+      subjectRef: string,
+    ) => env.PG72_ID_DB.prepare(
       `INSERT INTO alert_state
         (id, rule_id, environment, source_kind, dedupe_key, subject_ref,
          hash_version, provider, queue_name, reason, surface,
@@ -658,12 +686,34 @@ describe.sequential("audit alert source repository", () => {
                NULL, ?, ?, ?)`,
     )
       .bind(
-        stateId,
-        dedupeReference.value,
-        trackedReference.value,
+        id,
+        dedupeKey,
+        subjectRef,
         at(asOf, -86_400_000),
         at(asOf, -86_400_000),
         at(asOf, -86_400_000),
+      )
+      .run();
+    await insertTrackedState(
+      stateId,
+      dedupeReference.value,
+      trackedReference.value,
+    );
+    await insertTrackedState(
+      completeStateId,
+      completeDedupeReference.value,
+      completeReference.value,
+    );
+    await env.PG72_ID_DB.prepare(
+      `UPDATE alert_state
+          SET consecutive_breaches = 0, breach_severity = NULL,
+              revision = 1, last_evaluated_at = ?, updated_at = ?
+        WHERE id = ?`,
+    )
+      .bind(
+        at(asOf, -86_399_000),
+        at(asOf, -86_399_000),
+        completeStateId,
       )
       .run();
 
@@ -685,9 +735,164 @@ describe.sequential("audit alert source repository", () => {
         "60m": { count: 0, knownSurfaces: 0 },
       },
     });
-    await env.PG72_ID_DB.prepare("DELETE FROM alert_state WHERE id = ?")
-      .bind(stateId)
+    expect(JSON.stringify(result)).not.toContain(completeReference.value);
+    await env.PG72_ID_DB.prepare(
+      "DELETE FROM alert_state WHERE id IN (?, ?)",
+    )
+      .bind(stateId, completeStateId)
       .run();
+  });
+
+  it("bounds ongoing tracked-state reads before compound materialization", async () => {
+    expect(ALERT_AUDIT_TRACKED_DIMENSIONS_QUERY).not.toMatch(/row_number/i);
+    expect(
+      ALERT_AUDIT_TRACKED_DIMENSIONS_QUERY.match(/LIMIT 1001/g),
+    ).toHaveLength(5);
+    const plan = await env.PG72_ID_DB.prepare(
+      `EXPLAIN QUERY PLAN ${ALERT_AUDIT_TRACKED_DIMENSIONS_QUERY}`,
+    )
+      .bind("production")
+      .all<{ detail: string }>();
+    const planDetails = plan.results.map(({ detail }) => detail).join("\n");
+    expect(
+      planDetails.match(/USING INDEX alert_state_tracked_evaluation_idx/g),
+    ).toHaveLength(5);
+    expect(planDetails).not.toMatch(/\bSCAN alert_state\b/);
+
+    const asOf = "2030-01-06T13:00:00.000Z";
+    await env.PG72_ID_DB.prepare(
+      `WITH RECURSIVE sequence(value) AS (
+         VALUES (1)
+         UNION ALL
+         SELECT value + 1 FROM sequence WHERE value < 1001
+       )
+       INSERT INTO alert_state
+        (id, rule_id, environment, source_kind, dedupe_key, subject_ref,
+         hash_version, provider, queue_name, reason, surface,
+         window_seconds, metric_name, metric_kind, metric_unit, observed_value,
+         observed_numerator, observed_denominator, minimum_sample_count,
+         minimum_numerator_count, warning_threshold, critical_threshold,
+         secondary_metric_name, secondary_metric_kind, secondary_metric_unit,
+         secondary_observed_value, secondary_threshold,
+         consecutive_breaches, breach_severity, consecutive_clears,
+         current_severity, generation, revision, cooldown_until,
+         last_notification_scheduled_at, last_evaluated_at, created_at,
+         updated_at)
+       SELECT printf('10000000-0000-4000-8000-%012d', value),
+              'pgid.restricted.sensitive_denied.v1', 'production', 'd1_exact',
+              printf('%042dA', value), printf('%042dE', value),
+              1, NULL, NULL, NULL, NULL,
+              900, 'count', 'count', 'events', 5,
+              NULL, NULL, 0, NULL, 5, NULL,
+              NULL, NULL, NULL, NULL, NULL,
+              1, 'warning', 0, 'none', 0, 0, NULL,
+              NULL, ?, ?, ?
+         FROM sequence`,
+    )
+      .bind(
+        at(asOf, -86_400_000),
+        at(asOf, -86_400_000),
+        at(asOf, -86_400_000),
+      )
+      .run();
+    const result = await read(asOf, { environment: "production" });
+    await env.PG72_ID_DB.prepare(
+      "DELETE FROM alert_state WHERE environment = 'production'",
+    ).run();
+    expect(result.incomplete).toContainEqual({
+      dimensionKind: "subject_hmac",
+      ruleId: "pgid.restricted.sensitive_denied.v1",
+    });
+    expect(observation(
+      result,
+      "pgid.restricted.sensitive_denied.v1",
+      "subject_hmac",
+    )).toBeUndefined();
+  });
+
+  it("accepts canonical ratio caps and isolates one oversized cohort", async () => {
+    const asOf = "2030-01-07T11:00:00.000Z";
+    const replaceChallengeRatio = (value: number) =>
+      transformBatchDatabase((results) => {
+        let replaced = false;
+        return results.map((result) => {
+          const row = result.results[0];
+          if (
+            !replaced && row && Object.hasOwn(row, "numerator_5m") &&
+            Object.hasOwn(row, "denominator_5m")
+          ) {
+            replaced = true;
+            return {
+              ...result,
+              results: [{
+                numerator_5m: value,
+                denominator_5m: value,
+                numerator_15m: value,
+                denominator_15m: value,
+                numerator_60m: value,
+                denominator_60m: value,
+              }],
+            };
+          }
+          return result;
+        });
+      });
+    expect(observation(
+      await read(asOf, { database: replaceChallengeRatio(1_000_000) }),
+      "pgid.registration.challenge_unavailable.v1",
+      "global",
+    )).toBeDefined();
+    const ratioOverflow = await read(asOf, {
+      database: replaceChallengeRatio(1_000_001),
+    });
+    expect(ratioOverflow.incomplete).toContainEqual({
+      dimensionKind: "global",
+      ruleId: "pgid.registration.challenge_unavailable.v1",
+    });
+    expect(observation(
+      ratioOverflow,
+      "pgid.registration.rate_limited.v1",
+      "global",
+    )).toBeDefined();
+
+    const replaceRecoveryDenied = (value: number) =>
+      transformBatchDatabase((results) =>
+        results.map((result) => {
+          const row = result.results[0];
+          if (!row || !Object.hasOwn(row, "denied_5m")) return result;
+          return {
+            ...result,
+            results: [{
+              denied_5m: value,
+              denied_15m: value,
+              denied_60m: value,
+              rate_limited_5m: 0,
+              rate_limited_15m: 0,
+              rate_limited_60m: 0,
+              started_5m: 0,
+              started_15m: 0,
+              started_60m: 0,
+            }],
+          };
+        })
+      );
+    expect(observation(
+      await read(asOf, { database: replaceRecoveryDenied(1_000_000) }),
+      "pgid.recovery.entry_abuse.v1",
+      "global",
+    )).toBeDefined();
+    const recoveryOverflow = await read(asOf, {
+      database: replaceRecoveryDenied(1_000_001),
+    });
+    expect(recoveryOverflow.incomplete).toContainEqual({
+      dimensionKind: "global",
+      ruleId: "pgid.recovery.entry_abuse.v1",
+    });
+    expect(observation(
+      recoveryOverflow,
+      "pgid.registration.denied.v1",
+      "global",
+    )).toBeDefined();
   });
 
   it("turns count/group overflow into unknown and redacts source failures", async () => {
@@ -730,15 +935,15 @@ describe.sequential("audit alert source repository", () => {
           return {
             ...result,
             results: [{
-              denied_5m: 600_000_000,
-              denied_15m: 600_000_000,
-              denied_60m: 600_000_000,
+              denied_5m: 600_000,
+              denied_15m: 600_000,
+              denied_60m: 600_000,
               rate_limited_5m: 0,
               rate_limited_15m: 0,
               rate_limited_60m: 0,
-              started_5m: 600_000_000,
-              started_15m: 600_000_000,
-              started_60m: 600_000_000,
+              started_5m: 600_000,
+              started_15m: 600_000,
+              started_60m: 600_000,
             }],
           };
         }

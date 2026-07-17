@@ -70,6 +70,7 @@ const ALERT_HASH_KEY_SENTINEL_SIGNING_INPUT =
   `pgid-alert-v1\0key_sentinel\0${ALERT_HASH_KEY_SENTINEL_DOMAIN}`;
 
 const MAX_EVIDENCE_COUNT = 1_000_000_000;
+const MAX_RATIO_FIELD = 1_000_000;
 const MAX_DIMENSION_GROUPS = 1_000;
 const DIMENSION_QUERY_LIMIT = MAX_DIMENSION_GROUPS + 1;
 const HMAC_REFERENCE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
@@ -105,33 +106,41 @@ const SENTINEL_QUERY = `SELECT domain, fingerprint_ref, hash_version
 FROM alert_hash_key_sentinel
 WHERE id = 1`;
 
-const TRACKED_DIMENSIONS_QUERY = `WITH tracked AS (
-  SELECT rule_id, subject_ref, hash_version,
-         row_number() OVER (
-           PARTITION BY rule_id ORDER BY subject_ref
-         ) AS source_position
-  FROM alert_state
-  WHERE environment = ?
-    AND source_kind = 'd1_exact'
-    AND rule_id IN (
-      'pgid.restricted.sensitive_denied.v1',
-      'pgid.recovery.passkey_failure.v1',
-      'pgid.passkey.step_up_failure.v1',
-      'pgid.admin.sensitive_activity.v1',
-      'pgid.admin.directory_volume.v1'
-    )
+const TRACKED_AUDIT_RULE_IDS = [
+  "pgid.restricted.sensitive_denied.v1",
+  "pgid.recovery.passkey_failure.v1",
+  "pgid.passkey.step_up_failure.v1",
+  "pgid.admin.sensitive_activity.v1",
+  "pgid.admin.directory_volume.v1",
+] as const satisfies readonly AuditAlertRuleId[];
+
+const TRACKED_LIFECYCLE_PREDICATE = `source_kind = 'd1_exact'
     AND subject_ref IS NOT NULL
     AND (
       current_severity <> 'none'
       OR breach_severity IS NOT NULL
       OR consecutive_breaches > 0
+      OR consecutive_clears > 0
       OR cooldown_until IS NOT NULL
-    )
-)
-SELECT rule_id, subject_ref, hash_version, source_position
-FROM tracked
-WHERE source_position <= ${DIMENSION_QUERY_LIMIT}
-ORDER BY rule_id, subject_ref`;
+    )`;
+
+function trackedDimensionSelect(
+  ruleId: (typeof TRACKED_AUDIT_RULE_IDS)[number],
+): string {
+  return `SELECT rule_id, subject_ref, hash_version
+  FROM alert_state INDEXED BY alert_state_tracked_evaluation_idx
+  WHERE environment = ?1
+    AND rule_id = '${ruleId}'
+    AND ${TRACKED_LIFECYCLE_PREDICATE}
+  ORDER BY subject_ref
+  LIMIT ${DIMENSION_QUERY_LIMIT}`;
+}
+
+export const ALERT_AUDIT_TRACKED_DIMENSIONS_QUERY =
+  TRACKED_AUDIT_RULE_IDS.map((ruleId) =>
+    `SELECT rule_id, subject_ref, hash_version
+FROM (${trackedDimensionSelect(ruleId)})`
+  ).join("\nUNION ALL\n") + "\nORDER BY rule_id, subject_ref";
 
 function countQuery(where: string): string {
   return `SELECT
@@ -525,7 +534,10 @@ interface ParsedCount {
   value: number;
 }
 
-function sourceCount(value: unknown): ParsedCount {
+function sourceCount(
+  value: unknown,
+  maximum = MAX_EVIDENCE_COUNT,
+): ParsedCount {
   if (
     typeof value !== "number" ||
     !Number.isSafeInteger(value) ||
@@ -534,7 +546,7 @@ function sourceCount(value: unknown): ParsedCount {
     fail("source_invalid");
   }
   return {
-    overflow: value > MAX_EVIDENCE_COUNT,
+    overflow: value > maximum,
     value,
   };
 }
@@ -566,10 +578,10 @@ const RATIO_KEYS = [
 function parseRatioWindows(row: UnknownRecord): RatioWindows | null {
   const exact = exactRecord(row, RATIO_KEYS);
   const numerators = WINDOW_KEYS.map((window) =>
-    sourceCount(exact[`numerator_${window}`])
+    sourceCount(exact[`numerator_${window}`], MAX_RATIO_FIELD)
   );
   const denominators = WINDOW_KEYS.map((window) =>
-    sourceCount(exact[`denominator_${window}`])
+    sourceCount(exact[`denominator_${window}`], MAX_RATIO_FIELD)
   );
   if (
     numerators.some(({ overflow }) => overflow) ||
@@ -638,11 +650,16 @@ function parseRecoveryEntryWindows(row: UnknownRecord): RecoveryEntryWindows | n
     `started_${window}`,
   ]);
   const exact = exactRecord(row, keys);
-  const values = (prefix: "denied" | "rate_limited" | "started") =>
-    WINDOW_KEYS.map((window) => sourceCount(exact[`${prefix}_${window}`]));
-  const denied = values("denied");
+  const values = (
+    prefix: "denied" | "rate_limited" | "started",
+    maximum = MAX_EVIDENCE_COUNT,
+  ) =>
+    WINDOW_KEYS.map((window) =>
+      sourceCount(exact[`${prefix}_${window}`], maximum)
+    );
+  const denied = values("denied", MAX_RATIO_FIELD);
   const rateLimited = values("rate_limited");
-  const started = values("started");
+  const started = values("started", MAX_RATIO_FIELD);
   if (
     [...denied, ...rateLimited, ...started].some(({ overflow }) => overflow)
   ) {
@@ -660,7 +677,7 @@ function parseRecoveryEntryWindows(row: UnknownRecord): RecoveryEntryWindows | n
   }
   if (
     deniedValues.some((value, index) =>
-      value + startedValues[index] > MAX_EVIDENCE_COUNT
+      value + startedValues[index] > MAX_RATIO_FIELD
     )
   ) {
     return null;
@@ -1027,7 +1044,9 @@ export async function readAuditAlertSources(
   try {
     results = await database.batch<Record<string, unknown>>([
       database.prepare(SENTINEL_QUERY),
-      database.prepare(TRACKED_DIMENSIONS_QUERY).bind(input.environment),
+      database.prepare(ALERT_AUDIT_TRACKED_DIMENSIONS_QUERY).bind(
+        input.environment,
+      ),
       database.prepare(REGISTRATION_RATE_LIMITED_QUERY).bind(...basicBindings),
       database.prepare(REGISTRATION_DENIED_QUERY).bind(...basicBindings),
       database.prepare(REGISTRATION_CHALLENGE_QUERY).bind(...ratioWindowBindings),
@@ -1180,21 +1199,22 @@ export async function readAuditAlertSources(
     );
 
     const trackedByRule = new Map<AuditAlertRuleId, Set<string>>();
+    const trackedCountByRule = new Map<AuditAlertRuleId, number>();
     const trackedRows = resultRows(results, RESULT_INDEX.tracked);
     for (const rowValue of trackedRows) {
       const row = exactRecord(rowValue, [
         "rule_id",
         "subject_ref",
         "hash_version",
-        "source_position",
       ]);
       if (!isAuditAlertRuleId(row.rule_id)) fail("source_invalid");
       const dimensionKind = dimensionKindForRule(row.rule_id);
       if (dimensionKind === "global") fail("source_invalid");
       const reference = storedReference(row.subject_ref, row.hash_version);
-      const position = sourceCount(row.source_position);
-      if (reference === null || position.value < 1) fail("source_invalid");
-      if (position.value > MAX_DIMENSION_GROUPS) {
+      if (reference === null) fail("source_invalid");
+      const sourcePosition = (trackedCountByRule.get(row.rule_id) ?? 0) + 1;
+      trackedCountByRule.set(row.rule_id, sourcePosition);
+      if (sourcePosition > MAX_DIMENSION_GROUPS) {
         addIncomplete(incomplete, row.rule_id, dimensionKind);
         continue;
       }

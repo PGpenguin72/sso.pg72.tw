@@ -35,7 +35,7 @@ provenance, and defines one key-continuity sentinel:
 - `audit_event.actor_ref`/`actor_ref_hash_version` and
   `oauth_client_report.reporter_ref`/`reporter_ref_hash_version`: nullable
   persistent provenance for rows whose raw actor/reporter FK may later become
-  null;
+  null. A row cannot introduce the reference without the corresponding raw FK;
 - `alert_hash_key_sentinel`: one immutable, domain-separated fingerprint of the
   v1 alert subject HMAC key. It stores no secret and must match before evaluation.
 
@@ -94,6 +94,20 @@ work itself; status, generation, or revision alone is never bootstrap evidence.
 The repository also owns the exact projection read below. It is local source
 only: the Worker entry point and scheduler do not import or invoke it, and no
 full audit/other metric-source evaluation or same-run execution proof exists.
+
+The bounded audit repository executes its fourteen closed projections in one
+awaited D1 batch. Canonical ratio numerator/denominator fields and recovery
+denied/started fields stop at `1,000,000`; ordinary count fields retain the
+`1,000,000,000` evidence bound. A well-shaped cohort above its applicable bound
+makes only that rule/dimension incomplete. It cannot invalidate or manufacture
+zeroes for otherwise usable cohorts.
+
+Per-identity zero fill reads only state whose lifecycle can still affect a
+future evaluation: active severity, a pending breach/clear, or a cooldown. Five
+code-owned rule branches each use `alert_state_tracked_evaluation_idx` and apply
+`LIMIT 1001` before the compound result is materialized. The 1001st row marks
+only that rule/dimension incomplete. A fully inactive row with no pending
+counter or cooldown is historical and is the only lifecycle shape omitted.
 
 The pure parser fixes this exact repository-owned projection and column order:
 
@@ -154,13 +168,15 @@ enablement requires a reviewed recent backfill and zero such rows. Future audit
 writers populate the ref in the same mutation batch, but this schema slice does
 not change current writers or perform a remote backfill.
 
-Raw actor/reporter FKs cannot be reassigned after insert. The only identity
-change allowed is their existing non-null-to-null `ON DELETE SET NULL` action;
-the paired HMAC reference survives that deletion and, once populated, is
-immutable. If a raw ID is already null and no reference exists, a later writer
-cannot invent one; that row remains explicitly incomplete. This preserves
-account deletion semantics without permitting a row to be attributed to a
-different identity.
+Raw actor/reporter FKs cannot be reassigned after insert. A first reference,
+whether supplied on insert or added later, requires that exact row's raw FK to
+remain non-null while the writer derives and verifies the domain-separated
+value. The only later identity change allowed is the existing non-null-to-null
+`ON DELETE SET NULL` action; the paired HMAC reference survives that deletion
+and, once populated, is immutable. If a raw ID is already null and no reference
+exists, a later writer cannot invent one; that row remains explicitly
+incomplete. This preserves account deletion semantics without permitting an
+unproved stored-only reference or attribution to a different identity.
 
 Lifecycle state is restart-safe and compare-and-swap shaped. No pristine
 none/unknown row is stored: the first positive evaluation creates an inactive
@@ -240,8 +256,12 @@ Instead, `0020` adds
 occurred_at DESC, id)` for deterministic bounded per-subject scans. The existing
 type/time index remains available. Additional covering indexes close the exact
 global/type/actor audit, OAuth reporter, logout delivery, and logout-attempt
-cohort paths described by the pure evaluator's source contracts. A future D1
-repository must execute those queries and prove their completeness.
+cohort paths described by the pure evaluator's source contracts. The bounded
+local audit repository executes only the reviewed audit paths; later D1
+repositories must execute and prove the remaining source paths.
+`alert_state_tracked_evaluation_idx(environment, rule_id, subject_ref,
+hash_version)` is a partial index over only ongoing exact-D1 lifecycle state;
+the local audit repository uses it for bounded tracked-identity zero fill.
 
 The local archive-crypto module separately seals and opens bounded canonical v1
 records. It preserves the nullable `actorRef`/`actorRefHashVersion` pair and
@@ -261,6 +281,7 @@ From a clean worktree with the frozen dependency set:
 ```bash
 pnpm --filter @pg72/id exec vitest run test/observability-schema.spec.ts
 pnpm --filter @pg72/id exec vitest run \
+  test/alert-audit-source-repository.spec.ts \
   test/alert-evaluator.spec.ts test/alert-rules.spec.ts \
   test/audit-archive-crypto.spec.ts
 node --test scripts/public-readiness/d1-manifest.test.mjs \

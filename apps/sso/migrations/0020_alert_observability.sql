@@ -35,8 +35,9 @@ ALTER TABLE "audit_event" ADD COLUMN "actor_ref_hash_version" integer CHECK (
 CREATE TRIGGER "audit_event_actor_ref_insert_guard"
 BEFORE INSERT ON "audit_event"
 WHEN (NEW."actor_ref" IS NULL) <> (NEW."actor_ref_hash_version" IS NULL)
+  OR (NEW."actor_ref" IS NOT NULL AND NEW."actor_user_id" IS NULL)
 BEGIN
-  SELECT RAISE(ABORT, 'audit actor reference must be paired');
+  SELECT RAISE(ABORT, 'audit actor reference requires source identity');
 END;
 
 CREATE TRIGGER "audit_event_actor_ref_update_guard"
@@ -86,8 +87,9 @@ ALTER TABLE "oauth_client_report"
 CREATE TRIGGER "oauth_client_report_ref_insert_guard"
 BEFORE INSERT ON "oauth_client_report"
 WHEN (NEW."reporter_ref" IS NULL) <> (NEW."reporter_ref_hash_version" IS NULL)
+  OR (NEW."reporter_ref" IS NOT NULL AND NEW."reporter_user_id" IS NULL)
 BEGIN
-  SELECT RAISE(ABORT, 'OAuth reporter reference must be paired');
+  SELECT RAISE(ABORT, 'OAuth reporter reference requires source identity');
 END;
 
 CREATE TRIGGER "oauth_client_report_ref_update_guard"
@@ -833,6 +835,23 @@ END;
 
 CREATE INDEX "alert_state_evaluation_idx"
   ON "alert_state" ("last_evaluated_at", "rule_id", "environment");
+
+-- Only lifecycle state that can still affect a future evaluation is tracked for
+-- per-identity zero fill. Each code-owned rule query is capped before any
+-- compound materialization and must use this partial index.
+CREATE INDEX "alert_state_tracked_evaluation_idx"
+  ON "alert_state" (
+    "environment", "rule_id", "subject_ref", "hash_version"
+  )
+  WHERE "source_kind" = 'd1_exact'
+    AND "subject_ref" IS NOT NULL
+    AND (
+      "current_severity" <> 'none'
+      OR "breach_severity" IS NOT NULL
+      OR "consecutive_breaches" > 0
+      OR "consecutive_clears" > 0
+      OR "cooldown_until" IS NOT NULL
+    );
 
 CREATE UNIQUE INDEX "alert_state_semantic_identity_idx"
   ON "alert_state" (

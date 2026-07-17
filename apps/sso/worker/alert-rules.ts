@@ -19,31 +19,63 @@ export const ALERT_RULE_IDS = [
 export type AlertRuleId = (typeof ALERT_RULE_IDS)[number];
 export type AlertSeverity = "none" | "warning" | "critical";
 export type AlertEvidenceStatus = "known" | "unknown";
-export type AlertProvenance = "d1_exact" | "queue_approximate";
+export type AlertSourceKind = "d1_exact" | "queue_approximate";
 export type AlertWindowKey = "5m" | "15m" | "60m";
+export type AlertResolutionMode = "automatic" | "manual";
 
 export const ALERT_WINDOW_KEYS = ["5m", "15m", "60m"] as const;
-/** Severity wins first, then the shortest window, then expression declaration order. */
 export const ALERT_EVIDENCE_WINDOW_ORDER = ALERT_WINDOW_KEYS;
 
-const WINDOW_MINUTES: Readonly<Record<AlertWindowKey, number>> = {
-  "5m": 5,
-  "15m": 15,
-  "60m": 60,
+export const ALERT_WINDOW_SECONDS: Readonly<Record<AlertWindowKey, number>> = {
+  "5m": 300,
+  "15m": 900,
+  "60m": 3_600,
 };
 
+const MAX_EVIDENCE_VALUE = 1_000_000_000;
+const MAX_RATIO_FIELD = 1_000_000;
+const BASE64URL_ALPHABET =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 const HMAC_REFERENCE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const RULE_ID_SET = new Set<string>(ALERT_RULE_IDS);
+
+export const ALERT_QUEUE_NAMES = [
+  "security_events_dlq",
+  "logout_deliveries_dlq",
+  "alert_deliveries_dlq",
+  "audit_archive_dlq",
+] as const;
+export type AlertQueueName = (typeof ALERT_QUEUE_NAMES)[number];
+export type AlertQueueRuntimeComponent =
+  | "security_dlq"
+  | "logout_dlq"
+  | "alert_dlq"
+  | "audit_archive_dlq";
+export const ALERT_QUEUE_COMPONENTS = {
+  alert_deliveries_dlq: "alert_dlq",
+  audit_archive_dlq: "audit_archive_dlq",
+  logout_deliveries_dlq: "logout_dlq",
+  security_events_dlq: "security_dlq",
+} as const satisfies Readonly<
+  Record<AlertQueueName, AlertQueueRuntimeComponent>
+>;
+const ALERT_QUEUE_NAME_SET = new Set<string>(ALERT_QUEUE_NAMES);
+
+export const ALERT_HASHED_DIMENSION_KINDS = [
+  "subject_hmac",
+  "actor_hmac",
+  "client_hmac",
+] as const;
+export type AlertHashedDimensionKind =
+  (typeof ALERT_HASHED_DIMENSION_KINDS)[number];
+const HASHED_DIMENSION_KIND_SET = new Set<string>(
+  ALERT_HASHED_DIMENSION_KINDS,
+);
 
 export interface HashedAlertReference {
   keyVersion: 1;
   value: string;
 }
-
-export type AlertQueueName =
-  | "security_events_dlq"
-  | "logout_deliveries_dlq"
-  | "alert_deliveries_dlq"
-  | "audit_archive_dlq";
 
 export type AlertDimension =
   | { kind: "global" }
@@ -54,7 +86,7 @@ export type AlertDimension =
 
 export type HashedAlertDimension = Extract<
   AlertDimension,
-  { kind: "actor_hmac" | "client_hmac" | "subject_hmac" }
+  { reference: HashedAlertReference }
 >;
 
 export interface AlertWindowDescriptor {
@@ -64,38 +96,349 @@ export interface AlertWindowDescriptor {
   startInclusive: string;
 }
 
-export function isHashedAlertReference(
-  value: unknown,
-): value is HashedAlertReference {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
+function canonicalTimestamp(value: unknown, name: string): string {
+  if (typeof value !== "string") {
+    throw new Error(`${name} must be a canonical UTC ISO timestamp`);
   }
-  const record = value as { keyVersion?: unknown; value?: unknown };
-  return (
-    typeof record.keyVersion === "number" &&
-    Number.isSafeInteger(record.keyVersion) &&
-    record.keyVersion === 1 &&
-    typeof record.value === "string" &&
-    HMAC_REFERENCE_PATTERN.test(record.value)
-  );
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value) {
+    throw new Error(`${name} must be a canonical UTC ISO timestamp`);
+  }
+  return value;
 }
 
 export function alertWindowsAt(asOf: string): readonly AlertWindowDescriptor[] {
-  const timestamp = new Date(asOf).getTime();
-  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== asOf) {
-    throw new Error("asOf must be a canonical UTC ISO timestamp");
-  }
+  const canonical = canonicalTimestamp(asOf, "asOf");
+  const timestamp = new Date(canonical).getTime();
   return ALERT_WINDOW_KEYS.map((key) => ({
-    endExclusive: asOf,
+    endExclusive: canonical,
     key,
-    minutes: WINDOW_MINUTES[key],
+    minutes: ALERT_WINDOW_SECONDS[key] / 60,
     startInclusive: new Date(
-      timestamp - WINDOW_MINUTES[key] * 60_000,
+      timestamp - ALERT_WINDOW_SECONDS[key] * 1_000,
     ).toISOString(),
   }));
 }
 
+type UnknownRecord = Record<string, unknown>;
+
+function recordValue(value: unknown, name: string): UnknownRecord {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${name} must be an object`);
+  }
+  return value as UnknownRecord;
+}
+
+function exactRecord(
+  value: unknown,
+  keys: readonly string[],
+  name: string,
+): UnknownRecord {
+  const record = recordValue(value, name);
+  const actual = Object.keys(record);
+  if (
+    actual.length !== keys.length ||
+    keys.some((key) => !Object.hasOwn(record, key))
+  ) {
+    throw new Error(`${name} must contain only the canonical keys`);
+  }
+  return record;
+}
+
+export function isHashedAlertReference(
+  value: unknown,
+): value is HashedAlertReference {
+  try {
+    parseHashedReference(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function parseHashedReference(value: unknown): HashedAlertReference {
+  const record = exactRecord(value, ["keyVersion", "value"], "alert reference");
+  if (record.keyVersion !== 1) {
+    throw new Error("alert reference key version must be 1");
+  }
+  if (
+    typeof record.value !== "string" ||
+    !isCanonicalBase64Url32(record.value)
+  ) {
+    throw new Error("alert reference must be a canonical unpadded base64url HMAC");
+  }
+  return { keyVersion: 1, value: record.value };
+}
+
+function isCanonicalBase64Url32(value: string): boolean {
+  if (!HMAC_REFERENCE_PATTERN.test(value)) return false;
+  const finalIndex = BASE64URL_ALPHABET.indexOf(value.at(-1) ?? "");
+  return finalIndex >= 0 && finalIndex % 4 === 0;
+}
+
+function decodeHmacKey(value: string): Uint8Array<ArrayBuffer> {
+  if (!HMAC_REFERENCE_PATTERN.test(value)) {
+    throw new Error("alert HMAC key must be 32-byte unpadded base64url");
+  }
+  let bytes: Uint8Array<ArrayBuffer> | undefined;
+  try {
+    const decoded = atob(`${value.replaceAll("-", "+").replaceAll("_", "/") }=`);
+    if (decoded.length !== 32) throw new Error("invalid length");
+    bytes = new Uint8Array(decoded.length);
+    for (let index = 0; index < decoded.length; index += 1) {
+      bytes[index] = decoded.charCodeAt(index);
+    }
+    if (base64Url(bytes) !== value) throw new Error("noncanonical encoding");
+    const result = bytes;
+    bytes = undefined;
+    return result;
+  } catch {
+    throw new Error("alert HMAC key must be 32-byte unpadded base64url");
+  } finally {
+    bytes?.fill(0);
+  }
+}
+
+function base64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/, "");
+}
+
+export async function deriveAlertReferenceV1(
+  keyBase64Url: string,
+  kind: AlertHashedDimensionKind,
+  raw: string,
+): Promise<HashedAlertReference> {
+  if (!HASHED_DIMENSION_KIND_SET.has(kind)) {
+    throw new Error("alert HMAC kind is not supported");
+  }
+  if (typeof raw !== "string" || raw.length < 1 || raw.length > 512) {
+    throw new Error("alert HMAC input must contain 1 to 512 characters");
+  }
+  const keyBytes = decodeHmacKey(keyBase64Url);
+  let signInput: Uint8Array<ArrayBuffer> | undefined;
+  try {
+    signInput = new TextEncoder().encode(`pgid-alert-v1\0${kind}\0${raw}`);
+    const key = await crypto.subtle.importKey(
+      "raw",
+      keyBytes,
+      { hash: "SHA-256", name: "HMAC" },
+      false,
+      ["sign"],
+    );
+    const signature = await crypto.subtle.sign(
+      "HMAC",
+      key,
+      signInput,
+    );
+    return {
+      keyVersion: 1,
+      value: base64Url(new Uint8Array(signature)),
+    };
+  } finally {
+    keyBytes.fill(0);
+    signInput?.fill(0);
+  }
+}
+
+export const RESTRICTED_ALERT_SURFACES = [
+  "provider_link",
+  "clients.manage",
+  "clients.manage_all",
+  "users.read",
+  "users.invite",
+  "users.manage",
+  "users.assign_roles",
+] as const;
+
+export const OAUTH_REPORT_REASONS = [
+  "impersonation",
+  "phishing",
+  "scope_abuse",
+  "other",
+] as const;
+
+export const HIGH_RISK_OAUTH_REPORT_REASONS = [
+  "impersonation",
+  "phishing",
+] as const;
+
+export const HIGH_RISK_ADMIN_SUCCESS_EVENTS = [
+  "invitation.created",
+  "logout_delivery.replayed",
+  "oauth_client.created",
+  "oauth_client.deleted",
+  "oauth_client.disabled",
+  "oauth_client.enabled",
+  "oauth_client.secret_rotated",
+  "oauth_client.trust_updated",
+  "oauth_client.updated",
+  "user.access_promoted",
+  "user.access_restricted",
+  "user.deleted",
+  "user.reactivated",
+  "user.role_changed",
+  "user.sessions_revoked",
+  "user.suspended",
+] as const;
+
+export const BOOTADMIN_PROTECTED_EVENTS = [
+  "user.access_promoted",
+  "user.access_restricted",
+  "user.deleted",
+  "user.reactivated",
+  "user.role_changed",
+  "user.sessions_revoked",
+  "user.suspended",
+] as const;
+
+type AuditOutcome = "success" | "denied" | "failure";
+type AuditMetricRole =
+  | "count"
+  | "denominator"
+  | "known_surfaces"
+  | "numerator"
+  | "protected_denials"
+  | "rate_limited"
+  | "successes";
+
+export interface AuditEventSourceFilter {
+  eventTypes: readonly string[];
+  metadata?: Readonly<{ key: string; values: readonly string[] }>;
+  metricRoles: readonly AuditMetricRole[];
+  outcome: AuditOutcome;
+}
+
+const AUDIT_EVENT_SOURCE_COLUMNS = {
+  eventIdColumn: "id",
+  eventTypeColumn: "event_type",
+  metadataColumn: "metadata_json",
+  occurredAtColumn: "occurred_at",
+  outcomeColumn: "outcome",
+} as const;
+
+export type AlertSourceDescriptor =
+  | Readonly<{
+      eventIdColumn: "id";
+      eventTypeColumn: "event_type";
+      filters: readonly AuditEventSourceFilter[];
+      includeGlobal: boolean;
+      metadataColumn: "metadata_json";
+      mode: "audit_event";
+      occurredAtColumn: "occurred_at";
+      outcomeColumn: "outcome";
+      table: "audit_event";
+    } & (
+      | {
+          actorRefColumn: "actor_ref";
+          actorRefHashVersionColumn: "actor_ref_hash_version";
+          completenessPredicate: "actor_user_id_or_actor_ref_present";
+          coverageLookbackSeconds: 3_600;
+          dimensionColumn: "actor_user_id";
+          missingActorIdentity: "source_incomplete";
+        }
+      | { dimensionColumn: "subject_id" | null }
+    )>
+  | Readonly<{
+      allReasons: readonly string[];
+      completenessPredicate: "reporter_user_id_or_reporter_ref_present";
+      coverageLookbackSeconds: 3_600;
+      createdAtColumn: "created_at";
+      dimensionColumn: "client_id";
+      hashVersion: 1;
+      highRiskReasons: readonly string[];
+      missingReporterIdentity: "null_distinct_reporters";
+      mode: "oauth_client_report";
+      reasonColumn: "reason";
+      reporterRefColumn: "reporter_ref";
+      reporterRefHashVersionColumn: "reporter_ref_hash_version";
+      reporterUserIdColumn: "reporter_user_id";
+      table: "oauth_client_report";
+    }>
+  | Readonly<{
+      detectionOnly: true;
+      dimension: "global";
+      graceSeconds: 300;
+      join: "left";
+      lookbackSeconds: 3_600;
+      markerEventIdColumn: "event_id";
+      markerTable: "security_event_delivery";
+      mode: "audit_fanout";
+      sourceIdColumn: "id";
+      sourceTable: "audit_event";
+      sourceTimeColumn: "occurred_at";
+    }>
+  | Readonly<{
+      attemptCompletedAtColumn: "completed_at";
+      attemptDeliveryIdColumn: "delivery_id";
+      attemptOutcomeColumn: "outcome";
+      attemptTable: "logout_delivery_attempt";
+      deadStatus: "dead";
+      deliveryClientIdColumn: "client_id";
+      deliveryCohortColumn: "created_at";
+      deliveryIdColumn: "id";
+      deliveryStatusColumn: "status";
+      deliveryTable: "logout_delivery";
+      dimensions: readonly ["global", "client_id"];
+      eligibleStatuses: readonly [
+        "pending",
+        "processing",
+        "retry",
+        "delivered",
+        "dead",
+      ];
+      leaseExpiredOutcome: "lease_expired";
+      mode: "logout_delivery";
+      unresolvedStatuses: readonly ["pending", "processing", "retry", "dead"];
+    }>
+  | Readonly<{
+      dimension: "global";
+      mode: "alert_runtime";
+      outboxTable: "alert_outbox";
+      runtimeTable: "alert_runtime_status";
+    }>
+  | Readonly<{
+      backlogCountColumn: "backlog_count";
+      componentColumn: "component";
+      consecutiveNonzeroSamplesColumn: "consecutive_nonzero_samples";
+      criticalDurationSeconds: 900;
+      dimension: "queue_name";
+      method: "metrics";
+      metricSampledAtColumn: "metric_sampled_at";
+      mode: "queue_metrics";
+      nonzeroSinceAtColumn: "nonzero_since_at";
+      queueComponentByName: typeof ALERT_QUEUE_COMPONENTS;
+      queueNames: readonly AlertQueueName[];
+      sampleCadenceSeconds: 60;
+      streakStateTable: "alert_runtime_status";
+    }>;
+
 export type AlertMetricName =
+  | "consecutive_nonzero_samples"
+  | "count"
+  | "dead"
+  | "dead_outbox"
+  | "depth"
+  | "distinct_reporters"
+  | "evaluator_age_seconds"
+  | "evaluator_missing"
+  | "high_risk_count"
+  | "known_surfaces"
+  | "lease_expired"
+  | "missing"
+  | "oldest_unresolved_age_seconds"
+  | "outbox_due_age_seconds"
+  | "protected_denials"
+  | "rate_limited"
+  | "ratio"
+  | "successes";
+
+type InternalMetricName =
+  | "consecutiveNonzeroSamples"
   | "count"
   | "dead"
   | "deadOutbox"
@@ -107,10 +450,9 @@ export type AlertMetricName =
   | "highRiskCount"
   | "knownSurfaces"
   | "leaseExpired"
-  | "missing"
-  | "nonzeroMinutes"
+  | "missingOlderThan15mCount"
+  | "missingOlderThan5mCount"
   | "numerator"
-  | "oldestMissingAgeSeconds"
   | "oldestUnresolvedAgeSeconds"
   | "outboxDueAgeSeconds"
   | "protectedDenials"
@@ -118,13 +460,13 @@ export type AlertMetricName =
   | "successes";
 
 type ThresholdExpression =
-  | { metric: AlertMetricName; op: "gte"; value: number }
+  | { metric: InternalMetricName; op: "gte"; value: number }
   | {
       basisPoints: number;
-      denominator: AlertMetricName;
+      denominator: "denominator";
       minDenominator: number;
       minNumerator: number;
-      numerator: AlertMetricName;
+      numerator: "numerator";
       op: "ratio_gte";
     }
   | { clauses: readonly ThresholdExpression[]; op: "all" | "any" };
@@ -137,12 +479,14 @@ interface WindowThresholdDefinition {
 export interface AlertRuleDefinition {
   dimensions: readonly AlertDimension["kind"][];
   id: AlertRuleId;
-  provenance: AlertProvenance;
+  resolutionMode: AlertResolutionMode;
+  source: AlertSourceDescriptor;
+  sourceKind: AlertSourceKind;
   thresholds: Readonly<Record<AlertWindowKey, WindowThresholdDefinition>>;
 }
 
 const countAtLeast = (
-  metric: AlertMetricName,
+  metric: InternalMetricName,
   value: number,
 ): ThresholdExpression => ({ metric, op: "gte", value });
 
@@ -169,11 +513,27 @@ const allOf = (...clauses: readonly ThresholdExpression[]): ThresholdExpression 
   op: "all",
 });
 
+const automatic = "automatic" as const;
+const d1Exact = "d1_exact" as const;
+
 export const ALERT_RULE_DEFINITIONS = {
   "pgid.registration.rate_limited.v1": {
     dimensions: ["global"],
     id: "pgid.registration.rate_limited.v1",
-    provenance: "d1_exact",
+    resolutionMode: automatic,
+    source: {
+      ...AUDIT_EVENT_SOURCE_COLUMNS,
+      dimensionColumn: null,
+      filters: [{
+        eventTypes: ["registration.rate_limited"],
+        metricRoles: ["count"],
+        outcome: "denied",
+      }],
+      includeGlobal: true,
+      mode: "audit_event",
+      table: "audit_event",
+    },
+    sourceKind: d1Exact,
     thresholds: {
       "5m": { critical: null, warning: countAtLeast("count", 5) },
       "15m": { critical: null, warning: countAtLeast("count", 10) },
@@ -183,7 +543,20 @@ export const ALERT_RULE_DEFINITIONS = {
   "pgid.registration.denied.v1": {
     dimensions: ["global"],
     id: "pgid.registration.denied.v1",
-    provenance: "d1_exact",
+    resolutionMode: automatic,
+    source: {
+      ...AUDIT_EVENT_SOURCE_COLUMNS,
+      dimensionColumn: null,
+      filters: [{
+        eventTypes: ["registration.denied"],
+        metricRoles: ["count"],
+        outcome: "denied",
+      }],
+      includeGlobal: true,
+      mode: "audit_event",
+      table: "audit_event",
+    },
+    sourceKind: d1Exact,
     thresholds: {
       "5m": { critical: null, warning: countAtLeast("count", 10) },
       "15m": { critical: null, warning: countAtLeast("count", 25) },
@@ -193,20 +566,59 @@ export const ALERT_RULE_DEFINITIONS = {
   "pgid.registration.challenge_unavailable.v1": {
     dimensions: ["global"],
     id: "pgid.registration.challenge_unavailable.v1",
-    provenance: "d1_exact",
+    resolutionMode: automatic,
+    source: {
+      ...AUDIT_EVENT_SOURCE_COLUMNS,
+      dimensionColumn: null,
+      filters: [
+        {
+          eventTypes: ["registration.challenge_unavailable"],
+          metricRoles: ["numerator", "denominator"],
+          outcome: "failure",
+        },
+        {
+          eventTypes: ["registration.challenge_denied"],
+          metricRoles: ["denominator"],
+          outcome: "denied",
+        },
+        {
+          eventTypes: ["registration.intent_created"],
+          metricRoles: ["denominator"],
+          outcome: "success",
+        },
+      ],
+      includeGlobal: true,
+      mode: "audit_event",
+      table: "audit_event",
+    },
+    sourceKind: d1Exact,
     thresholds: {
       "5m": { critical: null, warning: ratioAtLeast(5, 2, 2_000) },
       "15m": { critical: null, warning: ratioAtLeast(15, 2, 2_000) },
       "60m": {
         critical: ratioAtLeast(30, 5, 5_000),
-        warning: ratioAtLeast(30, 2, 2_000),
+        warning: null,
       },
     },
   },
   "pgid.registration.restricted_created.v1": {
     dimensions: ["global"],
     id: "pgid.registration.restricted_created.v1",
-    provenance: "d1_exact",
+    resolutionMode: automatic,
+    source: {
+      ...AUDIT_EVENT_SOURCE_COLUMNS,
+      dimensionColumn: null,
+      filters: [{
+        eventTypes: ["user.created"],
+        metadata: { key: "accessLevel", values: ["restricted"] },
+        metricRoles: ["count"],
+        outcome: "success",
+      }],
+      includeGlobal: true,
+      mode: "audit_event",
+      table: "audit_event",
+    },
+    sourceKind: d1Exact,
     thresholds: {
       "5m": { critical: null, warning: countAtLeast("count", 7) },
       "15m": { critical: null, warning: countAtLeast("count", 20) },
@@ -216,7 +628,21 @@ export const ALERT_RULE_DEFINITIONS = {
   "pgid.restricted.sensitive_denied.v1": {
     dimensions: ["subject_hmac"],
     id: "pgid.restricted.sensitive_denied.v1",
-    provenance: "d1_exact",
+    resolutionMode: automatic,
+    source: {
+      ...AUDIT_EVENT_SOURCE_COLUMNS,
+      dimensionColumn: "subject_id",
+      filters: [{
+        eventTypes: ["account.restricted_action_denied"],
+        metadata: { key: "surface", values: RESTRICTED_ALERT_SURFACES },
+        metricRoles: ["count", "known_surfaces"],
+        outcome: "denied",
+      }],
+      includeGlobal: false,
+      mode: "audit_event",
+      table: "audit_event",
+    },
+    sourceKind: d1Exact,
     thresholds: {
       "5m": { critical: null, warning: countAtLeast("count", 3) },
       "15m": { critical: null, warning: countAtLeast("count", 5) },
@@ -228,14 +654,39 @@ export const ALERT_RULE_DEFINITIONS = {
             countAtLeast("knownSurfaces", 2),
           ),
         ),
-        warning: countAtLeast("count", 5),
+        warning: null,
       },
     },
   },
   "pgid.recovery.entry_abuse.v1": {
     dimensions: ["global"],
     id: "pgid.recovery.entry_abuse.v1",
-    provenance: "d1_exact",
+    resolutionMode: automatic,
+    source: {
+      ...AUDIT_EVENT_SOURCE_COLUMNS,
+      dimensionColumn: null,
+      filters: [
+        {
+          eventTypes: ["recovery.rate_limited"],
+          metricRoles: ["rate_limited"],
+          outcome: "denied",
+        },
+        {
+          eventTypes: ["recovery.entry_denied"],
+          metricRoles: ["numerator", "denominator"],
+          outcome: "denied",
+        },
+        {
+          eventTypes: ["recovery.started"],
+          metricRoles: ["denominator"],
+          outcome: "success",
+        },
+      ],
+      includeGlobal: true,
+      mode: "audit_event",
+      table: "audit_event",
+    },
+    sourceKind: d1Exact,
     thresholds: {
       "5m": {
         critical: null,
@@ -263,33 +714,90 @@ export const ALERT_RULE_DEFINITIONS = {
   "pgid.recovery.passkey_failure.v1": {
     dimensions: ["global", "subject_hmac"],
     id: "pgid.recovery.passkey_failure.v1",
-    provenance: "d1_exact",
+    resolutionMode: automatic,
+    source: {
+      ...AUDIT_EVENT_SOURCE_COLUMNS,
+      dimensionColumn: "subject_id",
+      filters: [
+        {
+          eventTypes: ["recovery.passkey_failed"],
+          metricRoles: ["numerator", "denominator"],
+          outcome: "denied",
+        },
+        {
+          eventTypes: ["recovery.completed"],
+          metricRoles: ["denominator"],
+          outcome: "success",
+        },
+      ],
+      includeGlobal: true,
+      mode: "audit_event",
+      table: "audit_event",
+    },
+    sourceKind: d1Exact,
     thresholds: {
       "5m": { critical: null, warning: ratioAtLeast(3, 3, 6_000) },
       "15m": { critical: null, warning: ratioAtLeast(5, 5, 6_000) },
       "60m": {
         critical: ratioAtLeast(10, 10, 8_000),
-        warning: ratioAtLeast(10, 5, 6_000),
+        warning: null,
       },
     },
   },
   "pgid.passkey.step_up_failure.v1": {
     dimensions: ["global", "subject_hmac"],
     id: "pgid.passkey.step_up_failure.v1",
-    provenance: "d1_exact",
+    resolutionMode: automatic,
+    source: {
+      ...AUDIT_EVENT_SOURCE_COLUMNS,
+      dimensionColumn: "subject_id",
+      filters: [
+        {
+          eventTypes: ["passkey.step_up_failed"],
+          metricRoles: ["numerator", "denominator"],
+          outcome: "denied",
+        },
+        {
+          eventTypes: ["passkey.step_up_succeeded"],
+          metricRoles: ["denominator"],
+          outcome: "success",
+        },
+      ],
+      includeGlobal: true,
+      mode: "audit_event",
+      table: "audit_event",
+    },
+    sourceKind: d1Exact,
     thresholds: {
       "5m": { critical: null, warning: ratioAtLeast(5, 3, 3_000) },
       "15m": { critical: null, warning: ratioAtLeast(15, 5, 3_000) },
       "60m": {
         critical: ratioAtLeast(30, 10, 6_000),
-        warning: ratioAtLeast(30, 5, 3_000),
+        warning: null,
       },
     },
   },
   "pgid.oauth.client_report.v1": {
     dimensions: ["client_hmac"],
     id: "pgid.oauth.client_report.v1",
-    provenance: "d1_exact",
+    resolutionMode: automatic,
+    source: {
+      allReasons: OAUTH_REPORT_REASONS,
+      completenessPredicate: "reporter_user_id_or_reporter_ref_present",
+      coverageLookbackSeconds: 3_600,
+      createdAtColumn: "created_at",
+      dimensionColumn: "client_id",
+      hashVersion: 1,
+      highRiskReasons: HIGH_RISK_OAUTH_REPORT_REASONS,
+      missingReporterIdentity: "null_distinct_reporters",
+      mode: "oauth_client_report",
+      reasonColumn: "reason",
+      reporterRefColumn: "reporter_ref",
+      reporterRefHashVersionColumn: "reporter_ref_hash_version",
+      reporterUserIdColumn: "reporter_user_id",
+      table: "oauth_client_report",
+    },
+    sourceKind: d1Exact,
     thresholds: {
       "5m": { critical: null, warning: countAtLeast("highRiskCount", 1) },
       "15m": { critical: null, warning: countAtLeast("count", 3) },
@@ -301,14 +809,40 @@ export const ALERT_RULE_DEFINITIONS = {
           ),
           countAtLeast("count", 10),
         ),
-        warning: countAtLeast("count", 3),
+        warning: null,
       },
     },
   },
   "pgid.admin.sensitive_activity.v1": {
     dimensions: ["actor_hmac"],
     id: "pgid.admin.sensitive_activity.v1",
-    provenance: "d1_exact",
+    resolutionMode: automatic,
+    source: {
+      ...AUDIT_EVENT_SOURCE_COLUMNS,
+      actorRefColumn: "actor_ref",
+      actorRefHashVersionColumn: "actor_ref_hash_version",
+      completenessPredicate: "actor_user_id_or_actor_ref_present",
+      coverageLookbackSeconds: 3_600,
+      dimensionColumn: "actor_user_id",
+      filters: [
+        {
+          eventTypes: HIGH_RISK_ADMIN_SUCCESS_EVENTS,
+          metricRoles: ["count", "successes"],
+          outcome: "success",
+        },
+        {
+          eventTypes: BOOTADMIN_PROTECTED_EVENTS,
+          metadata: { key: "reason", values: ["bootadmin_protected"] },
+          metricRoles: ["count", "protected_denials"],
+          outcome: "denied",
+        },
+      ],
+      includeGlobal: false,
+      mode: "audit_event",
+      missingActorIdentity: "source_incomplete",
+      table: "audit_event",
+    },
+    sourceKind: d1Exact,
     thresholds: {
       "5m": {
         critical: null,
@@ -324,7 +858,25 @@ export const ALERT_RULE_DEFINITIONS = {
   "pgid.admin.directory_volume.v1": {
     dimensions: ["actor_hmac"],
     id: "pgid.admin.directory_volume.v1",
-    provenance: "d1_exact",
+    resolutionMode: automatic,
+    source: {
+      ...AUDIT_EVENT_SOURCE_COLUMNS,
+      actorRefColumn: "actor_ref",
+      actorRefHashVersionColumn: "actor_ref_hash_version",
+      completenessPredicate: "actor_user_id_or_actor_ref_present",
+      coverageLookbackSeconds: 3_600,
+      dimensionColumn: "actor_user_id",
+      filters: [{
+        eventTypes: ["admin.users_listed"],
+        metricRoles: ["count"],
+        outcome: "success",
+      }],
+      includeGlobal: false,
+      mode: "audit_event",
+      missingActorIdentity: "source_incomplete",
+      table: "audit_event",
+    },
+    sourceKind: d1Exact,
     thresholds: {
       "5m": { critical: null, warning: countAtLeast("count", 20) },
       "15m": { critical: null, warning: countAtLeast("count", 50) },
@@ -334,26 +886,64 @@ export const ALERT_RULE_DEFINITIONS = {
   "pgid.security.fanout_gap.v1": {
     dimensions: ["global"],
     id: "pgid.security.fanout_gap.v1",
-    provenance: "d1_exact",
+    resolutionMode: "manual",
+    source: {
+      detectionOnly: true,
+      dimension: "global",
+      graceSeconds: 300,
+      join: "left",
+      lookbackSeconds: 3_600,
+      markerEventIdColumn: "event_id",
+      markerTable: "security_event_delivery",
+      mode: "audit_fanout",
+      sourceIdColumn: "id",
+      sourceTable: "audit_event",
+      sourceTimeColumn: "occurred_at",
+    },
+    sourceKind: d1Exact,
     thresholds: {
       "5m": {
         critical: null,
-        warning: countAtLeast("oldestMissingAgeSeconds", 5 * 60),
+        warning: countAtLeast("missingOlderThan5mCount", 1),
       },
       "15m": {
-        critical: countAtLeast("oldestMissingAgeSeconds", 15 * 60),
+        critical: countAtLeast("missingOlderThan15mCount", 1),
         warning: null,
       },
-      "60m": { critical: countAtLeast("missing", 10), warning: null },
+      "60m": {
+        critical: countAtLeast("missingOlderThan5mCount", 10),
+        warning: null,
+      },
     },
   },
   "pgid.logout.delivery_health.v1": {
     dimensions: ["global", "client_hmac"],
     id: "pgid.logout.delivery_health.v1",
-    provenance: "d1_exact",
+    resolutionMode: automatic,
+    source: {
+      attemptCompletedAtColumn: "completed_at",
+      attemptDeliveryIdColumn: "delivery_id",
+      attemptOutcomeColumn: "outcome",
+      attemptTable: "logout_delivery_attempt",
+      deadStatus: "dead",
+      deliveryClientIdColumn: "client_id",
+      deliveryCohortColumn: "created_at",
+      deliveryIdColumn: "id",
+      deliveryStatusColumn: "status",
+      deliveryTable: "logout_delivery",
+      dimensions: ["global", "client_id"],
+      eligibleStatuses: ["pending", "processing", "retry", "delivered", "dead"],
+      leaseExpiredOutcome: "lease_expired",
+      mode: "logout_delivery",
+      unresolvedStatuses: ["pending", "processing", "retry", "dead"],
+    },
+    sourceKind: d1Exact,
     thresholds: {
       "5m": {
-        critical: countAtLeast("dead", 1),
+        critical: anyOf(
+          countAtLeast("dead", 1),
+          ratioAtLeast(5, 1, 5_000),
+        ),
         warning: anyOf(
           countAtLeast("oldestUnresolvedAgeSeconds", 2 * 60),
           countAtLeast("leaseExpired", 1),
@@ -382,20 +972,27 @@ export const ALERT_RULE_DEFINITIONS = {
   "pgid.alert.runtime_health.v1": {
     dimensions: ["global"],
     id: "pgid.alert.runtime_health.v1",
-    provenance: "d1_exact",
+    resolutionMode: automatic,
+    source: {
+      dimension: "global",
+      mode: "alert_runtime",
+      outboxTable: "alert_outbox",
+      runtimeTable: "alert_runtime_status",
+    },
+    sourceKind: d1Exact,
     thresholds: {
       "5m": {
         critical: null,
         warning: anyOf(
-          countAtLeast("evaluatorAgeSeconds", 3 * 60),
-          countAtLeast("outboxDueAgeSeconds", 2 * 60),
+          countAtLeast("evaluatorAgeSeconds", 181),
+          countAtLeast("outboxDueAgeSeconds", 121),
         ),
       },
       "15m": {
         critical: anyOf(
           countAtLeast("evaluatorMissing", 1),
-          countAtLeast("evaluatorAgeSeconds", 5 * 60),
-          countAtLeast("outboxDueAgeSeconds", 5 * 60),
+          countAtLeast("evaluatorAgeSeconds", 301),
+          countAtLeast("outboxDueAgeSeconds", 301),
         ),
         warning: null,
       },
@@ -408,23 +1005,33 @@ export const ALERT_RULE_DEFINITIONS = {
   "pgid.queue.dlq_approximate.v1": {
     dimensions: ["queue"],
     id: "pgid.queue.dlq_approximate.v1",
-    provenance: "queue_approximate",
+    resolutionMode: automatic,
+    source: {
+      backlogCountColumn: "backlog_count",
+      componentColumn: "component",
+      consecutiveNonzeroSamplesColumn: "consecutive_nonzero_samples",
+      criticalDurationSeconds: 900,
+      dimension: "queue_name",
+      method: "metrics",
+      metricSampledAtColumn: "metric_sampled_at",
+      mode: "queue_metrics",
+      nonzeroSinceAtColumn: "nonzero_since_at",
+      queueComponentByName: ALERT_QUEUE_COMPONENTS,
+      queueNames: ALERT_QUEUE_NAMES,
+      sampleCadenceSeconds: 60,
+      streakStateTable: "alert_runtime_status",
+    },
+    sourceKind: "queue_approximate",
     thresholds: {
       "5m": { critical: null, warning: countAtLeast("depth", 1) },
       "15m": {
         critical: anyOf(
           countAtLeast("depth", 10),
-          countAtLeast("nonzeroMinutes", 15),
+          countAtLeast("consecutiveNonzeroSamples", 15),
         ),
         warning: null,
       },
-      "60m": {
-        critical: anyOf(
-          countAtLeast("depth", 10),
-          countAtLeast("nonzeroMinutes", 15),
-        ),
-        warning: null,
-      },
+      "60m": { critical: null, warning: null },
     },
   },
 } as const satisfies Record<AlertRuleId, AlertRuleDefinition>;
@@ -452,11 +1059,17 @@ export type Windowed<T> = Readonly<Record<AlertWindowKey, T>>;
 interface ObservationBase<
   RuleId extends AlertRuleId,
   Dimension extends AlertDimension,
-  Metrics,
 > {
   asOf: string;
   dimension: Dimension;
   ruleId: RuleId;
+}
+
+interface WindowObservationBase<
+  RuleId extends AlertRuleId,
+  Dimension extends AlertDimension,
+  Metrics,
+> extends ObservationBase<RuleId, Dimension> {
   windows: Windowed<Metrics>;
 }
 
@@ -482,7 +1095,7 @@ export interface RecoveryEntryWindowMetrics {
 
 export interface OAuthClientReportWindowMetrics {
   count: number;
-  distinctReporters: number;
+  distinctReporters: number | null;
   highRiskCount: number;
 }
 
@@ -491,9 +1104,9 @@ export interface AdminSensitiveWindowMetrics {
   successes: number;
 }
 
-export interface FanoutGapWindowMetrics {
-  missing: number;
-  oldestMissingAgeSeconds: number | null;
+export interface FanoutGapSnapshot {
+  missingOlderThan15mCount: number;
+  missingOlderThan5mCount: number;
 }
 
 export interface LogoutDeliveryWindowMetrics {
@@ -504,15 +1117,17 @@ export interface LogoutDeliveryWindowMetrics {
   unresolved: number;
 }
 
-export interface AlertRuntimeWindowMetrics {
+export interface AlertRuntimeSnapshot {
   deadOutbox: number;
   evaluatorAgeSeconds: number | null;
   outboxDueAgeSeconds: number | null;
 }
 
-export interface QueueDepthWindowMetrics {
+export interface QueueDepthSnapshot {
+  consecutiveNonzeroSamples: number | null;
   depth: number | null;
-  nonzeroMinutes: number;
+  nonzeroSinceAt: string | null;
+  sampledAt: string | null;
 }
 
 type GlobalCountRuleId =
@@ -521,65 +1136,67 @@ type GlobalCountRuleId =
   | "pgid.registration.restricted_created.v1";
 
 export type AlertRuleObservation =
-  | ObservationBase<GlobalCountRuleId, { kind: "global" }, CountWindowMetrics>
-  | ObservationBase<
+  | WindowObservationBase<
+      GlobalCountRuleId,
+      { kind: "global" },
+      CountWindowMetrics
+    >
+  | WindowObservationBase<
       "pgid.registration.challenge_unavailable.v1",
       { kind: "global" },
       RatioWindowMetrics
     >
-  | ObservationBase<
+  | WindowObservationBase<
       "pgid.restricted.sensitive_denied.v1",
       Extract<AlertDimension, { kind: "subject_hmac" }>,
       RestrictedDenialWindowMetrics
     >
-  | ObservationBase<
+  | WindowObservationBase<
       "pgid.recovery.entry_abuse.v1",
       { kind: "global" },
       RecoveryEntryWindowMetrics
     >
-  | ObservationBase<
+  | WindowObservationBase<
       | "pgid.recovery.passkey_failure.v1"
       | "pgid.passkey.step_up_failure.v1",
       { kind: "global" } | Extract<AlertDimension, { kind: "subject_hmac" }>,
       RatioWindowMetrics
     >
-  | ObservationBase<
+  | WindowObservationBase<
       "pgid.oauth.client_report.v1",
       Extract<AlertDimension, { kind: "client_hmac" }>,
       OAuthClientReportWindowMetrics
     >
-  | ObservationBase<
+  | WindowObservationBase<
       "pgid.admin.sensitive_activity.v1",
       Extract<AlertDimension, { kind: "actor_hmac" }>,
       AdminSensitiveWindowMetrics
     >
-  | ObservationBase<
+  | WindowObservationBase<
       "pgid.admin.directory_volume.v1",
       Extract<AlertDimension, { kind: "actor_hmac" }>,
       CountWindowMetrics
     >
-  | ObservationBase<
+  | (ObservationBase<
       "pgid.security.fanout_gap.v1",
-      { kind: "global" },
-      FanoutGapWindowMetrics
-    >
-  | ObservationBase<
+      { kind: "global" }
+    > & { snapshot: FanoutGapSnapshot })
+  | WindowObservationBase<
       "pgid.logout.delivery_health.v1",
       { kind: "global" } | Extract<AlertDimension, { kind: "client_hmac" }>,
       LogoutDeliveryWindowMetrics
     >
-  | ObservationBase<
+  | (ObservationBase<
       "pgid.alert.runtime_health.v1",
-      { kind: "global" },
-      AlertRuntimeWindowMetrics
-    >
-  | ObservationBase<
+      { kind: "global" }
+    > & { snapshot: AlertRuntimeSnapshot })
+  | (ObservationBase<
       "pgid.queue.dlq_approximate.v1",
-      Extract<AlertDimension, { kind: "queue" }>,
-      QueueDepthWindowMetrics
-    >;
+      Extract<AlertDimension, { kind: "queue" }>
+    > & { snapshot: QueueDepthSnapshot });
 
 interface MetricBag {
+  consecutiveNonzeroSamples?: number;
   count?: number;
   dead?: number;
   deadOutbox?: number;
@@ -591,10 +1208,9 @@ interface MetricBag {
   highRiskCount?: number;
   knownSurfaces?: number;
   leaseExpired?: number;
-  missing?: number;
-  nonzeroMinutes?: number;
+  missingOlderThan15mCount?: number;
+  missingOlderThan5mCount?: number;
   numerator?: number;
-  oldestMissingAgeSeconds?: number;
   oldestUnresolvedAgeSeconds?: number;
   outboxDueAgeSeconds?: number;
   protectedDenials?: number;
@@ -627,236 +1243,966 @@ export type AlertEvidenceUnit =
   | "state";
 
 export interface AlertMetricEvidence {
-  denominator?: number;
   kind: AlertEvidenceMetricKind;
-  metric: AlertMetricName | "ratio";
-  minNumerator?: number;
-  minSample?: number;
-  numerator?: number;
+  metricName: AlertMetricName;
+  minimumNumeratorCount: number | null;
+  minimumSampleCount: number;
+  observedDenominator: number | null;
+  observedNumerator: number | null;
+  observedValue: number;
   threshold: number;
   unit: AlertEvidenceUnit;
-  value: number;
 }
 
 export interface AlertSelectedEvidence extends AlertMetricEvidence {
-  components: readonly AlertMetricEvidence[];
-  provenance: AlertProvenance;
+  secondary: AlertMetricEvidence | null;
   severity: Exclude<AlertSeverity, "none">;
-  window: AlertWindowKey;
+  windowSeconds: 300 | 900 | 3_600;
 }
 
-function assertNonNegativeInteger(value: number, name: string): void {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`${name} must be a non-negative safe integer`);
-  }
-}
+const ALERT_METRIC_NAME_SET = new Set<string>([
+  "consecutive_nonzero_samples",
+  "count",
+  "dead",
+  "dead_outbox",
+  "depth",
+  "distinct_reporters",
+  "evaluator_age_seconds",
+  "evaluator_missing",
+  "high_risk_count",
+  "known_surfaces",
+  "lease_expired",
+  "missing",
+  "oldest_unresolved_age_seconds",
+  "outbox_due_age_seconds",
+  "protected_denials",
+  "rate_limited",
+  "ratio",
+  "successes",
+]);
 
-function assertNullableAge(value: number | null, name: string): void {
-  if (value !== null) assertNonNegativeInteger(value, name);
-}
-
-function assertDimension(dimension: AlertDimension, ruleId: AlertRuleId): void {
-  const definition = ALERT_RULE_DEFINITIONS[ruleId];
-  if (!definition.dimensions.some((allowed) => allowed === dimension.kind)) {
-    throw new Error(`dimension ${dimension.kind} is not allowed for ${ruleId}`);
+function metricDomain(metricName: AlertMetricName): {
+  kind: AlertEvidenceMetricKind;
+  unit: AlertEvidenceUnit;
+} {
+  if (metricName === "ratio") {
+    return { kind: "ratio", unit: "basis_points" };
   }
   if (
-    (dimension.kind === "actor_hmac" ||
-      dimension.kind === "client_hmac" ||
-      dimension.kind === "subject_hmac") &&
-    !isHashedAlertReference(dimension.reference)
+    metricName === "evaluator_age_seconds" ||
+    metricName === "oldest_unresolved_age_seconds" ||
+    metricName === "outbox_due_age_seconds"
   ) {
-    throw new Error("alert identity dimensions require a versioned HMAC reference");
+    return { kind: "age_seconds", unit: "seconds" };
+  }
+  if (metricName === "consecutive_nonzero_samples") {
+    return { kind: "consecutive", unit: "samples" };
+  }
+  if (metricName === "evaluator_missing") {
+    return { kind: "boolean", unit: "state" };
+  }
+  return { kind: "count", unit: "events" };
+}
+
+function parseMetricEvidence(value: unknown, name: string): AlertMetricEvidence {
+  const record = exactRecord(
+    value,
+    [
+      "kind",
+      "metricName",
+      "minimumNumeratorCount",
+      "minimumSampleCount",
+      "observedDenominator",
+      "observedNumerator",
+      "observedValue",
+      "threshold",
+      "unit",
+    ],
+    name,
+  );
+  if (
+    typeof record.metricName !== "string" ||
+    !ALERT_METRIC_NAME_SET.has(record.metricName)
+  ) {
+    throw new Error(`${name} metric name is not supported`);
+  }
+  const metricName = record.metricName as AlertMetricName;
+  const domain = metricDomain(metricName);
+  if (record.kind !== domain.kind || record.unit !== domain.unit) {
+    throw new Error(`${name} metric domain is inconsistent`);
+  }
+  const observedValue = integer(record.observedValue, `${name} observed value`);
+  const threshold = integer(record.threshold, `${name} threshold`);
+  if (threshold < 1) throw new Error(`${name} threshold must be positive`);
+  if (metricName === "ratio") {
+    const observedNumerator = integer(
+      record.observedNumerator,
+      `${name} observed numerator`,
+      MAX_RATIO_FIELD,
+    );
+    const observedDenominator = integer(
+      record.observedDenominator,
+      `${name} observed denominator`,
+      MAX_RATIO_FIELD,
+    );
+    const minimumSampleCount = integer(
+      record.minimumSampleCount,
+      `${name} minimum sample count`,
+      MAX_RATIO_FIELD,
+    );
+    const minimumNumeratorCount = integer(
+      record.minimumNumeratorCount,
+      `${name} minimum numerator count`,
+      MAX_RATIO_FIELD,
+    );
+    if (
+      observedDenominator < 1 ||
+      minimumNumeratorCount < 1 ||
+      observedNumerator > observedDenominator ||
+      observedDenominator < minimumSampleCount ||
+      observedNumerator < minimumNumeratorCount ||
+      observedValue !== Math.floor(observedNumerator * 10_000 / observedDenominator) ||
+      threshold > 10_000
+    ) {
+      throw new Error(`${name} ratio evidence is inconsistent`);
+    }
+    return {
+      kind: domain.kind,
+      metricName,
+      minimumNumeratorCount,
+      minimumSampleCount,
+      observedDenominator,
+      observedNumerator,
+      observedValue,
+      threshold,
+      unit: domain.unit,
+    };
+  }
+  if (
+    record.observedNumerator !== null ||
+    record.observedDenominator !== null ||
+    record.minimumNumeratorCount !== null ||
+    record.minimumSampleCount !== 0
+  ) {
+    throw new Error(`${name} non-ratio evidence has ratio fields`);
+  }
+  if (metricName === "evaluator_missing" && observedValue > 1) {
+    throw new Error(`${name} boolean evidence is inconsistent`);
+  }
+  return {
+    kind: domain.kind,
+    metricName,
+    minimumNumeratorCount: null,
+    minimumSampleCount: 0,
+    observedDenominator: null,
+    observedNumerator: null,
+    observedValue,
+    threshold,
+    unit: domain.unit,
+  };
+}
+
+export function parseAlertSelectedEvidence(value: unknown): AlertSelectedEvidence {
+  const record = exactRecord(
+    value,
+    [
+      "kind",
+      "metricName",
+      "minimumNumeratorCount",
+      "minimumSampleCount",
+      "observedDenominator",
+      "observedNumerator",
+      "observedValue",
+      "secondary",
+      "severity",
+      "threshold",
+      "unit",
+      "windowSeconds",
+    ],
+    "selected alert evidence",
+  );
+  const primary = parseMetricEvidence(
+    {
+      kind: record.kind,
+      metricName: record.metricName,
+      minimumNumeratorCount: record.minimumNumeratorCount,
+      minimumSampleCount: record.minimumSampleCount,
+      observedDenominator: record.observedDenominator,
+      observedNumerator: record.observedNumerator,
+      observedValue: record.observedValue,
+      threshold: record.threshold,
+      unit: record.unit,
+    },
+    "primary alert evidence",
+  );
+  if (record.severity !== "warning" && record.severity !== "critical") {
+    throw new Error("selected alert evidence severity is not supported");
+  }
+  if (
+    record.windowSeconds !== 300 &&
+    record.windowSeconds !== 900 &&
+    record.windowSeconds !== 3_600
+  ) {
+    throw new Error("selected alert evidence window is not supported");
+  }
+  const secondary = record.secondary === null
+    ? null
+    : parseMetricEvidence(record.secondary, "secondary alert evidence");
+  if (
+    primary.metricName === "known_surfaces" ||
+    primary.metricName === "distinct_reporters" ||
+    primary.observedValue < primary.threshold
+  ) {
+    throw new Error("primary alert evidence does not prove a canonical breach");
+  }
+  if (secondary !== null) {
+    const pair = `${primary.metricName}|${secondary.metricName}`;
+    if (
+      pair !== "count|known_surfaces" &&
+      pair !== "high_risk_count|distinct_reporters"
+    ) {
+      throw new Error("selected alert evidence component pair is not supported");
+    }
+    if (secondary.observedValue < secondary.threshold) {
+      throw new Error("secondary alert evidence does not prove a canonical breach");
+    }
+  }
+  return {
+    ...primary,
+    secondary,
+    severity: record.severity,
+    windowSeconds: record.windowSeconds,
+  };
+}
+
+interface AlertEvidenceContractComponent {
+  metricName: AlertMetricName;
+  minimumNumeratorCount: number | null;
+  minimumSampleCount: number;
+  threshold: number;
+}
+
+function evidenceContractsFor(
+  expression: ThresholdExpression,
+): readonly (readonly AlertEvidenceContractComponent[])[] {
+  if (expression.op === "gte") {
+    return [[{
+      metricName: METRIC_NAMES[expression.metric],
+      minimumNumeratorCount: null,
+      minimumSampleCount: 0,
+      threshold: expression.value,
+    }]];
+  }
+  if (expression.op === "ratio_gte") {
+    return [[{
+      metricName: "ratio",
+      minimumNumeratorCount: expression.minNumerator,
+      minimumSampleCount: expression.minDenominator,
+      threshold: expression.basisPoints,
+    }]];
+  }
+  if (expression.op === "any") {
+    return expression.clauses.flatMap((clause) => evidenceContractsFor(clause));
+  }
+  let combined: readonly (readonly AlertEvidenceContractComponent[])[] = [[]];
+  for (const clause of expression.clauses) {
+    const clauseContracts = evidenceContractsFor(clause);
+    combined = combined.flatMap((prefix) =>
+      clauseContracts.map((suffix) => [...prefix, ...suffix])
+    );
+  }
+  return combined;
+}
+
+function evidenceMatchesContract(
+  evidence: AlertSelectedEvidence,
+  contract: readonly AlertEvidenceContractComponent[],
+): boolean {
+  const actual = evidence.secondary === null
+    ? [evidence]
+    : [evidence, evidence.secondary];
+  return actual.length === contract.length && actual.every((component, index) => {
+    const expected = contract[index];
+    return expected !== undefined &&
+      component.metricName === expected.metricName &&
+      component.minimumNumeratorCount === expected.minimumNumeratorCount &&
+      component.minimumSampleCount === expected.minimumSampleCount &&
+      component.threshold === expected.threshold;
+  });
+}
+
+export function parseAlertSelectedEvidenceForRule(
+  value: unknown,
+  ruleId: AlertRuleId,
+): AlertSelectedEvidence {
+  const evidence = parseAlertSelectedEvidence(value);
+  const window = evidence.windowSeconds === 300
+    ? "5m"
+    : evidence.windowSeconds === 900
+      ? "15m"
+      : "60m";
+  const expression = ALERT_RULE_DEFINITIONS[ruleId].thresholds[window][evidence.severity];
+  if (
+    expression === null ||
+    !evidenceContractsFor(expression).some((contract) =>
+      evidenceMatchesContract(evidence, contract)
+    )
+  ) {
+    throw new Error("selected alert evidence does not match the canonical rule contract");
+  }
+  return evidence;
+}
+
+export function parseAlertRuleId(value: unknown): AlertRuleId {
+  if (typeof value !== "string" || !RULE_ID_SET.has(value)) {
+    throw new Error("alert rule id is not supported");
+  }
+  return value as AlertRuleId;
+}
+
+export function parseAlertDimension(
+  value: unknown,
+  allowed: readonly AlertDimension["kind"][],
+): AlertDimension {
+  const record = recordValue(value, "alert dimension");
+  const kind = record.kind;
+  if (kind === "global") {
+    exactRecord(value, ["kind"], "global alert dimension");
+    if (!allowed.includes(kind)) throw new Error("alert dimension is not allowed");
+    return { kind };
+  }
+  if (kind === "queue") {
+    const exact = exactRecord(value, ["kind", "queue"], "Queue alert dimension");
+    if (!allowed.includes(kind)) throw new Error("alert dimension is not allowed");
+    if (typeof exact.queue !== "string" || !ALERT_QUEUE_NAME_SET.has(exact.queue)) {
+      throw new Error("alert Queue name is not supported");
+    }
+    return { kind, queue: exact.queue as AlertQueueName };
+  }
+  if (typeof kind === "string" && HASHED_DIMENSION_KIND_SET.has(kind)) {
+    const exact = exactRecord(
+      value,
+      ["kind", "reference"],
+      "hashed alert dimension",
+    );
+    if (!allowed.includes(kind as AlertDimension["kind"])) {
+      throw new Error("alert dimension is not allowed");
+    }
+    return {
+      kind: kind as AlertHashedDimensionKind,
+      reference: parseHashedReference(exact.reference),
+    };
+  }
+  throw new Error("alert dimension kind is not supported");
+}
+
+function integer(
+  value: unknown,
+  name: string,
+  maximum = MAX_EVIDENCE_VALUE,
+): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > maximum) {
+    throw new Error(`${name} must be an integer in the persistence domain`);
+  }
+  return value as number;
+}
+
+function nullableInteger(
+  value: unknown,
+  name: string,
+  maximum = MAX_EVIDENCE_VALUE,
+): number | null {
+  return value === null ? null : integer(value, name, maximum);
+}
+
+function parseCountMetrics(value: unknown): CountWindowMetrics {
+  const record = exactRecord(value, ["count"], "count metrics");
+  return { count: integer(record.count, "count") };
+}
+
+function parseRatioMetrics(value: unknown): RatioWindowMetrics {
+  const record = exactRecord(value, ["denominator", "numerator"], "ratio metrics");
+  const denominator = integer(record.denominator, "denominator", MAX_RATIO_FIELD);
+  const numerator = integer(record.numerator, "numerator", MAX_RATIO_FIELD);
+  if (numerator > denominator) throw new Error("numerator cannot exceed denominator");
+  return { denominator, numerator };
+}
+
+function parseRestrictedMetrics(value: unknown): RestrictedDenialWindowMetrics {
+  const record = exactRecord(value, ["count", "knownSurfaces"], "restricted metrics");
+  const count = integer(record.count, "count");
+  const knownSurfaces = integer(record.knownSurfaces, "known surfaces");
+  if (
+    knownSurfaces > count ||
+    knownSurfaces > RESTRICTED_ALERT_SURFACES.length
+  ) {
+    throw new Error("known surfaces exceed the canonical denied-event domain");
+  }
+  return { count, knownSurfaces };
+}
+
+function parseRecoveryEntryMetrics(value: unknown): RecoveryEntryWindowMetrics {
+  const record = exactRecord(
+    value,
+    ["denied", "rateLimited", "started"],
+    "recovery entry metrics",
+  );
+  const denied = integer(record.denied, "denied", MAX_RATIO_FIELD);
+  const rateLimited = integer(record.rateLimited, "rate limited");
+  const started = integer(record.started, "started", MAX_RATIO_FIELD);
+  if (denied + started > MAX_RATIO_FIELD) {
+    throw new Error("recovery denominator exceeds the persistence domain");
+  }
+  return { denied, rateLimited, started };
+}
+
+function parseOAuthMetrics(value: unknown): OAuthClientReportWindowMetrics {
+  const record = exactRecord(
+    value,
+    ["count", "distinctReporters", "highRiskCount"],
+    "OAuth report metrics",
+  );
+  const count = integer(record.count, "report count");
+  const distinctReporters = nullableInteger(
+    record.distinctReporters,
+    "distinct reporters",
+  );
+  const highRiskCount = integer(record.highRiskCount, "high-risk count");
+  if ((distinctReporters !== null && distinctReporters > count) || highRiskCount > count) {
+    throw new Error("OAuth report subsets cannot exceed total reports");
+  }
+  return { count, distinctReporters, highRiskCount };
+}
+
+function parseAdminSensitiveMetrics(value: unknown): AdminSensitiveWindowMetrics {
+  const record = exactRecord(
+    value,
+    ["protectedDenials", "successes"],
+    "admin-sensitive metrics",
+  );
+  const protectedDenials = integer(record.protectedDenials, "protected denials");
+  const successes = integer(record.successes, "sensitive successes");
+  if (protectedDenials + successes > MAX_EVIDENCE_VALUE) {
+    throw new Error("admin-sensitive total exceeds the persistence domain");
+  }
+  return { protectedDenials, successes };
+}
+
+function parseLogoutMetrics(value: unknown): LogoutDeliveryWindowMetrics {
+  const record = exactRecord(
+    value,
+    ["dead", "eligible", "leaseExpired", "oldestUnresolvedAgeSeconds", "unresolved"],
+    "logout-delivery metrics",
+  );
+  const dead = integer(record.dead, "dead deliveries");
+  const eligible = integer(record.eligible, "eligible deliveries", MAX_RATIO_FIELD);
+  const leaseExpired = integer(record.leaseExpired, "expired leases");
+  const oldestUnresolvedAgeSeconds = nullableInteger(
+    record.oldestUnresolvedAgeSeconds,
+    "oldest unresolved age",
+  );
+  const unresolved = integer(record.unresolved, "unresolved deliveries", MAX_RATIO_FIELD);
+  if (unresolved > eligible || dead > unresolved) {
+    throw new Error("logout delivery subsets cannot exceed their cohort");
+  }
+  if ((unresolved === 0) !== (oldestUnresolvedAgeSeconds === null)) {
+    throw new Error("logout unresolved count and oldest age must agree");
+  }
+  return { dead, eligible, leaseExpired, oldestUnresolvedAgeSeconds, unresolved };
+}
+
+function parseWindows<T>(
+  value: unknown,
+  parser: (entry: unknown) => T,
+): Windowed<T> {
+  const record = exactRecord(value, ALERT_WINDOW_KEYS, "alert windows");
+  return {
+    "5m": parser(record["5m"]),
+    "15m": parser(record["15m"]),
+    "60m": parser(record["60m"]),
+  };
+}
+
+function nondecreasing(values: readonly number[], name: string): void {
+  for (let index = 1; index < values.length; index += 1) {
+    if (values[index] < values[index - 1]) {
+      throw new Error(`${name} must be nondecreasing across nested windows`);
+    }
   }
 }
 
-function countMetrics(metrics: CountWindowMetrics): MetricBag {
-  assertNonNegativeInteger(metrics.count, "count");
+function nullableAgeNondecreasing(
+  values: readonly (number | null)[],
+  name: string,
+): void {
+  let prior: number | null = null;
+  for (const value of values) {
+    if (prior !== null && (value === null || value < prior)) {
+      throw new Error(`${name} must be nondecreasing across nested windows`);
+    }
+    if (value !== null) prior = value;
+  }
+}
+
+function nullableCountNondecreasing(
+  values: readonly (number | null)[],
+  name: string,
+): void {
+  let previous: number | null = null;
+  let unknownSeen = false;
+  for (const value of values) {
+    if (value === null) {
+      unknownSeen = true;
+      continue;
+    }
+    if (unknownSeen || (previous !== null && value < previous)) {
+      throw new Error(`${name} must be nondecreasing or remain unknown across windows`);
+    }
+    previous = value;
+  }
+}
+
+function validateNestedWindows(
+  ruleId: AlertRuleId,
+  windows: Windowed<
+    | AdminSensitiveWindowMetrics
+    | CountWindowMetrics
+    | LogoutDeliveryWindowMetrics
+    | OAuthClientReportWindowMetrics
+    | RatioWindowMetrics
+    | RecoveryEntryWindowMetrics
+    | RestrictedDenialWindowMetrics
+  >,
+): void {
+  const entries = ALERT_WINDOW_KEYS.map((key) => windows[key]);
+  switch (ruleId) {
+    case "pgid.registration.rate_limited.v1":
+    case "pgid.registration.denied.v1":
+    case "pgid.registration.restricted_created.v1":
+    case "pgid.admin.directory_volume.v1":
+      nondecreasing(entries.map((entry) => (entry as CountWindowMetrics).count), "count");
+      break;
+    case "pgid.registration.challenge_unavailable.v1":
+    case "pgid.recovery.passkey_failure.v1":
+    case "pgid.passkey.step_up_failure.v1":
+      nondecreasing(entries.map((entry) => (entry as RatioWindowMetrics).numerator), "numerator");
+      nondecreasing(entries.map((entry) => (entry as RatioWindowMetrics).denominator), "denominator");
+      break;
+    case "pgid.restricted.sensitive_denied.v1":
+      nondecreasing(entries.map((entry) => (entry as RestrictedDenialWindowMetrics).count), "count");
+      nondecreasing(entries.map((entry) => (entry as RestrictedDenialWindowMetrics).knownSurfaces), "known surfaces");
+      break;
+    case "pgid.recovery.entry_abuse.v1":
+      for (const key of ["denied", "rateLimited", "started"] as const) {
+        nondecreasing(
+          entries.map((entry) => (entry as RecoveryEntryWindowMetrics)[key]),
+          key,
+        );
+      }
+      break;
+    case "pgid.oauth.client_report.v1":
+      for (const key of ["count", "highRiskCount"] as const) {
+        nondecreasing(
+          entries.map((entry) => (entry as OAuthClientReportWindowMetrics)[key]),
+          key,
+        );
+      }
+      nullableCountNondecreasing(
+        entries.map((entry) =>
+          (entry as OAuthClientReportWindowMetrics).distinctReporters
+        ),
+        "distinct reporters",
+      );
+      break;
+    case "pgid.admin.sensitive_activity.v1":
+      for (const key of ["protectedDenials", "successes"] as const) {
+        nondecreasing(
+          entries.map((entry) => (entry as AdminSensitiveWindowMetrics)[key]),
+          key,
+        );
+      }
+      break;
+    case "pgid.logout.delivery_health.v1": {
+      const logout = entries as LogoutDeliveryWindowMetrics[];
+      for (const key of ["dead", "eligible", "leaseExpired", "unresolved"] as const) {
+        nondecreasing(logout.map((entry) => entry[key]), key);
+      }
+      nullableAgeNondecreasing(
+        logout.map((entry) => entry.oldestUnresolvedAgeSeconds),
+        "oldest unresolved age",
+      );
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+function observationBase(
+  record: UnknownRecord,
+  ruleId: AlertRuleId,
+): { asOf: string; dimension: AlertDimension; ruleId: AlertRuleId } {
+  const definition = ALERT_RULE_DEFINITIONS[ruleId];
+  return {
+    asOf: canonicalTimestamp(record.asOf, "asOf"),
+    dimension: parseAlertDimension(record.dimension, definition.dimensions),
+    ruleId,
+  };
+}
+
+export function parseAlertObservation(value: unknown): AlertRuleObservation {
+  const loose = recordValue(value, "alert observation");
+  const ruleId = parseAlertRuleId(loose.ruleId);
+  if (ruleId === "pgid.security.fanout_gap.v1") {
+    const record = exactRecord(
+      value,
+      ["asOf", "dimension", "ruleId", "snapshot"],
+      "fan-out observation",
+    );
+    const base = observationBase(record, ruleId);
+    if (base.dimension.kind !== "global") {
+      throw new Error("fan-out alert dimension must be global");
+    }
+    const dimension = base.dimension;
+    const snapshotRecord = exactRecord(
+      record.snapshot,
+      ["missingOlderThan15mCount", "missingOlderThan5mCount"],
+      "fan-out snapshot",
+    );
+    const snapshot = {
+      missingOlderThan15mCount: integer(
+        snapshotRecord.missingOlderThan15mCount,
+        "missing older than 15 minutes",
+      ),
+      missingOlderThan5mCount: integer(
+        snapshotRecord.missingOlderThan5mCount,
+        "missing older than 5 minutes",
+      ),
+    };
+    if (snapshot.missingOlderThan15mCount > snapshot.missingOlderThan5mCount) {
+      throw new Error("fan-out age cohorts are inconsistent");
+    }
+    return { asOf: base.asOf, dimension, ruleId, snapshot };
+  }
+  if (ruleId === "pgid.alert.runtime_health.v1") {
+    const record = exactRecord(
+      value,
+      ["asOf", "dimension", "ruleId", "snapshot"],
+      "runtime observation",
+    );
+    const base = observationBase(record, ruleId);
+    if (base.dimension.kind !== "global") {
+      throw new Error("runtime alert dimension must be global");
+    }
+    const dimension = base.dimension;
+    const snapshotRecord = exactRecord(
+      record.snapshot,
+      ["deadOutbox", "evaluatorAgeSeconds", "outboxDueAgeSeconds"],
+      "runtime snapshot",
+    );
+    return {
+      asOf: base.asOf,
+      dimension,
+      ruleId,
+      snapshot: {
+        deadOutbox: integer(snapshotRecord.deadOutbox, "dead alert outbox"),
+        evaluatorAgeSeconds: nullableInteger(
+          snapshotRecord.evaluatorAgeSeconds,
+          "evaluator age",
+        ),
+        outboxDueAgeSeconds: nullableInteger(
+          snapshotRecord.outboxDueAgeSeconds,
+          "outbox due age",
+        ),
+      },
+    };
+  }
+  if (ruleId === "pgid.queue.dlq_approximate.v1") {
+    const record = exactRecord(
+      value,
+      ["asOf", "dimension", "ruleId", "snapshot"],
+      "Queue observation",
+    );
+    const base = observationBase(record, ruleId);
+    if (base.dimension.kind !== "queue") {
+      throw new Error("Queue alert dimension must name a Queue");
+    }
+    const dimension = base.dimension;
+    const snapshotRecord = exactRecord(
+      record.snapshot,
+      ["consecutiveNonzeroSamples", "depth", "nonzeroSinceAt", "sampledAt"],
+      "Queue snapshot",
+    );
+    return {
+      asOf: base.asOf,
+      dimension,
+      ruleId,
+      snapshot: {
+        consecutiveNonzeroSamples: nullableInteger(
+          snapshotRecord.consecutiveNonzeroSamples,
+          "consecutive Queue samples",
+        ),
+        depth: nullableInteger(snapshotRecord.depth, "Queue depth"),
+        nonzeroSinceAt: snapshotRecord.nonzeroSinceAt === null
+          ? null
+          : canonicalTimestamp(snapshotRecord.nonzeroSinceAt, "nonzeroSinceAt"),
+        sampledAt: snapshotRecord.sampledAt === null
+          ? null
+          : canonicalTimestamp(snapshotRecord.sampledAt, "sampledAt"),
+      },
+    };
+  }
+  const record = exactRecord(
+    value,
+    ["asOf", "dimension", "ruleId", "windows"],
+    "windowed alert observation",
+  );
+  const base = observationBase(record, ruleId);
+  switch (ruleId) {
+    case "pgid.registration.rate_limited.v1":
+    case "pgid.registration.denied.v1":
+    case "pgid.registration.restricted_created.v1":
+    case "pgid.admin.directory_volume.v1": {
+      const windows = parseWindows(record.windows, parseCountMetrics);
+      validateNestedWindows(ruleId, windows);
+      return { ...base, ruleId, windows } as AlertRuleObservation;
+    }
+    case "pgid.registration.challenge_unavailable.v1":
+    case "pgid.recovery.passkey_failure.v1":
+    case "pgid.passkey.step_up_failure.v1": {
+      const windows = parseWindows(record.windows, parseRatioMetrics);
+      validateNestedWindows(ruleId, windows);
+      return { ...base, ruleId, windows } as AlertRuleObservation;
+    }
+    case "pgid.restricted.sensitive_denied.v1": {
+      const windows = parseWindows(record.windows, parseRestrictedMetrics);
+      validateNestedWindows(ruleId, windows);
+      return { ...base, ruleId, windows } as AlertRuleObservation;
+    }
+    case "pgid.recovery.entry_abuse.v1": {
+      const windows = parseWindows(record.windows, parseRecoveryEntryMetrics);
+      validateNestedWindows(ruleId, windows);
+      return { ...base, ruleId, windows } as AlertRuleObservation;
+    }
+    case "pgid.oauth.client_report.v1": {
+      const windows = parseWindows(record.windows, parseOAuthMetrics);
+      validateNestedWindows(ruleId, windows);
+      return { ...base, ruleId, windows } as AlertRuleObservation;
+    }
+    case "pgid.admin.sensitive_activity.v1": {
+      const windows = parseWindows(record.windows, parseAdminSensitiveMetrics);
+      validateNestedWindows(ruleId, windows);
+      return { ...base, ruleId, windows } as AlertRuleObservation;
+    }
+    case "pgid.logout.delivery_health.v1": {
+      const windows = parseWindows(record.windows, parseLogoutMetrics);
+      validateNestedWindows(ruleId, windows);
+      return { ...base, ruleId, windows } as AlertRuleObservation;
+    }
+    default: {
+      const exhaustive: never = ruleId;
+      throw new Error(`unsupported alert observation: ${String(exhaustive)}`);
+    }
+  }
+}
+
+function countBag(metrics: CountWindowMetrics): MetricBag {
   return { count: metrics.count };
 }
 
-function ratioMetrics(metrics: RatioWindowMetrics): MetricBag {
-  assertNonNegativeInteger(metrics.numerator, "numerator");
-  assertNonNegativeInteger(metrics.denominator, "denominator");
-  if (metrics.numerator > metrics.denominator) {
-    throw new Error("numerator cannot exceed denominator");
-  }
+function ratioBag(metrics: RatioWindowMetrics): MetricBag {
   return metrics;
+}
+
+interface KnownQueueSnapshot {
+  consecutiveNonzeroSamples: number;
+  depth: number;
+}
+
+function knownQueueSnapshot(
+  snapshot: QueueDepthSnapshot,
+  asOf: string,
+): KnownQueueSnapshot | null {
+  if (
+    snapshot.depth === null ||
+    snapshot.sampledAt === null ||
+    snapshot.consecutiveNonzeroSamples === null ||
+    snapshot.sampledAt !== asOf
+  ) {
+    return null;
+  }
+  if (snapshot.depth === 0) {
+    return snapshot.nonzeroSinceAt === null &&
+        snapshot.consecutiveNonzeroSamples === 0
+      ? { consecutiveNonzeroSamples: 0, depth: 0 }
+      : null;
+  }
+  if (
+    snapshot.nonzeroSinceAt === null ||
+    snapshot.consecutiveNonzeroSamples < 1
+  ) {
+    return null;
+  }
+  const elapsed = new Date(snapshot.sampledAt).getTime() -
+    new Date(snapshot.nonzeroSinceAt).getTime();
+  if (elapsed < 0) return null;
+  const samples = snapshot.consecutiveNonzeroSamples;
+  if (elapsed < (samples - 1) * 60_000 || elapsed > samples * 60_000) {
+    return null;
+  }
+  const elapsedFullMinutes = Math.floor(elapsed / 60_000);
+  return {
+    // One persisted metric proves both a contiguous sample streak and elapsed
+    // duration. Fifteen samples without fifteen full minutes remains fourteen.
+    consecutiveNonzeroSamples: Math.min(samples, elapsedFullMinutes),
+    depth: snapshot.depth,
+  };
 }
 
 function metricsForObservation(
   observation: AlertRuleObservation,
+  knownQueue: KnownQueueSnapshot | null,
 ): Windowed<MetricBag> {
-  const mapped = {} as Record<AlertWindowKey, MetricBag>;
-  for (const window of ALERT_WINDOW_KEYS) {
-    switch (observation.ruleId) {
-      case "pgid.registration.rate_limited.v1":
-      case "pgid.registration.denied.v1":
-      case "pgid.registration.restricted_created.v1":
-      case "pgid.admin.directory_volume.v1":
-        mapped[window] = countMetrics(observation.windows[window]);
-        break;
-      case "pgid.registration.challenge_unavailable.v1":
-      case "pgid.recovery.passkey_failure.v1":
-      case "pgid.passkey.step_up_failure.v1":
-        mapped[window] = ratioMetrics(observation.windows[window]);
-        break;
-      case "pgid.restricted.sensitive_denied.v1": {
+  switch (observation.ruleId) {
+    case "pgid.registration.rate_limited.v1":
+    case "pgid.registration.denied.v1":
+    case "pgid.registration.restricted_created.v1":
+    case "pgid.admin.directory_volume.v1":
+      return {
+        "5m": countBag(observation.windows["5m"]),
+        "15m": countBag(observation.windows["15m"]),
+        "60m": countBag(observation.windows["60m"]),
+      };
+    case "pgid.registration.challenge_unavailable.v1":
+    case "pgid.recovery.passkey_failure.v1":
+    case "pgid.passkey.step_up_failure.v1":
+      return {
+        "5m": ratioBag(observation.windows["5m"]),
+        "15m": ratioBag(observation.windows["15m"]),
+        "60m": ratioBag(observation.windows["60m"]),
+      };
+    case "pgid.restricted.sensitive_denied.v1":
+      return observation.windows;
+    case "pgid.oauth.client_report.v1": {
+      const mapped = {} as Record<AlertWindowKey, MetricBag>;
+      for (const window of ALERT_WINDOW_KEYS) {
         const metrics = observation.windows[window];
-        assertNonNegativeInteger(metrics.count, "count");
-        assertNonNegativeInteger(metrics.knownSurfaces, "knownSurfaces");
-        if (metrics.knownSurfaces > metrics.count) {
-          throw new Error("known surfaces cannot exceed denied events");
-        }
-        mapped[window] = metrics;
-        break;
-      }
-      case "pgid.recovery.entry_abuse.v1": {
-        const metrics = observation.windows[window];
-        assertNonNegativeInteger(metrics.denied, "denied");
-        assertNonNegativeInteger(metrics.rateLimited, "rateLimited");
-        assertNonNegativeInteger(metrics.started, "started");
-        const denominator = metrics.denied + metrics.started;
-        if (!Number.isSafeInteger(denominator)) {
-          throw new Error("recovery denominator exceeds the safe integer range");
-        }
         mapped[window] = {
-          denominator,
+          count: metrics.count,
+          ...(metrics.distinctReporters === null
+            ? {}
+            : { distinctReporters: metrics.distinctReporters }),
+          highRiskCount: metrics.highRiskCount,
+        };
+      }
+      return mapped;
+    }
+    case "pgid.recovery.entry_abuse.v1": {
+      const mapped = {} as Record<AlertWindowKey, MetricBag>;
+      for (const window of ALERT_WINDOW_KEYS) {
+        const metrics = observation.windows[window];
+        mapped[window] = {
+          denominator: metrics.denied + metrics.started,
           numerator: metrics.denied,
           rateLimited: metrics.rateLimited,
         };
-        break;
       }
-      case "pgid.oauth.client_report.v1": {
+      return mapped;
+    }
+    case "pgid.admin.sensitive_activity.v1": {
+      const mapped = {} as Record<AlertWindowKey, MetricBag>;
+      for (const window of ALERT_WINDOW_KEYS) {
         const metrics = observation.windows[window];
-        assertNonNegativeInteger(metrics.count, "count");
-        assertNonNegativeInteger(metrics.distinctReporters, "distinctReporters");
-        assertNonNegativeInteger(metrics.highRiskCount, "highRiskCount");
-        if (
-          metrics.distinctReporters > metrics.count ||
-          metrics.highRiskCount > metrics.count
-        ) {
-          throw new Error("OAuth report subsets cannot exceed total reports");
-        }
-        mapped[window] = metrics;
-        break;
-      }
-      case "pgid.admin.sensitive_activity.v1": {
-        const metrics = observation.windows[window];
-        assertNonNegativeInteger(metrics.successes, "successes");
-        assertNonNegativeInteger(metrics.protectedDenials, "protectedDenials");
-        const count = metrics.successes + metrics.protectedDenials;
-        if (!Number.isSafeInteger(count)) {
-          throw new Error("admin activity count exceeds the safe integer range");
-        }
-        mapped[window] = { ...metrics, count };
-        break;
-      }
-      case "pgid.security.fanout_gap.v1": {
-        const metrics = observation.windows[window];
-        assertNonNegativeInteger(metrics.missing, "missing");
-        assertNullableAge(
-          metrics.oldestMissingAgeSeconds,
-          "oldestMissingAgeSeconds",
-        );
-        if (
-          (metrics.missing === 0) !==
-          (metrics.oldestMissingAgeSeconds === null)
-        ) {
-          throw new Error("fan-out missing count and oldest age must agree");
-        }
         mapped[window] = {
-          missing: metrics.missing,
-          ...(metrics.oldestMissingAgeSeconds === null
-            ? {}
-            : { oldestMissingAgeSeconds: metrics.oldestMissingAgeSeconds }),
+          count: metrics.successes + metrics.protectedDenials,
+          protectedDenials: metrics.protectedDenials,
+          successes: metrics.successes,
         };
-        break;
       }
-      case "pgid.logout.delivery_health.v1": {
+      return mapped;
+    }
+    case "pgid.security.fanout_gap.v1":
+      return {
+        "5m": {
+          missingOlderThan5mCount: observation.snapshot.missingOlderThan5mCount,
+        },
+        "15m": {
+          missingOlderThan15mCount: observation.snapshot.missingOlderThan15mCount,
+        },
+        "60m": {
+          missingOlderThan5mCount: observation.snapshot.missingOlderThan5mCount,
+        },
+      };
+    case "pgid.logout.delivery_health.v1": {
+      const mapped = {} as Record<AlertWindowKey, MetricBag>;
+      for (const window of ALERT_WINDOW_KEYS) {
         const metrics = observation.windows[window];
-        assertNonNegativeInteger(metrics.dead, "dead");
-        assertNonNegativeInteger(metrics.eligible, "eligible");
-        assertNonNegativeInteger(metrics.leaseExpired, "leaseExpired");
-        assertNonNegativeInteger(metrics.unresolved, "unresolved");
-        assertNullableAge(
-          metrics.oldestUnresolvedAgeSeconds,
-          "oldestUnresolvedAgeSeconds",
-        );
-        if (metrics.unresolved > metrics.eligible || metrics.dead > metrics.unresolved) {
-          throw new Error("logout delivery subsets cannot exceed their cohort");
-        }
-        if (
-          (metrics.unresolved === 0) !==
-          (metrics.oldestUnresolvedAgeSeconds === null)
-        ) {
-          throw new Error("logout unresolved count and oldest age must agree");
-        }
         mapped[window] = {
           dead: metrics.dead,
           denominator: metrics.eligible,
           leaseExpired: metrics.leaseExpired,
           numerator: metrics.unresolved,
-          ...(metrics.oldestUnresolvedAgeSeconds === null
-            ? {}
-            : {
-                oldestUnresolvedAgeSeconds:
-                  metrics.oldestUnresolvedAgeSeconds,
-              }),
+          oldestUnresolvedAgeSeconds: metrics.oldestUnresolvedAgeSeconds ?? 0,
         };
-        break;
       }
-      case "pgid.alert.runtime_health.v1": {
-        const metrics = observation.windows[window];
-        assertNonNegativeInteger(metrics.deadOutbox, "deadOutbox");
-        assertNullableAge(metrics.evaluatorAgeSeconds, "evaluatorAgeSeconds");
-        assertNullableAge(metrics.outboxDueAgeSeconds, "outboxDueAgeSeconds");
-        mapped[window] = {
-          deadOutbox: metrics.deadOutbox,
-          evaluatorMissing: metrics.evaluatorAgeSeconds === null ? 1 : 0,
-          ...(metrics.evaluatorAgeSeconds === null
-            ? {}
-            : { evaluatorAgeSeconds: metrics.evaluatorAgeSeconds }),
-          ...(metrics.outboxDueAgeSeconds === null
-            ? {}
-            : { outboxDueAgeSeconds: metrics.outboxDueAgeSeconds }),
-        };
-        break;
-      }
-      case "pgid.queue.dlq_approximate.v1": {
-        const metrics = observation.windows[window];
-        if (metrics.depth !== null) {
-          assertNonNegativeInteger(metrics.depth, "depth");
-        }
-        assertNonNegativeInteger(metrics.nonzeroMinutes, "nonzeroMinutes");
-        mapped[window] = {
-          nonzeroMinutes: metrics.nonzeroMinutes,
-          ...(metrics.depth === null ? {} : { depth: metrics.depth }),
-        };
-        break;
-      }
-      default: {
-        const exhaustive: never = observation;
-        throw new Error(`unsupported alert observation: ${String(exhaustive)}`);
-      }
+      return mapped;
+    }
+    case "pgid.alert.runtime_health.v1": {
+      const snapshot = observation.snapshot;
+      const bag: MetricBag = {
+        deadOutbox: snapshot.deadOutbox,
+        evaluatorAgeSeconds: snapshot.evaluatorAgeSeconds ?? 0,
+        evaluatorMissing: snapshot.evaluatorAgeSeconds === null ? 1 : 0,
+        outboxDueAgeSeconds: snapshot.outboxDueAgeSeconds ?? 0,
+      };
+      return { "5m": bag, "15m": bag, "60m": bag };
+    }
+    case "pgid.queue.dlq_approximate.v1": {
+      if (knownQueue === null) return { "5m": {}, "15m": {}, "60m": {} };
+      const bag: MetricBag = {
+        consecutiveNonzeroSamples: knownQueue.consecutiveNonzeroSamples,
+        depth: knownQueue.depth,
+      };
+      return { "5m": bag, "15m": bag, "60m": bag };
     }
   }
-  return mapped;
 }
 
-function evidenceDomain(metric: AlertMetricName): {
+const METRIC_NAMES: Readonly<Record<InternalMetricName, AlertMetricName>> = {
+  consecutiveNonzeroSamples: "consecutive_nonzero_samples",
+  count: "count",
+  dead: "dead",
+  deadOutbox: "dead_outbox",
+  denominator: "count",
+  depth: "depth",
+  distinctReporters: "distinct_reporters",
+  evaluatorAgeSeconds: "evaluator_age_seconds",
+  evaluatorMissing: "evaluator_missing",
+  highRiskCount: "high_risk_count",
+  knownSurfaces: "known_surfaces",
+  leaseExpired: "lease_expired",
+  missingOlderThan15mCount: "missing",
+  missingOlderThan5mCount: "missing",
+  numerator: "count",
+  oldestUnresolvedAgeSeconds: "oldest_unresolved_age_seconds",
+  outboxDueAgeSeconds: "outbox_due_age_seconds",
+  protectedDenials: "protected_denials",
+  rateLimited: "rate_limited",
+  successes: "successes",
+};
+
+function evidenceDomain(metric: InternalMetricName): {
   kind: Exclude<AlertEvidenceMetricKind, "ratio">;
   unit: Exclude<AlertEvidenceUnit, "basis_points">;
 } {
   if (
     metric === "evaluatorAgeSeconds" ||
-    metric === "oldestMissingAgeSeconds" ||
     metric === "oldestUnresolvedAgeSeconds" ||
     metric === "outboxDueAgeSeconds"
   ) {
     return { kind: "age_seconds", unit: "seconds" };
   }
-  if (metric === "nonzeroMinutes") {
+  if (metric === "consecutiveNonzeroSamples") {
     return { kind: "consecutive", unit: "samples" };
   }
   if (metric === "evaluatorMissing") {
@@ -865,99 +2211,169 @@ function evidenceDomain(metric: AlertMetricName): {
   return { kind: "count", unit: "events" };
 }
 
-function expressionEvidence(
+function scalarEvidence(
+  metric: InternalMetricName,
+  observedValue: number,
+  threshold: number,
+): AlertMetricEvidence {
+  const domain = evidenceDomain(metric);
+  return {
+    kind: domain.kind,
+    metricName: METRIC_NAMES[metric],
+    minimumNumeratorCount: null,
+    minimumSampleCount: 0,
+    observedDenominator: null,
+    observedNumerator: null,
+    observedValue,
+    threshold,
+    unit: domain.unit,
+  };
+}
+
+type ExpressionEvaluation =
+  | { components: readonly AlertMetricEvidence[]; status: "breached" }
+  | { status: "clear" }
+  | { status: "unknown" };
+
+function evaluateExpression(
   expression: ThresholdExpression,
   metrics: MetricBag,
-): readonly AlertMetricEvidence[] | null {
+): ExpressionEvaluation {
   if (expression.op === "gte") {
     const observed = metrics[expression.metric];
-    if (observed === undefined || observed < expression.value) return null;
-    const domain = evidenceDomain(expression.metric);
-    return [{
-      kind: domain.kind,
-      metric: expression.metric,
-      threshold: expression.value,
-      unit: domain.unit,
-      value: observed,
-    }];
+    if (observed === undefined) return { status: "unknown" };
+    return observed < expression.value
+      ? { status: "clear" }
+      : {
+          components: [scalarEvidence(expression.metric, observed, expression.value)],
+          status: "breached",
+        };
   }
   if (expression.op === "ratio_gte") {
-    const numerator = metrics[expression.numerator];
-    const denominator = metrics[expression.denominator];
+    const numerator = metrics.numerator;
+    const denominator = metrics.denominator;
+    if (numerator === undefined || denominator === undefined) {
+      return { status: "unknown" };
+    }
     if (
-      numerator === undefined ||
-      denominator === undefined ||
       numerator < expression.minNumerator ||
       denominator < expression.minDenominator ||
       denominator === 0 ||
       BigInt(numerator) * 10_000n <
         BigInt(denominator) * BigInt(expression.basisPoints)
     ) {
-      return null;
+      return { status: "clear" };
     }
-    const observedBasisPoints = Number(
-      (BigInt(numerator) * 10_000n) / BigInt(denominator),
-    );
-    return [{
-      denominator,
-      kind: "ratio",
-      metric: "ratio",
-      minNumerator: expression.minNumerator,
-      minSample: expression.minDenominator,
-      numerator,
-      threshold: expression.basisPoints,
-      unit: "basis_points",
-      value: observedBasisPoints,
-    }];
+    return {
+      components: [{
+        kind: "ratio",
+        metricName: "ratio",
+        minimumNumeratorCount: expression.minNumerator,
+        minimumSampleCount: expression.minDenominator,
+        observedDenominator: denominator,
+        observedNumerator: numerator,
+        observedValue: Number(
+          (BigInt(numerator) * 10_000n) / BigInt(denominator),
+        ),
+        threshold: expression.basisPoints,
+        unit: "basis_points",
+      }],
+      status: "breached",
+    };
   }
   if (expression.op === "all") {
     const components: AlertMetricEvidence[] = [];
+    let unknown = false;
     for (const clause of expression.clauses) {
-      const evidence = expressionEvidence(clause, metrics);
-      if (evidence === null) return null;
-      components.push(...evidence);
+      const result = evaluateExpression(clause, metrics);
+      if (result.status === "clear") return result;
+      if (result.status === "unknown") unknown = true;
+      else components.push(...result.components);
     }
-    return components;
+    if (unknown) return { status: "unknown" };
+    if (components.length > 2) {
+      throw new Error("alert v1 evidence exceeds its two-component schema");
+    }
+    return { components, status: "breached" };
   }
+  let unknown = false;
   for (const clause of expression.clauses) {
-    const evidence = expressionEvidence(clause, metrics);
-    if (evidence !== null) return evidence;
+    const result = evaluateExpression(clause, metrics);
+    if (result.status === "breached") return result;
+    if (result.status === "unknown") unknown = true;
   }
-  return null;
+  return { status: unknown ? "unknown" : "clear" };
 }
 
-function queueEvidenceKnown(observation: AlertRuleObservation): boolean {
-  if (observation.ruleId !== "pgid.queue.dlq_approximate.v1") return true;
-  return ALERT_WINDOW_KEYS.every(
-    (window) => observation.windows[window].depth !== null,
-  );
+interface WindowThresholdEvaluation {
+  matches: readonly {
+    components: readonly AlertMetricEvidence[];
+    window: AlertWindowKey;
+  }[];
+  unknown: boolean;
 }
 
-function isImmediateCritical(
-  observation: AlertRuleObservation,
+function evaluateWindowThresholds(
+  definition: AlertRuleDefinition,
   metrics: Windowed<MetricBag>,
-): boolean {
-  if (observation.ruleId === "pgid.logout.delivery_health.v1") {
-    return ALERT_WINDOW_KEYS.some((window) => (metrics[window].dead ?? 0) > 0);
+  severity: "critical" | "warning",
+): WindowThresholdEvaluation {
+  const matches: {
+    components: readonly AlertMetricEvidence[];
+    window: AlertWindowKey;
+  }[] = [];
+  let unknown = false;
+  for (const window of ALERT_EVIDENCE_WINDOW_ORDER) {
+    const threshold = definition.thresholds[window][severity];
+    if (threshold === null) continue;
+    const result = evaluateExpression(threshold, metrics[window]);
+    if (result.status === "breached") {
+      matches.push({ components: result.components, window });
+    } else if (result.status === "unknown") {
+      unknown = true;
+    }
   }
-  if (observation.ruleId === "pgid.alert.runtime_health.v1") {
-    return ALERT_WINDOW_KEYS.some(
-      (window) =>
-        (metrics[window].evaluatorMissing ?? 0) > 0 ||
-        (metrics[window].evaluatorAgeSeconds ?? 0) >= 5 * 60 ||
-        (metrics[window].deadOutbox ?? 0) > 0,
-    );
-  }
-  return false;
+  return { matches, unknown };
 }
 
-export function evaluateAlertRule(
-  observation: AlertRuleObservation,
-): AlertRuleEvaluation {
+function selectedEvidence(
+  components: readonly AlertMetricEvidence[],
+  severity: Exclude<AlertSeverity, "none">,
+  window: AlertWindowKey,
+): AlertSelectedEvidence {
+  const primary = components[0];
+  if (!primary || components.length > 2) {
+    throw new Error("alert evidence must contain one or two components");
+  }
+  return {
+    ...primary,
+    secondary: components[1] ?? null,
+    severity,
+    windowSeconds: ALERT_WINDOW_SECONDS[window] as 300 | 900 | 3_600,
+  };
+}
+
+function isImmediateCriticalEvidence(
+  ruleId: AlertRuleId,
+  evidence: readonly AlertMetricEvidence[],
+): boolean {
+  const metricName = evidence[0]?.metricName;
+  return ruleId === "pgid.logout.delivery_health.v1"
+    ? metricName === "dead"
+    : ruleId === "pgid.alert.runtime_health.v1" &&
+      (metricName === "evaluator_missing" || metricName === "dead_outbox");
+}
+
+export function evaluateAlertRule(value: unknown): AlertRuleEvaluation {
+  const observation = parseAlertObservation(value);
   alertWindowsAt(observation.asOf);
-  assertDimension(observation.dimension, observation.ruleId);
-  const metrics = metricsForObservation(observation);
-  if (!queueEvidenceKnown(observation)) {
+  const queueSnapshot = observation.ruleId === "pgid.queue.dlq_approximate.v1"
+    ? knownQueueSnapshot(observation.snapshot, observation.asOf)
+    : null;
+  if (
+    observation.ruleId === "pgid.queue.dlq_approximate.v1" &&
+    queueSnapshot === null
+  ) {
     return {
       asOf: observation.asOf,
       breachedWindows: [],
@@ -969,60 +2385,45 @@ export function evaluateAlertRule(
       severity: "none",
     };
   }
-
+  const metrics = metricsForObservation(observation, queueSnapshot);
   const definition = ALERT_RULE_DEFINITIONS[observation.ruleId];
-  const criticalMatches = ALERT_EVIDENCE_WINDOW_ORDER.flatMap((window) => {
-    const threshold = definition.thresholds[window].critical;
-    if (threshold === null) return [];
-    const components = expressionEvidence(threshold, metrics[window]);
-    return components === null ? [] : [{ components, window }];
-  });
+  const critical = evaluateWindowThresholds(definition, metrics, "critical");
+  const criticalMatches = critical.matches;
   if (criticalMatches.length > 0) {
-    const selected = criticalMatches[0];
-    const primary = selected.components[0];
+    const immediate = criticalMatches.find(({ components }) =>
+      isImmediateCriticalEvidence(observation.ruleId, components)
+    );
+    const selected = immediate ?? criticalMatches[0];
     return {
       asOf: observation.asOf,
       breachedWindows: criticalMatches.map(({ window }) => window),
       dimension: observation.dimension,
       evidence: "known",
-      immediateCritical: isImmediateCritical(observation, metrics),
+      immediateCritical: immediate !== undefined,
       ruleId: observation.ruleId,
-      selectedEvidence: {
-        ...primary,
-        components: selected.components,
-        provenance: definition.provenance,
-        severity: "critical",
-        window: selected.window,
-      },
+      selectedEvidence: selectedEvidence(
+        selected.components,
+        "critical",
+        selected.window,
+      ),
       severity: "critical",
     };
   }
-
-  const warningMatches = ALERT_EVIDENCE_WINDOW_ORDER.flatMap((window) => {
-    const threshold = definition.thresholds[window].warning;
-    if (threshold === null) return [];
-    const components = expressionEvidence(threshold, metrics[window]);
-    return components === null ? [] : [{ components, window }];
-  });
+  const warning = evaluateWindowThresholds(definition, metrics, "warning");
+  const warningMatches = warning.matches;
   const selected = warningMatches[0];
-  const primary = selected?.components[0];
+  const unknown = selected === undefined && (critical.unknown || warning.unknown);
   return {
     asOf: observation.asOf,
     breachedWindows: warningMatches.map(({ window }) => window),
     dimension: observation.dimension,
-    evidence: "known",
+    evidence: unknown ? "unknown" : "known",
     immediateCritical: false,
     ruleId: observation.ruleId,
-    selectedEvidence: selected && primary
-      ? {
-          ...primary,
-          components: selected.components,
-          provenance: definition.provenance,
-          severity: "warning",
-          window: selected.window,
-        }
+    selectedEvidence: selected
+      ? selectedEvidence(selected.components, "warning", selected.window)
       : null,
-    severity: warningMatches.length > 0 ? "warning" : "none",
+    severity: selected ? "warning" : "none",
   };
 }
 

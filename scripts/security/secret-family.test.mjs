@@ -304,7 +304,89 @@ test("allows only exact audited path, key, and complete value or digest triples"
       fixture.relativePath,
     );
   }
+  assertReviewedStaticUiErrorPropertyContract();
 });
+
+function assertReviewedStaticUiErrorPropertyContract() {
+  const sourceKey = "refresh_token_requires_offline_access";
+  const valueDigest = "bbf58f13f3573e210bba2822828db86d1b334f38cb40c7892246fcc83e2b3726";
+  const sourcePath = "apps/sso/src/App.tsx";
+  const analysis = analyzeTypeScriptStaticValues(
+    readFileSync(new URL("../../apps/sso/src/App.tsx", import.meta.url), "utf8"),
+    { relativePath: sourcePath },
+  );
+  const matches = analysis.assignments.filter(
+    ({ assignmentKind, evaluation, key, keyKind }) =>
+      assignmentKind === "PropertyAssignment" &&
+      key === sourceKey &&
+      keyKind === "Identifier" &&
+      evaluation.status === "static" &&
+      typeof evaluation.value === "string" &&
+      createHash("sha256").update(evaluation.value).digest("hex") === valueDigest,
+  );
+  assert.equal(matches.length, 1);
+  const reviewedValue = matches[0].evaluation.value;
+  const scan = (source, relativePath) =>
+    scanBufferForSecrets(Buffer.from(source), { relativePath }).includes("assigned-secret");
+  const property = (expression) => `const errors = { ${sourceKey}: ${expression} };`;
+
+  assert.equal(scan(property(JSON.stringify(reviewedValue)), sourcePath), false);
+  assert.equal(
+    scan(property(`\`${reviewedValue}\``), "artifact:static/assets/index-Ab3_9xYz.js"),
+    false,
+  );
+
+  const split = Math.floor(reviewedValue.length / 2);
+  const changedValue = `${reviewedValue}-changed`;
+  for (const [label, relativePath, source] of [
+    ["wrong source path", "other/App.tsx", property(JSON.stringify(reviewedValue))],
+    [
+      "non-entry artifact",
+      "artifact:static/assets/chunk-Ab3_9xYz.js",
+      property(JSON.stringify(reviewedValue)),
+    ],
+    [
+      "invalid entry hash",
+      "artifact:static/assets/index-Ab3_9xYz-extra.js",
+      property(JSON.stringify(reviewedValue)),
+    ],
+    ["variable declaration", sourcePath, `const ${sourceKey} = ${JSON.stringify(reviewedValue)};`],
+    [
+      "quoted property",
+      sourcePath,
+      `const errors = { ${JSON.stringify(sourceKey)}: ${JSON.stringify(reviewedValue)} };`,
+    ],
+    [
+      "computed property",
+      sourcePath,
+      `const errors = { [${JSON.stringify(sourceKey)}]: ${JSON.stringify(reviewedValue)} };`,
+    ],
+    ["class property", sourcePath, `class Errors { ${sourceKey} = ${JSON.stringify(reviewedValue)}; }`],
+    ["binary assignment", sourcePath, `errors.${sourceKey} = ${JSON.stringify(reviewedValue)};`],
+    [
+      "concatenated value",
+      sourcePath,
+      property(
+        `${JSON.stringify(reviewedValue.slice(0, split))} + ${JSON.stringify(reviewedValue.slice(split))}`,
+      ),
+    ],
+    ["changed value", sourcePath, property(JSON.stringify(changedValue))],
+    ["token key", sourcePath, `const errors = { refresh_token: ${JSON.stringify(reviewedValue)} };`],
+    ["secret key", sourcePath, `const errors = { client_secret: ${JSON.stringify(reviewedValue)} };`],
+  ]) {
+    assert.equal(scan(source, relativePath), true, label);
+  }
+
+  const syntheticMaterial = "reviewed-contract-must-not-waive-material-123456";
+  for (const [label, source] of [
+    ["real token variable", `const accessToken = ${JSON.stringify(syntheticMaterial)};`],
+    ["real token object key", `const value = { access_token: ${JSON.stringify(syntheticMaterial)} };`],
+    ["real secret class property", `class Value { clientSecret = ${JSON.stringify(syntheticMaterial)}; }`],
+    ["real token property assignment", `value.refreshToken = ${JSON.stringify(syntheticMaterial)};`],
+  ]) {
+    assert.equal(scan(source, sourcePath), true, label);
+  }
+}
 
 test("normalizes declarations and quoted or unquoted secret keys before classification", () => {
   for (const assignment of [

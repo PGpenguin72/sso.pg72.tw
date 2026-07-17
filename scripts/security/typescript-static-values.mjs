@@ -173,7 +173,12 @@ function assignment(node) {
     case SyntaxKind.EnumMember:
     case SyntaxKind.BindingElement:
       if (!node.initializer) return null;
-      return { key: staticName(node.propertyName ?? node.name), expression: node.initializer };
+      return {
+        assignmentKind: SyntaxKind[node.kind],
+        expression: node.initializer,
+        key: staticName(node.propertyName ?? node.name),
+        keyKind: SyntaxKind[(node.propertyName ?? node.name).kind],
+      };
     case SyntaxKind.BinaryExpression:
       if (
         node.operatorToken.kind < SyntaxKind.FirstAssignment ||
@@ -181,7 +186,12 @@ function assignment(node) {
       ) {
         return null;
       }
-      return { key: staticName(node.left), expression: node.right };
+      return {
+        assignmentKind: SyntaxKind[node.kind],
+        expression: node.right,
+        key: staticName(node.left),
+        keyKind: SyntaxKind[node.left.kind],
+      };
     default:
       return null;
   }
@@ -228,7 +238,9 @@ export function analyzeTypeScriptStaticValues(content, { relativePath = "scan.ts
       const candidate = assignment(node);
       if (candidate?.key) {
         assignments.push({
+          assignmentKind: candidate.assignmentKind,
           key: candidate.key,
+          keyKind: candidate.keyKind,
           evaluation: staticPrimitive(candidate.expression),
           form: staticValueForm(candidate.expression) ?? "other",
         });

@@ -26,11 +26,21 @@ interface QueueMessageState {
 interface DeliveryRow {
   attempts: number;
   client_id: string;
+  delivery_key: string;
   id: number;
   jti: string | null;
   last_error_code: string | null;
   replay_count: number;
   status: string;
+}
+
+interface DeliveryAttemptRow {
+  attempt_number: number;
+  completed_at: string | null;
+  error_code: string | null;
+  http_status: number | null;
+  outcome: string;
+  resulting_status: string;
 }
 
 function fakeQueueEnv(
@@ -43,7 +53,7 @@ function fakeQueueEnv(
   } as Env;
 }
 
-function fakeMessage(deliveryId: number): {
+function fakeMessage(deliveryKey: string): {
   message: Message<LogoutDeliveryQueueMessage>;
   state: QueueMessageState;
 } {
@@ -53,7 +63,7 @@ function fakeMessage(deliveryId: number): {
       state.acked = true;
     },
     attempts: 1,
-    body: { type: "logout_delivery", deliveryId } as const,
+    body: { type: "logout_delivery", deliveryKey } as const,
     id: crypto.randomUUID(),
     retry: (options?: { delaySeconds?: number }) => {
       state.retries.push(options ?? {});
@@ -65,6 +75,7 @@ function fakeMessage(deliveryId: number): {
 
 async function seedClient(
   backchannelLogoutUri: string | null = null,
+  ownerUserId: string | null = null,
 ): Promise<string> {
   const clientId = `logout-${crypto.randomUUID()}`;
   const now = new Date().toISOString();
@@ -79,11 +90,11 @@ async function seedClient(
       id, clientId, disabled, skipConsent, enableEndSession, subjectType,
       scopes, createdAt, updatedAt, name, redirectUris,
       tokenEndpointAuthMethod, grantTypes, responseTypes, public, type,
-      requirePKCE, metadata, backchannelLogoutUri
+      requirePKCE, metadata, backchannelLogoutUri, ownerUserId
     ) VALUES (?, ?, 0, 0, 1, 'public', '["openid","offline_access"]',
               ?, ?, 'Global Logout Test', ?, 'none',
               '["authorization_code","refresh_token"]', '["code"]', 1,
-              'web', 1, ?, ?)`,
+              'web', 1, ?, ?, ?)`,
   )
     .bind(
       crypto.randomUUID(),
@@ -93,6 +104,7 @@ async function seedClient(
       JSON.stringify([`https://${clientId}.example/callback`]),
       JSON.stringify(metadata),
       backchannelLogoutUri,
+      ownerUserId,
     )
     .run();
   return clientId;
@@ -152,17 +164,54 @@ async function revokeAll(
   });
 }
 
-async function deliveryRow(id: number): Promise<DeliveryRow> {
+async function deliveryRow(deliveryKey: string): Promise<DeliveryRow> {
   const row = await env.PG72_ID_DB.prepare(
-    `SELECT id, client_id, status, attempts, replay_count, jti,
+    `SELECT id, delivery_key, client_id, status, attempts, replay_count, jti,
             last_error_code
        FROM logout_delivery
-      WHERE id = ?`,
+      WHERE delivery_key = ?`,
   )
-    .bind(id)
+    .bind(deliveryKey)
     .first<DeliveryRow>();
   if (!row) throw new Error("logout delivery was not found");
   return row;
+}
+
+async function deliveryAttemptRows(
+  deliveryId: number,
+): Promise<DeliveryAttemptRow[]> {
+  const rows = await env.PG72_ID_DB.prepare(
+    `SELECT attempt_number, outcome, resulting_status, http_status,
+            error_code, completed_at
+       FROM logout_delivery_attempt
+      WHERE delivery_id = ?
+      ORDER BY replay_count, attempt_number`,
+  )
+    .bind(deliveryId)
+    .all<DeliveryAttemptRow>();
+  return rows.results;
+}
+
+async function seedPendingDelivery(prefix: string): Promise<{
+  clientId: string;
+  delivery: { delivery_key: string; id: number };
+  endpoint: string;
+  user: Awaited<ReturnType<typeof createAuthenticatedUser>>;
+}> {
+  const user = await createAuthenticatedUser(
+    `${crypto.randomUUID()}@example.com`,
+  );
+  const endpoint = `https://${prefix}-${crypto.randomUUID()}.example/logout`;
+  const clientId = await seedClient(endpoint);
+  await seedIssuedTokens(user.userId, user.sessionId, clientId);
+  const revoked = await revokeAll(fakeQueueEnv(), user);
+  const delivery = await env.PG72_ID_DB.prepare(
+    "SELECT id, delivery_key FROM logout_delivery WHERE event_id = ? LIMIT 1",
+  )
+    .bind(revoked.event.eventId)
+    .first<{ delivery_key: string; id: number }>();
+  if (!delivery) throw new Error("delivery was not created");
+  return { clientId, delivery, endpoint, user };
 }
 
 function decodeJwtPayload(token: string): Record<string, unknown> {
@@ -370,6 +419,358 @@ describe("durable global logout", () => {
     expect(outbox).toEqual({ reason: "self_revoke", status: "pending" });
   });
 
+  it("atomically self-deletes every session and only snapshots visited RPs", async () => {
+    const user = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "developer",
+    );
+    const otherSession = await createSessionFor(user.userId);
+    const first = await seedClient(
+      `https://delete-first-${crypto.randomUUID()}.example/logout`,
+    );
+    const second = await seedClient(
+      `https://delete-second-${crypto.randomUUID()}.example/logout`,
+    );
+    const unvisited = await seedClient(
+      `https://delete-unvisited-${crypto.randomUUID()}.example/logout`,
+    );
+    const owned = await seedClient(
+      `https://delete-owned-${crypto.randomUUID()}.example/logout`,
+      user.userId,
+    );
+    await seedIssuedTokens(user.userId, user.sessionId, first);
+    await seedIssuedTokens(user.userId, user.sessionId, second);
+    await seedIssuedTokens(user.userId, otherSession.sessionId, second);
+
+    const queuedBodies: unknown[] = [];
+    const context = createExecutionContext();
+    const response = await app.fetch(
+      new Request("http://localhost:5173/delete-user", {
+        method: "POST",
+        headers: user.headers,
+        body: "{}",
+      }),
+      fakeQueueEnv(async (body) => {
+        queuedBodies.push(body);
+        throw new Error("synthetic account-delete Queue failure");
+      }),
+      context,
+    );
+    await waitOnExecutionContext(context);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      success: true,
+      message: "User deleted",
+    });
+    expect(response.headers.get("set-cookie")).toMatch(
+      /pg72_id\.session_token=.*Max-Age=0/i,
+    );
+    const deleted = await env.PG72_ID_DB.prepare(
+      `SELECT
+        (SELECT COUNT(*) FROM user WHERE id = ?) AS users,
+        (SELECT COUNT(*) FROM account WHERE userId = ?) AS accounts,
+        (SELECT COUNT(*) FROM session WHERE userId = ?) AS sessions,
+        (SELECT COUNT(*) FROM oauthAccessToken WHERE userId = ?) AS access_tokens,
+        (SELECT COUNT(*) FROM oauthRefreshToken
+          WHERE userId = ? AND revoked IS NULL) AS live_refresh_tokens`,
+    )
+      .bind(
+        user.userId,
+        user.userId,
+        user.userId,
+        user.userId,
+        user.userId,
+      )
+      .first<Record<string, number>>();
+    expect(deleted).toEqual({
+      users: 0,
+      accounts: 0,
+      sessions: 0,
+      access_tokens: 0,
+      live_refresh_tokens: 0,
+    });
+    expect(
+      await env.PG72_ID_DB.prepare(
+        "SELECT disabled, ownerUserId FROM oauthClient WHERE clientId = ?",
+      )
+        .bind(owned)
+        .first(),
+    ).toEqual({ disabled: 1, ownerUserId: null });
+
+    const deliveries = await env.PG72_ID_DB.prepare(
+      `SELECT delivery_key, session_id, client_id, status
+         FROM logout_delivery
+        WHERE user_id = ? AND reason = 'account_delete'
+        ORDER BY session_id, client_id`,
+    )
+      .bind(user.userId)
+      .all<{
+        client_id: string;
+        delivery_key: string;
+        session_id: string;
+        status: string;
+      }>();
+    expect(
+      deliveries.results.map(({ session_id, client_id }) => ({
+        session_id,
+        client_id,
+      })),
+    ).toEqual(
+      [
+        { session_id: user.sessionId, client_id: first },
+        { session_id: user.sessionId, client_id: second },
+        { session_id: otherSession.sessionId, client_id: second },
+      ].sort((left, right) =>
+        `${left.session_id}:${left.client_id}`.localeCompare(
+          `${right.session_id}:${right.client_id}`,
+        ),
+      ),
+    );
+    expect(
+      deliveries.results.some((delivery) => delivery.client_id === unvisited),
+    ).toBe(false);
+    expect(
+      deliveries.results.every((delivery) =>
+        /^[0-9a-f-]{36}-[0-9a-f]{8}$/.test(delivery.delivery_key),
+      ),
+    ).toBe(true);
+    expect(queuedBodies).toEqual(
+      expect.arrayContaining(
+        deliveries.results.map((delivery) => ({
+          type: "logout_delivery",
+          deliveryKey: delivery.delivery_key,
+        })),
+      ),
+    );
+
+    const audits = await env.PG72_ID_DB.prepare(
+      `SELECT actor_user_id, subject_id, outcome
+         FROM audit_event
+        WHERE event_type = 'account.deleted' AND subject_id = ?`,
+    )
+      .bind(user.userId)
+      .all<{
+        actor_user_id: string | null;
+        outcome: string;
+        subject_id: string;
+      }>();
+    expect(audits.results).toEqual([
+      {
+        actor_user_id: null,
+        subject_id: user.userId,
+        outcome: "success",
+      },
+    ]);
+  });
+
+  it("rolls self-deletion back before cookie or Queue cleanup when outbox fails", async () => {
+    const user = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "developer",
+    );
+    const otherSession = await createSessionFor(user.userId);
+    const clientId = await seedClient(
+      `https://delete-rollback-${crypto.randomUUID()}.example/logout`,
+      user.userId,
+    );
+    await seedIssuedTokens(user.userId, user.sessionId, clientId);
+    const queuedBodies: unknown[] = [];
+
+    await env.PG72_ID_DB.prepare(
+      `CREATE TRIGGER test_account_delete_outbox_abort
+       BEFORE INSERT ON logout_delivery
+       BEGIN
+         SELECT RAISE(ABORT, 'synthetic account delete outbox failure');
+       END`,
+    ).run();
+    let response: Response;
+    try {
+      const context = createExecutionContext();
+      response = await app.fetch(
+        new Request("http://localhost:5173/delete-user", {
+          method: "POST",
+          headers: user.headers,
+          body: "{}",
+        }),
+        fakeQueueEnv(async (body) => {
+          queuedBodies.push(body);
+        }),
+        context,
+      );
+      await waitOnExecutionContext(context);
+    } finally {
+      await env.PG72_ID_DB.prepare(
+        "DROP TRIGGER test_account_delete_outbox_abort",
+      ).run();
+    }
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get("set-cookie") ?? "").not.toMatch(/Max-Age=0/i);
+    expect(queuedBodies).toEqual([]);
+    const state = await env.PG72_ID_DB.prepare(
+      `SELECT
+        (SELECT COUNT(*) FROM user WHERE id = ?) AS users,
+        (SELECT COUNT(*) FROM account WHERE userId = ?) AS accounts,
+        (SELECT COUNT(*) FROM session WHERE userId = ?) AS sessions,
+        (SELECT COUNT(*) FROM oauthAccessToken WHERE userId = ?) AS access_tokens,
+        (SELECT COUNT(*) FROM oauthRefreshToken
+          WHERE userId = ? AND revoked IS NULL) AS live_refresh_tokens,
+        (SELECT COUNT(*) FROM logout_delivery WHERE user_id = ?) AS deliveries,
+        (SELECT COUNT(*) FROM audit_event
+          WHERE event_type = 'account.deleted' AND subject_id = ?) AS audits`,
+    )
+      .bind(
+        user.userId,
+        user.userId,
+        user.userId,
+        user.userId,
+        user.userId,
+        user.userId,
+        user.userId,
+      )
+      .first<Record<string, number>>();
+    expect(state).toEqual({
+      users: 1,
+      accounts: 1,
+      sessions: 2,
+      access_tokens: 1,
+      live_refresh_tokens: 1,
+      deliveries: 0,
+      audits: 0,
+    });
+    expect(
+      await env.PG72_ID_DB.prepare(
+        "SELECT disabled, ownerUserId FROM oauthClient WHERE clientId = ?",
+      )
+        .bind(clientId)
+        .first(),
+    ).toEqual({ disabled: 0, ownerUserId: user.userId });
+    expect(otherSession.userId).toBe(user.userId);
+  });
+
+  it("treats a duplicate self-delete cookie as unauthorized without duplicating work", async () => {
+    const user = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+    );
+    const clientId = await seedClient(
+      `https://delete-duplicate-${crypto.randomUUID()}.example/logout`,
+    );
+    await seedIssuedTokens(user.userId, user.sessionId, clientId);
+    const queuedBodies: unknown[] = [];
+    const testEnv = fakeQueueEnv(async (body) => {
+      queuedBodies.push(body);
+    });
+
+    const firstContext = createExecutionContext();
+    const first = await app.fetch(
+      new Request("http://localhost:5173/delete-user", {
+        method: "POST",
+        headers: user.headers,
+        body: "{}",
+      }),
+      testEnv,
+      firstContext,
+    );
+    await waitOnExecutionContext(firstContext);
+    expect(first.status).toBe(200);
+
+    const secondContext = createExecutionContext();
+    const duplicate = await app.fetch(
+      new Request("http://localhost:5173/delete-user", {
+        method: "POST",
+        headers: user.headers,
+        body: "{}",
+      }),
+      testEnv,
+      secondContext,
+    );
+    await waitOnExecutionContext(secondContext);
+    expect(duplicate.status).toBe(401);
+    expect(duplicate.headers.get("set-cookie") ?? "").not.toMatch(/Max-Age=0/i);
+
+    const evidence = await env.PG72_ID_DB.prepare(
+      `SELECT
+        (SELECT COUNT(*) FROM logout_delivery WHERE user_id = ?) AS deliveries,
+        (SELECT COUNT(*) FROM audit_event
+          WHERE event_type = 'account.deleted' AND subject_id = ?) AS audits`,
+    )
+      .bind(user.userId, user.userId)
+      .first<{ audits: number; deliveries: number }>();
+    expect(evidence).toEqual({ audits: 1, deliveries: 1 });
+    const delivery = await env.PG72_ID_DB.prepare(
+      "SELECT delivery_key FROM logout_delivery WHERE user_id = ? LIMIT 1",
+    )
+      .bind(user.userId)
+      .first<{ delivery_key: string }>();
+    expect(delivery).not.toBeNull();
+    expect(
+      queuedBodies.filter(
+        (body) =>
+          typeof body === "object" &&
+          body !== null &&
+          "deliveryKey" in body &&
+          body.deliveryKey === delivery?.delivery_key,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("preserves Better Auth origin and fresh-session deletion guards", async () => {
+    const crossOrigin = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+    );
+    crossOrigin.headers.set("Origin", "https://attacker.example");
+    const blockedOrigin = await app.fetch(
+      new Request("http://localhost:5173/delete-user", {
+        method: "POST",
+        headers: crossOrigin.headers,
+        body: "{}",
+      }),
+      fakeQueueEnv(),
+      createExecutionContext(),
+    );
+    expect(blockedOrigin.status).toBe(403);
+
+    const stale = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+    );
+    await env.PG72_ID_DB.prepare(
+      "UPDATE session SET createdAt = ?, updatedAt = ? WHERE id = ?",
+    )
+      .bind(
+        new Date(0).toISOString(),
+        new Date(0).toISOString(),
+        stale.sessionId,
+      )
+      .run();
+    const staleResponse = await app.fetch(
+      new Request("http://localhost:5173/delete-user", {
+        method: "POST",
+        headers: stale.headers,
+        body: "{}",
+      }),
+      fakeQueueEnv(),
+      createExecutionContext(),
+    );
+    expect(staleResponse.status).toBe(400);
+
+    for (const userId of [crossOrigin.userId, stale.userId]) {
+      expect(
+        await env.PG72_ID_DB.prepare("SELECT id FROM user WHERE id = ?")
+          .bind(userId)
+          .first(),
+      ).not.toBeNull();
+      expect(
+        await env.PG72_ID_DB.prepare(
+          `SELECT COUNT(*) AS count FROM audit_event
+            WHERE event_type = 'account.deleted' AND subject_id = ?`,
+        )
+          .bind(userId)
+          .first<{ count: number }>(),
+      ).toEqual({ count: 0 });
+    }
+  });
+
   it("atomically snapshots logout work for suspend, restrict, and admin revoke", async () => {
     const admin = await createAuthenticatedUser(
       `${crypto.randomUUID()}@example.com`,
@@ -450,10 +851,10 @@ describe("durable global logout", () => {
     await seedIssuedTokens(user.userId, user.sessionId, clientId);
     const revoked = await revokeAll(fakeQueueEnv(), user);
     const row = await env.PG72_ID_DB.prepare(
-      "SELECT id FROM logout_delivery WHERE event_id = ? LIMIT 1",
+      "SELECT id, delivery_key FROM logout_delivery WHERE event_id = ? LIMIT 1",
     )
       .bind(revoked.event.eventId)
-      .first<{ id: number }>();
+      .first<{ delivery_key: string; id: number }>();
     if (!row) throw new Error("delivery was not created");
 
     let postedToken = "";
@@ -467,10 +868,10 @@ describe("durable global logout", () => {
     });
     vi.stubGlobal("fetch", outbound);
 
-    const first = fakeMessage(row.id);
+    const first = fakeMessage(row.delivery_key);
     await consumeLogoutDeliveryMessage(first.message, fakeQueueEnv());
     expect(first.state).toEqual({ acked: true, retries: [] });
-    const delivered = await deliveryRow(row.id);
+    const delivered = await deliveryRow(row.delivery_key);
     expect(delivered).toMatchObject({ attempts: 1, status: "delivered" });
     const payload = decodeJwtPayload(postedToken);
     expect(payload).toMatchObject({
@@ -485,15 +886,207 @@ describe("durable global logout", () => {
     expect(payload).not.toHaveProperty("nonce");
     expect((payload.exp as number) - (payload.iat as number)).toBe(120);
 
-    const duplicate = fakeMessage(row.id);
+    const duplicate = fakeMessage(row.delivery_key);
     await consumeLogoutDeliveryMessage(duplicate.message, fakeQueueEnv());
     expect(duplicate.state).toEqual({ acked: true, retries: [] });
     expect(outbound).toHaveBeenCalledTimes(1);
-    expect(await deliveryRow(row.id)).toMatchObject({
+    expect(await deliveryRow(row.delivery_key)).toMatchObject({
       attempts: 1,
       status: "delivered",
     });
   });
+
+  it("commits in-flight evidence before HTTP and allows only one concurrent claim", async () => {
+    const seeded = await seedPendingDelivery("concurrent-claim");
+    let releaseFetch!: () => void;
+    let markFetchStarted!: () => void;
+    const fetchGate = new Promise<void>((resolve) => {
+      releaseFetch = resolve;
+    });
+    const fetchStarted = new Promise<void>((resolve) => {
+      markFetchStarted = resolve;
+    });
+    const outbound = vi.fn(async () => {
+      expect(await deliveryRow(seeded.delivery.delivery_key)).toMatchObject({
+        attempts: 1,
+        status: "processing",
+      });
+      expect(await deliveryAttemptRows(seeded.delivery.id)).toEqual([
+        expect.objectContaining({
+          attempt_number: 1,
+          completed_at: null,
+          error_code: null,
+          http_status: null,
+          outcome: "in_flight",
+          resulting_status: "processing",
+        }),
+      ]);
+      markFetchStarted();
+      await fetchGate;
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", outbound);
+
+    const first = fakeMessage(seeded.delivery.delivery_key);
+    const firstConsume = consumeLogoutDeliveryMessage(
+      first.message,
+      fakeQueueEnv(),
+    );
+    await fetchStarted;
+
+    const concurrent = fakeMessage(seeded.delivery.delivery_key);
+    await consumeLogoutDeliveryMessage(concurrent.message, fakeQueueEnv());
+    expect(concurrent.state).toEqual({ acked: true, retries: [] });
+    expect(outbound).toHaveBeenCalledTimes(1);
+
+    releaseFetch();
+    await firstConsume;
+    expect(first.state).toEqual({ acked: true, retries: [] });
+    expect(await deliveryRow(seeded.delivery.delivery_key)).toMatchObject({
+      attempts: 1,
+      status: "delivered",
+    });
+    expect(await deliveryAttemptRows(seeded.delivery.id)).toEqual([
+      expect.objectContaining({
+        attempt_number: 1,
+        outcome: "delivered",
+        resulting_status: "delivered",
+        http_status: 204,
+        error_code: null,
+      }),
+    ]);
+  });
+
+  it("terminalizes five crashed attempts and reuses one jti after HTTP success", async () => {
+    const seeded = await seedPendingDelivery("attempt-crash");
+    const postedJtis: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request
+          ? input
+          : new Request(input, init);
+        const token = String((await request.formData()).get("logout_token") ?? "");
+        postedJtis.push(String(decodeJwtPayload(token).jti));
+        return new Response(null, { status: 204 });
+      }),
+    );
+    await env.PG72_ID_DB.prepare(
+      `CREATE TRIGGER test_logout_result_abort
+       BEFORE UPDATE ON logout_delivery_attempt
+       WHEN OLD.outcome = 'in_flight' AND NEW.outcome <> 'lease_expired'
+       BEGIN
+         SELECT RAISE(ABORT, 'synthetic result persistence failure');
+       END`,
+    ).run();
+
+    try {
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        const message = fakeMessage(seeded.delivery.delivery_key);
+        await consumeLogoutDeliveryMessage(message.message, fakeQueueEnv());
+        expect(message.state).toEqual({
+          acked: false,
+          retries: [{ delaySeconds: 30 }],
+        });
+        expect(await deliveryRow(seeded.delivery.delivery_key)).toMatchObject({
+          attempts: attempt,
+          status: "processing",
+        });
+        const attempts = await deliveryAttemptRows(seeded.delivery.id);
+        expect(attempts.at(-1)).toMatchObject({
+          attempt_number: attempt,
+          completed_at: null,
+          outcome: "in_flight",
+          resulting_status: "processing",
+        });
+        await env.PG72_ID_DB.prepare(
+          "UPDATE logout_delivery SET lease_expires_at = ? WHERE id = ?",
+        )
+          .bind(new Date(0).toISOString(), seeded.delivery.id)
+          .run();
+      }
+
+      const afterAttemptFive = fakeMessage(seeded.delivery.delivery_key);
+      await consumeLogoutDeliveryMessage(
+        afterAttemptFive.message,
+        fakeQueueEnv(),
+      );
+      expect(afterAttemptFive.state).toEqual({ acked: true, retries: [] });
+    } finally {
+      await env.PG72_ID_DB.prepare("DROP TRIGGER test_logout_result_abort").run();
+    }
+
+    expect(postedJtis).toHaveLength(5);
+    expect(new Set(postedJtis).size).toBe(1);
+    expect(await deliveryRow(seeded.delivery.delivery_key)).toMatchObject({
+      attempts: 5,
+      last_error_code: "lease_expired_after_max_attempts",
+      status: "dead",
+    });
+    const attempts = await deliveryAttemptRows(seeded.delivery.id);
+    expect(attempts).toHaveLength(5);
+    expect(
+      attempts.slice(0, 4).every(
+        (attempt) =>
+          attempt.outcome === "lease_expired" &&
+          attempt.resulting_status === "retry" &&
+          attempt.error_code === "lease_expired" &&
+          attempt.completed_at !== null,
+      ),
+    ).toBe(true);
+    expect(attempts[4]).toMatchObject({
+      attempt_number: 5,
+      error_code: "lease_expired",
+      http_status: null,
+      outcome: "lease_expired",
+      resulting_status: "dead",
+    });
+    expect(attempts[4]?.completed_at).not.toBeNull();
+  });
+
+  it.each([
+    { status: 200, deliveryStatus: "delivered", errorCode: null, retry: false },
+    { status: 204, deliveryStatus: "delivered", errorCode: null, retry: false },
+    { status: 201, deliveryStatus: "dead", errorCode: "http_non_success", retry: false },
+    { status: 300, deliveryStatus: "dead", errorCode: "http_non_success", retry: false },
+    { status: 400, deliveryStatus: "dead", errorCode: "http_non_success", retry: false },
+    { status: 408, deliveryStatus: "retry", errorCode: "http_retryable", retry: true },
+    { status: 425, deliveryStatus: "retry", errorCode: "http_retryable", retry: true },
+    { status: 429, deliveryStatus: "retry", errorCode: "http_429", retry: true },
+    { status: 499, deliveryStatus: "dead", errorCode: "http_non_success", retry: false },
+    { status: 500, deliveryStatus: "retry", errorCode: "http_5xx", retry: true },
+    { status: 599, deliveryStatus: "retry", errorCode: "http_5xx", retry: true },
+  ])(
+    "classifies logout HTTP $status as $deliveryStatus",
+    async ({ status, deliveryStatus, errorCode, retry }) => {
+      const seeded = await seedPendingDelivery(`http-${status}`);
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(null, { status })),
+      );
+      const message = fakeMessage(seeded.delivery.delivery_key);
+      await consumeLogoutDeliveryMessage(message.message, fakeQueueEnv());
+
+      expect(message.state.acked).toBe(!retry);
+      expect(message.state.retries).toEqual(
+        retry ? [{ delaySeconds: 10 }] : [],
+      );
+      expect(await deliveryRow(seeded.delivery.delivery_key)).toMatchObject({
+        attempts: 1,
+        last_error_code: errorCode,
+        status: deliveryStatus,
+      });
+      expect(await deliveryAttemptRows(seeded.delivery.id)).toEqual([
+        expect.objectContaining({
+          attempt_number: 1,
+          error_code: errorCode,
+          http_status: status,
+          outcome: deliveryStatus,
+          resulting_status: deliveryStatus,
+        }),
+      ]);
+    },
+  );
 
   it("retries timeout and 5xx outcomes with bounded backoff, then exposes dead evidence", async () => {
     const user = await createAuthenticatedUser(
@@ -505,10 +1098,10 @@ describe("durable global logout", () => {
     await seedIssuedTokens(user.userId, user.sessionId, clientId);
     const revoked = await revokeAll(fakeQueueEnv(), user);
     const delivery = await env.PG72_ID_DB.prepare(
-      "SELECT id FROM logout_delivery WHERE event_id = ? LIMIT 1",
+      "SELECT id, delivery_key FROM logout_delivery WHERE event_id = ? LIMIT 1",
     )
       .bind(revoked.event.eventId)
-      .first<{ id: number }>();
+      .first<{ delivery_key: string; id: number }>();
     if (!delivery) throw new Error("delivery was not created");
 
     vi.stubGlobal(
@@ -517,10 +1110,10 @@ describe("durable global logout", () => {
         throw new DOMException("timed out", "TimeoutError");
       }),
     );
-    const timedOut = fakeMessage(delivery.id);
+    const timedOut = fakeMessage(delivery.delivery_key);
     await consumeLogoutDeliveryMessage(timedOut.message, fakeQueueEnv());
     expect(timedOut.state.retries[0]?.delaySeconds).toBe(10);
-    expect(await deliveryRow(delivery.id)).toMatchObject({
+    expect(await deliveryRow(delivery.delivery_key)).toMatchObject({
       attempts: 1,
       last_error_code: "timeout",
       status: "retry",
@@ -533,7 +1126,7 @@ describe("durable global logout", () => {
       )
         .bind(new Date(0).toISOString(), delivery.id)
         .run();
-      const message = fakeMessage(delivery.id);
+      const message = fakeMessage(delivery.delivery_key);
       await consumeLogoutDeliveryMessage(message.message, fakeQueueEnv());
       if (attempt < 5) {
         expect(message.state.acked).toBe(false);
@@ -542,7 +1135,7 @@ describe("durable global logout", () => {
         expect(message.state).toEqual({ acked: true, retries: [] });
       }
     }
-    expect(await deliveryRow(delivery.id)).toMatchObject({
+    expect(await deliveryRow(delivery.delivery_key)).toMatchObject({
       attempts: 5,
       last_error_code: "http_5xx",
       status: "dead",
@@ -569,10 +1162,10 @@ describe("durable global logout", () => {
     await seedIssuedTokens(user.userId, user.sessionId, second);
     const revoked = await revokeAll(fakeQueueEnv(), user);
     const rows = await env.PG72_ID_DB.prepare(
-      "SELECT id FROM logout_delivery WHERE event_id = ? ORDER BY id",
+      "SELECT id, delivery_key FROM logout_delivery WHERE event_id = ? ORDER BY id",
     )
       .bind(revoked.event.eventId)
-      .all<{ id: number }>();
+      .all<{ delivery_key: string; id: number }>();
     expect(rows.results).toHaveLength(2);
     await env.PG72_ID_DB.prepare(
       `UPDATE logout_delivery
@@ -583,14 +1176,14 @@ describe("durable global logout", () => {
       .bind(revoked.event.eventId)
       .run();
 
-    const failedId = rows.results[1]?.id;
+    const failedKey = rows.results[1]?.delivery_key;
     const dispatched = await enqueueDueLogoutDeliveries(
       fakeQueueEnv(async (body) => {
         if (
           typeof body === "object" &&
           body !== null &&
-          "deliveryId" in body &&
-          body.deliveryId === failedId
+          "deliveryKey" in body &&
+          body.deliveryKey === failedKey
         ) {
           throw new Error("synthetic queue failure");
         }
@@ -598,11 +1191,13 @@ describe("durable global logout", () => {
     );
     expect(dispatched).toMatchObject({ attempted: 2, failed: 1, queued: 1 });
     for (const row of rows.results) {
-      expect(await deliveryRow(row.id)).toMatchObject({ status: "pending" });
+      expect(await deliveryRow(row.delivery_key)).toMatchObject({
+        status: "pending",
+      });
     }
 
-    const expiredId = rows.results[0]?.id;
-    if (!expiredId) throw new Error("expired delivery was missing");
+    const expired = rows.results[0];
+    if (!expired) throw new Error("expired delivery was missing");
     await env.PG72_ID_DB.prepare(
       `UPDATE logout_delivery
           SET status = 'processing', attempts = 1, jti = ?, lease_id = ?,
@@ -613,7 +1208,7 @@ describe("durable global logout", () => {
         crypto.randomUUID(),
         crypto.randomUUID(),
         new Date(0).toISOString(),
-        expiredId,
+        expired.id,
       )
       .run();
     const replayed: unknown[] = [];
@@ -621,11 +1216,11 @@ describe("durable global logout", () => {
       fakeQueueEnv(async (body) => {
         replayed.push(body);
       }),
-      { deliveryId: expiredId },
+      { deliveryKey: expired.delivery_key },
     );
     expect(replay).toEqual({ attempted: 1, failed: 0, queued: 1 });
     expect(replayed).toEqual([
-      { type: "logout_delivery", deliveryId: expiredId },
+      { type: "logout_delivery", deliveryKey: expired.delivery_key },
     ]);
   });
 
@@ -645,10 +1240,10 @@ describe("durable global logout", () => {
     const committed = concurrent.find((result) => result.committed);
     if (!committed) throw new Error("concurrent revoke did not commit");
     const delivery = await env.PG72_ID_DB.prepare(
-      "SELECT id FROM logout_delivery WHERE event_id = ? LIMIT 1",
+      "SELECT id, delivery_key FROM logout_delivery WHERE event_id = ? LIMIT 1",
     )
       .bind(committed.event.eventId)
-      .first<{ id: number }>();
+      .first<{ delivery_key: string; id: number }>();
     if (!delivery) throw new Error("delivery was not created");
     await env.PG72_ID_DB.prepare(
       `UPDATE logout_delivery
@@ -667,7 +1262,7 @@ describe("durable global logout", () => {
     const replayContext = createExecutionContext();
     const response = await app.fetch(
       new Request(
-        `http://localhost:5173/api/admin/logout-deliveries/${delivery.id}/replay`,
+        `http://localhost:5173/api/admin/logout-deliveries/${delivery.delivery_key}/replay`,
         { method: "POST", headers: admin.headers },
       ),
       fakeQueueEnv(),
@@ -676,12 +1271,12 @@ describe("durable global logout", () => {
     await waitOnExecutionContext(replayContext);
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
-      deliveryId: delivery.id,
+      deliveryKey: delivery.delivery_key,
       queued: true,
       replayCount: 1,
       status: "pending",
     });
-    expect(await deliveryRow(delivery.id)).toMatchObject({
+    expect(await deliveryRow(delivery.delivery_key)).toMatchObject({
       attempts: 0,
       last_error_code: null,
       replay_count: 1,
@@ -703,7 +1298,7 @@ describe("durable global logout", () => {
       deliveries: Array<Record<string, unknown>>;
     };
     const listedDelivery = listed.deliveries.find(
-      (item) => item.id === delivery.id,
+      (item) => item.deliveryKey === delivery.delivery_key,
     );
     expect(listedDelivery).toMatchObject({
       clientId,

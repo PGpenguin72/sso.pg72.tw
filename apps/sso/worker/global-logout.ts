@@ -22,7 +22,7 @@ export type LogoutReason =
 
 export interface LogoutDeliveryQueueMessage {
   type: "logout_delivery";
-  deliveryId: number;
+  deliveryKey: string;
 }
 
 export interface LogoutDispatchResult {
@@ -140,13 +140,21 @@ function logoutOutboxStatement(
   now: string,
 ): D1PreparedStatement {
   const selected = selectorSql(selector, "central_session");
+  const deliveryKeyPrefix = crypto.randomUUID();
   return env.PG72_ID_DB.prepare(
     `INSERT INTO logout_delivery (
-       event_id, session_id, user_id, client_id, backchannel_logout_uri,
+       delivery_key, event_id, session_id, user_id, client_id,
+       backchannel_logout_uri,
        reason, status, attempts, replay_count, next_attempt_at,
        last_error_code, created_at, updated_at
      )
-     SELECT ?, visit.session_id, central_session.userId, visit.client_id,
+     SELECT ? || '-' || printf(
+              '%08x',
+              row_number() OVER (
+                ORDER BY visit.session_id ASC, visit.client_id ASC
+              )
+            ),
+            ?, visit.session_id, central_session.userId, visit.client_id,
             client.backchannelLogoutUri, ?,
             CASE
               WHEN client.backchannelLogoutUri IS NULL THEN 'dead'
@@ -172,6 +180,7 @@ function logoutOutboxStatement(
         AND EXISTS (SELECT 1 FROM audit_event WHERE id = ?)
      ON CONFLICT (event_id, session_id, client_id) DO NOTHING`,
   ).bind(
+    deliveryKeyPrefix,
     eventId,
     reason,
     now,
@@ -302,25 +311,13 @@ export async function revokeCentralSessions(
 
 export async function enqueueDueLogoutDeliveries(
   env: Env,
-  options: { deliveryId?: number; limit?: number } = {},
+  options: { deliveryKey?: string; limit?: number } = {},
 ): Promise<LogoutDispatchResult> {
   const now = new Date().toISOString();
   const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
-  await env.PG72_ID_DB.prepare(
-    `UPDATE logout_delivery
-        SET status = 'dead',
-            lease_expires_at = NULL,
-            last_error_code = 'lease_expired_after_max_attempts',
-            updated_at = ?
-      WHERE status = 'processing'
-        AND attempts >= ?
-        AND lease_expires_at <= ?`,
-  )
-    .bind(now, LOGOUT_DELIVERY_MAX_ATTEMPTS, now)
-    .run();
-  const due = options.deliveryId === undefined
+  const due = options.deliveryKey === undefined
     ? await env.PG72_ID_DB.prepare(
-        `SELECT id
+        `SELECT delivery_key
            FROM logout_delivery
           WHERE (
               status IN ('pending', 'retry')
@@ -332,23 +329,23 @@ export async function enqueueDueLogoutDeliveries(
             )
           ORDER BY created_at ASC, id ASC
           LIMIT ?`,
-      ).bind(now, now, limit).all<{ id: number }>()
+      ).bind(now, now, limit).all<{ delivery_key: string }>()
     : await env.PG72_ID_DB.prepare(
-        `SELECT id
+        `SELECT delivery_key
            FROM logout_delivery
-          WHERE id = ?
+          WHERE delivery_key = ?
             AND (
               (status IN ('pending', 'retry') AND next_attempt_at <= ?)
               OR (status = 'processing' AND lease_expires_at <= ?)
             )
           LIMIT 1`,
-      ).bind(options.deliveryId, now, now).all<{ id: number }>();
+      ).bind(options.deliveryKey, now, now).all<{ delivery_key: string }>();
 
   const sends = await Promise.allSettled(
     due.results.map((row) =>
       env.LOGOUT_DELIVERIES.send({
         type: "logout_delivery",
-        deliveryId: row.id,
+        deliveryKey: row.delivery_key,
       } satisfies LogoutDeliveryQueueMessage),
     ),
   );
@@ -359,7 +356,7 @@ export async function enqueueDueLogoutDeliveries(
     console.error(
       JSON.stringify({
         event: "logout_delivery_enqueue_failed",
-        deliveryId: due.results[index]?.id,
+        deliveryKey: due.results[index]?.delivery_key,
         error:
           result.reason instanceof Error ? result.reason.name : "UnknownError",
       }),
@@ -402,8 +399,9 @@ export function isLogoutDeliveryQueueMessage(
   const candidate = value as Partial<LogoutDeliveryQueueMessage>;
   return (
     candidate.type === "logout_delivery" &&
-    typeof candidate.deliveryId === "number" &&
-    Number.isSafeInteger(candidate.deliveryId) &&
-    candidate.deliveryId > 0
+    typeof candidate.deliveryKey === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}-[0-9a-f]{8}$/.test(
+      candidate.deliveryKey,
+    )
   );
 }

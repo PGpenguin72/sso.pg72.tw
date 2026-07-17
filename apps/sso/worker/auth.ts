@@ -4,13 +4,18 @@ import { jwt } from "better-auth/plugins";
 import { oauthProvider } from "@better-auth/oauth-provider";
 import { passkey } from "@better-auth/passkey";
 
-import { recordAudit, type WaitUntilContext } from "./audit";
+import {
+  enqueueSecurityEvent,
+  recordAudit,
+  type SecurityEvent,
+  type WaitUntilContext,
+} from "./audit";
 import {
   accountAccessLevel,
   providerAccountInsertAllowed,
   recordRestrictedActionDenied,
 } from "./account-access";
-import { ownedClientShutdownStatements } from "./client-ownership";
+import { deleteOwnAccountAtomically } from "./account-deletion";
 import {
   CLIENT_SECRET_PREFIX,
   MAIL_INTROSPECTION_CLIENT_ID,
@@ -19,7 +24,10 @@ import {
   normalizeEmail,
   readRuntimeConfig,
 } from "./config";
-import { revokeCentralSessions } from "./global-logout";
+import {
+  revokeCentralSessions,
+  scheduleLogoutDeliveryDispatch,
+} from "./global-logout";
 import {
   assertSessionUserActive,
   authorizeRegistration,
@@ -42,6 +50,7 @@ export function createAuth(
   database: AuthDatabase = env.PG72_ID_DB,
 ) {
   const config = readRuntimeConfig(env);
+  let committedAccountDeletion: SecurityEvent | null = null;
 
   return betterAuth({
     appName: "PGID",
@@ -148,7 +157,7 @@ export function createAuth(
       },
       deleteUser: {
         enabled: true,
-        beforeDelete: async (user) => {
+        beforeDelete: async (user, request) => {
           if (normalizeEmail(user.email) === config.bootstrapAdminEmail) {
             await recordAudit(
               env,
@@ -164,31 +173,39 @@ export function createAuth(
               message: "The bootstrap administrator account cannot be deleted.",
             });
           }
-          // OAuth clients owned by the account are preserved but disabled
-          // and orphaned before the owner row (and its cascade) goes away.
-          await env.PG72_ID_DB.batch(
-            ownedClientShutdownStatements(env, user.id, new Date().toISOString()),
-          );
+          if (!request) {
+            throw new APIError("INTERNAL_SERVER_ERROR", {
+              code: "ACCOUNT_DELETE_REQUEST_REQUIRED",
+              message: "Account deletion requires a verified request context.",
+            });
+          }
+          const deleted = await deleteOwnAccountAtomically(env, {
+            request,
+            userId: user.id,
+          });
+          if (!deleted.committed) {
+            throw new APIError("INTERNAL_SERVER_ERROR", {
+              code: "ACCOUNT_DELETE_STATE_CHANGED",
+              message: "Account deletion state changed before commit.",
+            });
+          }
+          committedAccountDeletion = deleted.event;
         },
-        afterDelete: async (user) => {
+        afterDelete: async () => {
+          const event = committedAccountDeletion;
+          committedAccountDeletion = null;
+          if (!event) return;
           try {
-            await recordAudit(
-              env,
-              {
-                eventType: "account.deleted",
-                outcome: "success",
-                subjectId: user.id,
-              },
-              executionCtx,
-            );
+            await enqueueSecurityEvent(env, event, executionCtx);
           } catch (error) {
             console.error(
               JSON.stringify({
-                event: "account_delete_audit_failed",
+                event: "account_delete_security_fanout_failed",
                 error: error instanceof Error ? error.name : "UnknownError",
               }),
             );
           }
+          await scheduleLogoutDeliveryDispatch(env, executionCtx);
         },
       },
     },

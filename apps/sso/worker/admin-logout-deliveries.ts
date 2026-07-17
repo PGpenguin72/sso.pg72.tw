@@ -10,7 +10,8 @@ import { enqueueDueLogoutDeliveries } from "./global-logout";
 
 type AppEnv = { Bindings: Env };
 
-const DELIVERY_ID_PATTERN = /^[1-9][0-9]{0,15}$/;
+const DELIVERY_KEY_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}-[0-9a-f]{8}$/;
 const DELIVERY_STATUSES = new Set([
   "dead",
   "delivered",
@@ -23,7 +24,7 @@ interface DeliveryRow {
   attempts: number;
   client_id: string;
   created_at: string;
-  id: number;
+  delivery_key: string;
   last_error_code: string | null;
   reason: string;
   replay_count: number;
@@ -35,7 +36,7 @@ interface ReplayRow {
   backchannel_logout_uri: string | null;
   client_id: string;
   current_backchannel_logout_uri: string | null;
-  id: number;
+  delivery_key: string;
   replay_count: number;
   status: string;
 }
@@ -43,7 +44,7 @@ interface ReplayRow {
 function replayAuditStatement(
   env: Env,
   event: SecurityEvent,
-  deliveryId: number,
+  deliveryKey: string,
   replayCount: number,
   updatedAt: string,
 ): D1PreparedStatement {
@@ -55,7 +56,7 @@ function replayAuditStatement(
       WHERE EXISTS (
         SELECT 1
           FROM logout_delivery
-         WHERE id = ?
+         WHERE delivery_key = ?
            AND status = 'pending'
            AND replay_count = ?
            AND updated_at = ?
@@ -69,7 +70,7 @@ function replayAuditStatement(
     event.outcome,
     event.metadata ? JSON.stringify(event.metadata) : null,
     event.occurredAt,
-    deliveryId,
+    deliveryKey,
     replayCount,
     updatedAt,
   );
@@ -92,7 +93,7 @@ adminLogoutDeliveryRoutes.get("/", async (c) => {
   }
 
   const result = await c.env.PG72_ID_DB.prepare(
-    `SELECT id, client_id, reason, status, attempts, replay_count,
+    `SELECT delivery_key, client_id, reason, status, attempts, replay_count,
             last_error_code, created_at, updated_at
        FROM logout_delivery
       WHERE status = ?
@@ -104,7 +105,7 @@ adminLogoutDeliveryRoutes.get("/", async (c) => {
 
   return c.json({
     deliveries: result.results.map((row) => ({
-      id: row.id,
+      deliveryKey: row.delivery_key,
       clientId: row.client_id,
       reason: row.reason,
       status: row.status,
@@ -118,34 +119,30 @@ adminLogoutDeliveryRoutes.get("/", async (c) => {
   });
 });
 
-adminLogoutDeliveryRoutes.post("/:deliveryId/replay", async (c) => {
+adminLogoutDeliveryRoutes.post("/:deliveryKey/replay", async (c) => {
   const gate = await requireAdminPermission(c, "users.manage", {
     fresh: true,
     passkeyStepUp: true,
   });
   if (!gate.ok) return gate.response;
 
-  const deliveryIdRaw = c.req.param("deliveryId");
-  if (!DELIVERY_ID_PATTERN.test(deliveryIdRaw)) {
-    return c.json({ error: "invalid_delivery_id" }, 400);
-  }
-  const deliveryId = Number(deliveryIdRaw);
-  if (!Number.isSafeInteger(deliveryId)) {
-    return c.json({ error: "invalid_delivery_id" }, 400);
+  const deliveryKey = c.req.param("deliveryKey");
+  if (!DELIVERY_KEY_PATTERN.test(deliveryKey)) {
+    return c.json({ error: "invalid_delivery_key" }, 400);
   }
 
   const row = await c.env.PG72_ID_DB.prepare(
-    `SELECT delivery.id, delivery.client_id,
+    `SELECT delivery.delivery_key, delivery.client_id,
             delivery.backchannel_logout_uri, delivery.status,
             delivery.replay_count,
             client.backchannelLogoutUri AS current_backchannel_logout_uri
        FROM logout_delivery AS delivery
        LEFT JOIN oauthClient AS client
          ON client.clientId = delivery.client_id
-      WHERE delivery.id = ?
+      WHERE delivery.delivery_key = ?
       LIMIT 1`,
   )
-    .bind(deliveryId)
+    .bind(deliveryKey)
     .first<ReplayRow>();
   if (!row) return c.json({ error: "delivery_not_found" }, 404);
   if (row.status !== "dead" && row.status !== "retry") {
@@ -164,7 +161,7 @@ adminLogoutDeliveryRoutes.post("/:deliveryId/replay", async (c) => {
     outcome: "success",
     actorUserId: gate.actor.userId,
     clientId: row.client_id,
-    metadata: { deliveryId, replayCount },
+    metadata: { deliveryKey, replayCount },
   });
   const results = await c.env.PG72_ID_DB.batch([
     c.env.PG72_ID_DB.prepare(
@@ -179,7 +176,7 @@ adminLogoutDeliveryRoutes.post("/:deliveryId/replay", async (c) => {
               delivered_at = NULL,
               last_error_code = NULL,
               updated_at = ?
-        WHERE id = ?
+        WHERE delivery_key = ?
           AND status IN ('dead', 'retry')
           AND replay_count = ?`,
     ).bind(
@@ -187,20 +184,20 @@ adminLogoutDeliveryRoutes.post("/:deliveryId/replay", async (c) => {
       replayCount,
       now,
       now,
-      deliveryId,
+      deliveryKey,
       row.replay_count,
     ),
-    replayAuditStatement(c.env, event, deliveryId, replayCount, now),
+    replayAuditStatement(c.env, event, deliveryKey, replayCount, now),
   ]);
   if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
     return c.json({ error: "delivery_state_changed" }, 409);
   }
 
   await enqueueSecurityEvent(c.env, event, c.executionCtx);
-  const dispatch = await enqueueDueLogoutDeliveries(c.env, { deliveryId });
+  const dispatch = await enqueueDueLogoutDeliveries(c.env, { deliveryKey });
   return c.json(
     {
-      deliveryId,
+      deliveryKey,
       replayCount,
       queued: dispatch.queued === 1,
       status: "pending",

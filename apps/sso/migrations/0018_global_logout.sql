@@ -59,6 +59,8 @@ CREATE INDEX "rp_session_client_client_idx"
 
 CREATE TABLE "logout_delivery" (
   "id" integer PRIMARY KEY AUTOINCREMENT,
+  "delivery_key" text NOT NULL UNIQUE
+    CHECK (length("delivery_key") = 45),
   "event_id" text NOT NULL
     REFERENCES "audit_event" ("id") ON DELETE RESTRICT,
   "session_id" text NOT NULL,
@@ -132,17 +134,60 @@ CREATE TABLE "logout_delivery_attempt" (
     REFERENCES "logout_delivery" ("id") ON DELETE CASCADE,
   "replay_count" integer NOT NULL CHECK ("replay_count" >= 0),
   "attempt_number" integer NOT NULL CHECK ("attempt_number" BETWEEN 1 AND 5),
+  "lease_id" text NOT NULL UNIQUE,
   "outcome" text NOT NULL CHECK (
-    "outcome" IN ('delivered', 'retry', 'dead')
+    "outcome" IN (
+      'in_flight', 'delivered', 'retry', 'dead', 'lease_expired'
+    )
+  ),
+  "resulting_status" text NOT NULL CHECK (
+    "resulting_status" IN ('processing', 'delivered', 'retry', 'dead')
   ),
   "http_status" integer CHECK ("http_status" BETWEEN 100 AND 599),
   "error_code" text,
-  "attempted_at" date NOT NULL,
+  "started_at" date NOT NULL,
+  "completed_at" date,
+  CHECK (
+    (
+      "outcome" = 'in_flight'
+      AND "resulting_status" = 'processing'
+      AND "http_status" IS NULL
+      AND "error_code" IS NULL
+      AND "completed_at" IS NULL
+    )
+    OR (
+      "outcome" <> 'in_flight'
+      AND "resulting_status" IN ('delivered', 'retry', 'dead')
+      AND "completed_at" IS NOT NULL
+    )
+  ),
+  CHECK (
+    "outcome" <> 'delivered'
+    OR (
+      "resulting_status" = 'delivered'
+      AND "http_status" IN (200, 204)
+      AND "error_code" IS NULL
+    )
+  ),
+  CHECK (
+    "outcome" <> 'retry' OR "resulting_status" = 'retry'
+  ),
+  CHECK (
+    "outcome" <> 'dead' OR "resulting_status" = 'dead'
+  ),
+  CHECK (
+    "outcome" <> 'lease_expired'
+    OR (
+      "resulting_status" IN ('retry', 'dead')
+      AND "http_status" IS NULL
+      AND "error_code" = 'lease_expired'
+    )
+  ),
   UNIQUE ("delivery_id", "replay_count", "attempt_number")
 );
 
 CREATE INDEX "logout_delivery_attempt_time_idx"
-  ON "logout_delivery_attempt" ("attempted_at" DESC);
+  ON "logout_delivery_attempt" ("started_at" DESC);
 
 -- Any user-bound access token is proof that this exact RP completed a token
 -- flow for this exact live session. The trigger and token insert commit in the

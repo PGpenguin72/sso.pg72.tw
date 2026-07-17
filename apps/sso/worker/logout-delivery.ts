@@ -12,6 +12,7 @@ interface ClaimedLogoutDelivery {
   attempts: number;
   backchannel_logout_uri: string;
   client_id: string;
+  delivery_key: string;
   id: number;
   jti: string;
   lease_id: string;
@@ -37,67 +38,182 @@ function addSeconds(iso: string, seconds: number): string {
   return new Date(new Date(iso).getTime() + seconds * 1000).toISOString();
 }
 
-async function claimLogoutDelivery(
+async function recoverExpiredLogoutDelivery(
   env: Env,
-  deliveryId: number,
-): Promise<ClaimedLogoutDelivery | null> {
+  deliveryKey: string,
+): Promise<void> {
   const now = new Date().toISOString();
-  const exhaustedLease = await env.PG72_ID_DB.prepare(
-    `UPDATE logout_delivery
-        SET status = 'dead',
-            lease_expires_at = NULL,
-            last_error_code = 'lease_expired_after_max_attempts',
-            updated_at = ?
+  const expired = await env.PG72_ID_DB.prepare(
+    `SELECT id, attempts, replay_count, lease_id
+       FROM logout_delivery
+      WHERE delivery_key = ?
+        AND status = 'processing'
+        AND lease_expires_at <= ?
+      LIMIT 1`,
+  )
+    .bind(deliveryKey, now)
+    .first<{
+      attempts: number;
+      id: number;
+      lease_id: string;
+      replay_count: number;
+    }>();
+  if (!expired) return;
+
+  const resultingStatus = expired.attempts >= LOGOUT_DELIVERY_MAX_ATTEMPTS
+    ? "dead"
+    : "retry";
+  const results = await env.PG72_ID_DB.batch([
+    env.PG72_ID_DB.prepare(
+      `UPDATE logout_delivery_attempt
+          SET outcome = 'lease_expired',
+              resulting_status = ?,
+              error_code = 'lease_expired',
+              completed_at = ?
+        WHERE delivery_id = ?
+          AND replay_count = ?
+          AND attempt_number = ?
+          AND lease_id = ?
+          AND outcome = 'in_flight'`,
+    ).bind(
+      resultingStatus,
+      now,
+      expired.id,
+      expired.replay_count,
+      expired.attempts,
+      expired.lease_id,
+    ),
+    env.PG72_ID_DB.prepare(
+      `UPDATE logout_delivery
+          SET status = ?,
+              next_attempt_at = ?,
+              lease_id = NULL,
+              lease_expires_at = NULL,
+              last_error_code = ?,
+              updated_at = ?
+        WHERE id = ?
+          AND delivery_key = ?
+          AND status = 'processing'
+          AND attempts = ?
+          AND replay_count = ?
+          AND lease_id = ?
+          AND lease_expires_at <= ?
+          AND EXISTS (
+            SELECT 1
+              FROM logout_delivery_attempt
+             WHERE delivery_id = ?
+               AND replay_count = ?
+               AND attempt_number = ?
+               AND lease_id = ?
+               AND outcome = 'lease_expired'
+               AND resulting_status = ?
+               AND completed_at = ?
+          )`,
+    ).bind(
+      resultingStatus,
+      resultingStatus === "retry" ? now : null,
+      resultingStatus === "retry"
+        ? "lease_expired"
+        : "lease_expired_after_max_attempts",
+      now,
+      expired.id,
+      deliveryKey,
+      expired.attempts,
+      expired.replay_count,
+      expired.lease_id,
+      now,
+      expired.id,
+      expired.replay_count,
+      expired.attempts,
+      expired.lease_id,
+      resultingStatus,
+      now,
+    ),
+  ]);
+  if (results[0]?.meta.changes === 1 && results[1]?.meta.changes === 1) {
+    return;
+  }
+
+  const stillExpired = await env.PG72_ID_DB.prepare(
+    `SELECT 1
+       FROM logout_delivery
       WHERE id = ?
         AND status = 'processing'
-        AND attempts >= ?
-        AND lease_expires_at <= ?`,
+        AND lease_id = ?
+        AND lease_expires_at <= ?
+      LIMIT 1`,
   )
-    .bind(now, deliveryId, LOGOUT_DELIVERY_MAX_ATTEMPTS, now)
-    .run();
-  if (exhaustedLease.meta.changes === 1) return null;
+    .bind(expired.id, expired.lease_id, now)
+    .first();
+  if (stillExpired) {
+    throw new Error("expired logout delivery attempt evidence was inconsistent");
+  }
+}
+
+async function claimLogoutDelivery(
+  env: Env,
+  deliveryKey: string,
+): Promise<ClaimedLogoutDelivery | null> {
+  await recoverExpiredLogoutDelivery(env, deliveryKey);
+
+  const now = new Date().toISOString();
 
   const leaseId = crypto.randomUUID();
   const jti = crypto.randomUUID();
+  const attemptId = crypto.randomUUID();
   const leaseExpiresAt = addSeconds(now, LOGOUT_DELIVERY_LEASE_SECONDS);
-  const claimed = await env.PG72_ID_DB.prepare(
-    `UPDATE logout_delivery
-        SET status = 'processing',
-            attempts = attempts + 1,
-            jti = COALESCE(jti, ?),
-            next_attempt_at = NULL,
-            lease_id = ?,
-            lease_expires_at = ?,
-            updated_at = ?
-      WHERE id = ?
-        AND attempts < ?
-        AND backchannel_logout_uri IS NOT NULL
-        AND (
-          (status IN ('pending', 'retry') AND next_attempt_at <= ?)
-          OR (status = 'processing' AND lease_expires_at <= ?)
-        )`,
-  )
-    .bind(
+  const claimed = await env.PG72_ID_DB.batch([
+    env.PG72_ID_DB.prepare(
+      `UPDATE logout_delivery
+          SET status = 'processing',
+              attempts = attempts + 1,
+              jti = COALESCE(jti, ?),
+              next_attempt_at = NULL,
+              lease_id = ?,
+              lease_expires_at = ?,
+              updated_at = ?
+        WHERE delivery_key = ?
+          AND attempts < ?
+          AND backchannel_logout_uri IS NOT NULL
+          AND status IN ('pending', 'retry')
+          AND next_attempt_at <= ?`,
+    ).bind(
       jti,
       leaseId,
       leaseExpiresAt,
       now,
-      deliveryId,
+      deliveryKey,
       LOGOUT_DELIVERY_MAX_ATTEMPTS,
       now,
-      now,
-    )
-    .run();
-  if (claimed.meta.changes !== 1) return null;
+    ),
+    env.PG72_ID_DB.prepare(
+      `INSERT INTO logout_delivery_attempt
+        (id, delivery_id, replay_count, attempt_number, lease_id, outcome,
+         resulting_status, http_status, error_code, started_at, completed_at)
+       SELECT ?, id, replay_count, attempts, ?, 'in_flight', 'processing',
+              NULL, NULL, ?, NULL
+         FROM logout_delivery
+        WHERE delivery_key = ?
+          AND status = 'processing'
+          AND lease_id = ?
+          AND updated_at = ?`,
+    ).bind(attemptId, leaseId, now, deliveryKey, leaseId, now),
+  ]);
+  if (
+    claimed[0]?.meta.changes !== 1 ||
+    claimed[1]?.meta.changes !== 1
+  ) {
+    return null;
+  }
 
   return env.PG72_ID_DB.prepare(
-    `SELECT id, session_id, client_id, backchannel_logout_uri, attempts,
-            replay_count, jti, lease_id
+    `SELECT id, delivery_key, session_id, client_id,
+            backchannel_logout_uri, attempts, replay_count, jti, lease_id
        FROM logout_delivery
-      WHERE id = ? AND status = 'processing' AND lease_id = ?
+      WHERE delivery_key = ? AND status = 'processing' AND lease_id = ?
       LIMIT 1`,
   )
-    .bind(deliveryId, leaseId)
+    .bind(deliveryKey, leaseId)
     .first<ClaimedLogoutDelivery>();
 }
 
@@ -209,12 +325,48 @@ async function persistAttemptResult(
     ? null
     : addSeconds(now, delaySeconds);
   const outcome = status === "delivered" ? "delivered" : status;
-  const attemptId = crypto.randomUUID();
   const results = await env.PG72_ID_DB.batch([
+    env.PG72_ID_DB.prepare(
+      `UPDATE logout_delivery_attempt
+          SET outcome = ?,
+              resulting_status = ?,
+              http_status = ?,
+              error_code = ?,
+              completed_at = ?
+        WHERE delivery_id = ?
+          AND replay_count = ?
+          AND attempt_number = ?
+          AND lease_id = ?
+          AND outcome = 'in_flight'
+          AND EXISTS (
+            SELECT 1
+              FROM logout_delivery
+             WHERE id = ?
+               AND status = 'processing'
+               AND lease_id = ?
+               AND attempts = ?
+               AND replay_count = ?
+          )`,
+    ).bind(
+      outcome,
+      status,
+      result.httpStatus,
+      result.errorCode,
+      now,
+      delivery.id,
+      delivery.replay_count,
+      delivery.attempts,
+      delivery.lease_id,
+      delivery.id,
+      delivery.lease_id,
+      delivery.attempts,
+      delivery.replay_count,
+    ),
     env.PG72_ID_DB.prepare(
       `UPDATE logout_delivery
           SET status = ?,
               next_attempt_at = ?,
+              lease_id = NULL,
               lease_expires_at = NULL,
               delivered_at = ?,
               last_error_code = ?,
@@ -223,7 +375,18 @@ async function persistAttemptResult(
           AND status = 'processing'
           AND lease_id = ?
           AND attempts = ?
-          AND replay_count = ?`,
+          AND replay_count = ?
+          AND EXISTS (
+            SELECT 1
+              FROM logout_delivery_attempt
+             WHERE delivery_id = ?
+               AND replay_count = ?
+               AND attempt_number = ?
+               AND lease_id = ?
+               AND outcome = ?
+               AND resulting_status = ?
+               AND completed_at = ?
+          )`,
     ).bind(
       status,
       nextAttemptAt,
@@ -234,36 +397,12 @@ async function persistAttemptResult(
       delivery.lease_id,
       delivery.attempts,
       delivery.replay_count,
-    ),
-    env.PG72_ID_DB.prepare(
-      `INSERT INTO logout_delivery_attempt
-        (id, delivery_id, replay_count, attempt_number, outcome,
-         http_status, error_code, attempted_at)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?
-        WHERE EXISTS (
-          SELECT 1
-            FROM logout_delivery
-           WHERE id = ?
-             AND status = ?
-             AND lease_id = ?
-             AND attempts = ?
-             AND replay_count = ?
-             AND updated_at = ?
-        )`,
-    ).bind(
-      attemptId,
       delivery.id,
       delivery.replay_count,
       delivery.attempts,
-      outcome,
-      result.httpStatus,
-      result.errorCode,
-      now,
-      delivery.id,
-      status,
       delivery.lease_id,
-      delivery.attempts,
-      delivery.replay_count,
+      outcome,
+      status,
       now,
     ),
   ]);
@@ -279,12 +418,12 @@ export async function consumeLogoutDeliveryMessage(
 ): Promise<void> {
   let delivery: ClaimedLogoutDelivery | null;
   try {
-    delivery = await claimLogoutDelivery(env, message.body.deliveryId);
+    delivery = await claimLogoutDelivery(env, message.body.deliveryKey);
   } catch (error) {
     console.error(
       JSON.stringify({
         event: "logout_delivery_claim_failed",
-        deliveryId: message.body.deliveryId,
+        deliveryKey: message.body.deliveryKey,
         error: error instanceof Error ? error.name : "UnknownError",
       }),
     );
@@ -325,7 +464,7 @@ export async function consumeLogoutDeliveryMessage(
     console.error(
       JSON.stringify({
         event: "logout_delivery_result_failed",
-        deliveryId: delivery.id,
+        deliveryKey: delivery.delivery_key,
         error: error instanceof Error ? error.name : "UnknownError",
       }),
     );

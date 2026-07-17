@@ -25,8 +25,8 @@ pnpm dast:local
 | Gate | Command / evidence |
 | --- | --- |
 | Worker static analysis | Oxlint type-aware `no-floating-promises` and `no-misused-promises` over both Worker implementations |
-| Secret scan | required checksum-pinned Gitleaks over complete Git history; explicit bounded/redacted tracked, ordinary-untracked, and ignored-sensitive-filename traversal; normalized assignment keys with exact audited raw-path/key/value allowances; captured Secretlint output |
-| Workflow/config | actionlint, immutable Action SHAs, least permissions, exact workflow command order and code-owned workflow/job/step environment scopes, recursively exact package scripts/local-script allowlist, and exact source/generated Wrangler binding targets |
+| Secret scan | required checksum-pinned Gitleaks over complete Git history; explicit bounded/redacted tracked, ordinary-untracked, and ignored-sensitive-filename traversal; TypeScript compiler AST plus bounded line/binary decoding with exact audited allowances; captured Secretlint output |
+| Workflow/config | actionlint, immutable Action SHAs, least permissions, code-owned exact workflow/job/step run maps and package-script name/value graph, exact environment scopes, fixed artifact upload, and exact source/generated Wrangler binding targets |
 | Dependency policy | live `pnpm audit --json` reconciled field-for-field with `security/accepted-advisories.json` |
 | Production artifact | `wrangler deploy --dry-run --outdir` modules plus Static Assets scanned against `security/release-policy.json`, including bounded text/binary secret families |
 | Inventory | path-free package/version/license inventory generated from the frozen pnpm install |
@@ -36,8 +36,9 @@ CI first runs `pnpm check`, installs actionlint and Gitleaks from the exact
 versions and SHA-256 checksums in `security/tool-versions.json`, then runs the
 security and local DAST gates. Every third-party Action is pinned to the
 immutable commit recorded in the same file. The checked-in upload step selects
-only `.artifacts/release/` with seven-day retention; the dry-run bundle and
-temporary D1 state are outside that selected path.
+only `.artifacts/release`, errors when it is absent, excludes hidden files, and
+uses seven-day retention; the dry-run bundle and temporary D1 state are outside
+that selected path.
 
 The npm tools are exact-pinned in `package.json` and the lockfile. Type-aware
 analysis uses `oxlint-tsgolint@0.24.0`, the newest release old enough to satisfy
@@ -57,30 +58,35 @@ artifact upload allowlist.
 
 `security/workflow-policy.json` default-denies environment keys at workflow,
 job, and step scope. Policy may select only the code-owned `DAST_*` expressions
-and exact `CI=1`/`NO_COLOR=1` values; policy cannot invent another key, value, or
-expression context. All `CLOUDFLARE_*`, legacy `CF_*`, and `WRANGLER_*` keys are
-code-owned hard denials, including inherited scopes, inline shell assignments,
-and policy/workflow co-mutations. Preview DAST therefore accepts its three
-non-credential `DAST_*` variables, not a Cloudflare API credential. Execution
-preload, package-manager configuration, `PATH`, credential contexts, and writes
-to `GITHUB_ENV`/`GITHUB_PATH` are independently rejected by both the document
-and reachable-command validators.
+and exact `CI=1`/`NO_COLOR=1` values; it cannot add workflow commands, leaf
+commands, local scripts, or package-script approvals. Every workflow job/step
+run string and every recursively reachable package-script name and complete
+value is fixed in code. CRLF is normalized, but quote composition, inline env,
+network tools, redirects, extra commands, environment-file writes, and control
+characters cannot equal that map and fail closed. All `CLOUDFLARE_*`, legacy
+`CF_*`, and `WRANGLER_*` keys are code-owned hard denials. Preview DAST therefore
+accepts its three non-credential `DAST_*` variables, not a Cloudflare API
+credential.
 
 The explicit working-tree scanner obtains tracked and ordinary untracked files
 from Git, then traverses ignored dependency/build-cache trees only to find
 sensitive filenames such as root/nested `.dev.vars*`, `.env*`, key/PEM and
 credential configuration paths. `.git` is excluded. Files larger than the
-bounded scan limit and symlinks fail closed. Assignment parsing strips one
-bounded `const`/`let`/`var`/`export const` or quoted-object-key prefix, normalizes
-camelCase and non-alphanumeric separators into case-insensitive key tokens, and
-supports single, double, and backtick quoting, whitespace/passphrases,
-colon/equal separators, and multiline quoted values. Nonliteral code/type/shell
-expressions are not embedded credential bytes and are excluded before literal
-allowance matching. Source fixtures, generated error/format metadata, PGID token
-prefixes, and Better Auth's bundled default-secret fallback sentinel are exempt
-only as exact raw-path/normalized-key/complete-value triples; words such as
-`test`, `example`, or `placeholder` have no special meaning. PGID's source and
-generated config contracts separately require `BETTER_AUTH_SECRET`; the sentinel
+bounded scan limit and symlinks fail closed. JavaScript and TypeScript are
+parsed by the pinned TypeScript compiler AST. A depth/segment/length-bounded
+static evaluator handles string literals, no-substitution and all-static
+templates, binary `+`, parentheses, and static assertion wrappers before
+normalizing declaration/property keys. The separate bounded line/dotenv parser
+supports `export`, `const`, `let`, and `var`. UTF-8, UTF-16LE/BE, and
+NUL-interleaved printable representations share private-key, assignment, known
+token, and high-entropy checks. Nonliteral expressions are not embedded bytes.
+Source fixtures, generated error/format metadata, and PGID token prefixes are
+exempt only by exact path/key/value or digest contracts. Better Auth's bundled
+default-secret fallback is different: the generated Worker must contain exactly
+three reviewed string literals with the exact digest and AST contexts. Removing,
+replacing, concatenating, templating, or adding an occurrence fails. Words such
+as `test`, `example`, or `placeholder` have no special meaning. PGID's source and
+generated config contracts separately require `BETTER_AUTH_SECRET`; the fallback
 allowance is not evidence for an untested runtime path if that requirement later
 changes. Findings expose a
 rule and a normalized safe relative path, never matching bytes. Sensitive,

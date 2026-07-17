@@ -49,14 +49,19 @@ environment key/value and expression contracts, exact source and generated
 Wrangler binding/resource contracts, dependency-advisory
 reconciliation, a production Worker dry-run artifact scan, and a
 dependency/license inventory. The artifact gate uses the same redacted secret
-families for text and bounded binary strings and rejects source maps, private
-machine paths, unexpected files, binding/config drift, and size regressions. CI
-keeps only the redacted inventories for seven days. Assignment keys are
-case/separator-normalized only after bounded declaration/object-key parsing;
-source fixture and reviewed generated enum/metadata/fallback-sentinel allowances
-are exact raw-path, normalized-key, complete-value triples, never placeholder
-substrings. Workflow
-environment keys/values are restricted by a code-owned allowlist; all
+families for bounded UTF-8, UTF-16LE/BE, and NUL-interleaved strings and rejects
+source maps, private machine paths, unexpected files, binding/config drift, and
+size regressions. CI keeps only the redacted inventories for seven days.
+JavaScript/TypeScript keys and values come from the pinned compiler AST and a
+bounded static evaluator; the separate line/dotenv parser handles export and
+declaration forms. Source fixture and reviewed generated enum/metadata
+allowances are exact path/key/value contracts. The generated Better Auth
+fallback must retain its three exact digests, literal forms, occurrence counts,
+and AST contexts. Workflow run locations/commands and reachable package-script
+names/values are code-owned exact maps that policy cannot extend; the release
+upload is exactly `.artifacts/release` with fixed missing-file, hidden-file, and
+retention behavior. Workflow environment keys/values are restricted by a
+code-owned allowlist; all
 `CLOUDFLARE_*`, legacy `CF_*`, and `WRANGLER_*` keys are independently denied.
 Unsafe diagnostic paths are normalized and represented only by a short SHA-256
 identifier.

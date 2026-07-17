@@ -157,15 +157,22 @@ workflow/job/step environment scopes, exact source/generated Wrangler binding
 targets, the dependency advisory policy, a production
 `wrangler deploy --dry-run --outdir` artifact gate, a path-free
 dependency/license inventory, and negative tests for the automation itself.
-Assignment parsing strips one bounded declaration/quoted-object-key prefix and
-normalizes camelCase and non-alphanumeric separators before secret-family
-classification. Exceptions, including source fixtures and reviewed generated
-enums/metadata plus Better Auth's required-config fallback sentinel, require an
-exact raw path, normalized key, and complete value;
-marker substrings do not waive a finding. Workflow environment policy can select
-only code-owned `DAST_*`, `CI`, and `NO_COLOR` values; `CLOUDFLARE_*`, legacy
-`CF_*`, and `WRANGLER_*` remain hard-denied even if policy and workflow are
-changed together. Diagnostics normalize
+JavaScript and TypeScript assignments are parsed with the pinned TypeScript
+compiler AST and a bounded static evaluator for literals, static templates,
+parentheses, and string concatenation. The line-oriented dotenv/config parser
+separately supports `export`, `const`, `let`, and `var`; bounded UTF-8,
+UTF-16LE/BE, and NUL-interleaved representations share the same token,
+private-key, assignment, and high-entropy families. Source fixtures and
+generated enum/metadata exceptions require an exact raw path, normalized key,
+and complete value. Better Auth's generated fallback additionally requires all
+three exact literal digests, literal forms, and AST contexts; marker substrings
+do not waive a finding. Workflow run commands and recursively reachable package
+script names/values are code-owned exact maps, not policy additions. The upload
+step is fixed to `.artifacts/release` with error-on-missing, hidden-file
+exclusion, and seven-day retention. Workflow environment policy can select only
+code-owned `DAST_*`, `CI`, and `NO_COLOR` values; `CLOUDFLARE_*`, legacy `CF_*`,
+and `WRANGLER_*` remain hard-denied even if policy and workflow are changed
+together. Diagnostics normalize
 safe relative paths and replace sensitive, secret-bearing, absolute/outside, or
 terminal-unsafe paths with a short SHA-256 identifier. The audit covers runtime,
 build, and development dependencies so tooling advisories cannot bypass the

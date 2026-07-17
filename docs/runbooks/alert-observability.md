@@ -1,11 +1,13 @@
 # Alert observability source boundary
 
-> Status: local schema, pure evaluator/parser, evaluator runtime repository,
-> archive crypto, and `0021` archive-ledger source. The alert modules are not
-> wired into the Worker entry point. Metric-source/state/incident/outbox repositories,
-> Cron, Queue/Email/admin delivery, same-run proof, R2 archive runtime, restore,
-> external backup, and deployment remain absent. Production records remain
-> through migration `0012`.
+> Status: local schema, pure evaluator/parser, evaluator runtime-status/lease/
+> bootstrap repository, archive crypto, and `0021` archive-ledger source. The
+> repository is not imported by the Worker entry point or a scheduler. Full D1
+> audit/other metric-source aggregation, `alert_state`/`security_alert`/
+> `alert_outbox` CAS repositories, Cron, alert/archive Queue/DLQ, Email/admin
+> delivery, same-run proof, R2 archive runtime, bounded restore, external
+> backup, and deployment remain absent. Production records remain through
+> migration `0012`.
 
 ## What `0020` provides
 
@@ -71,16 +73,18 @@ sample increments only at an exact 60-second interval, a late/missing sample
 restarts at one, and zero resets both continuity fields. Schema presence does
 not prove that the sampling loop exists. In particular, D1 cannot prove that an
 inserted `healthy`/`last_success_at` pair came from executed evaluator work. The
-local runtime repository starts the evaluator component as `disabled` with null
-history. On its first repository-controlled success, one ordered D1 batch must
-update the runtime row to `healthy` with non-null success evidence, then insert
+local evaluator runtime repository initializes the evaluator component as
+`disabled` with null history. It acquires and renews the bounded evaluator lease
+and records terminal success or failure by exact generation/revision/lease
+compare-and-swap. On its first repository-controlled success, one ordered D1
+batch updates the runtime row to `healthy` with non-null success evidence, then inserts
 `alert_evaluator_bootstrap` with `INSERT ... SELECT` from that exact runtime row.
 The anchor is immutable and its parent runtime row cannot be deleted or
 replaced. This proves the persisted repository transition, not the external
 work itself; status, generation, or revision alone is never bootstrap evidence.
-`alert-runtime-repository.ts` implements this lease/bootstrap lifecycle, but it
-is not imported by the Worker, scheduled, or linked to metric collection or a
-same-run execution proof.
+The repository also owns the exact projection read below. It is local source
+only: the Worker entry point and scheduler do not import or invoke it, and no
+full audit/other metric-source evaluation or same-run execution proof exists.
 
 The pure parser fixes this exact repository-owned projection and column order:
 
@@ -283,12 +287,13 @@ verifies the record/envelope and checkpoint binding without R2 or Queue I/O.
 
 ## Remaining gates
 
-Schema, pure evaluator/parser, and the unwired runtime repository must still
-report observability as `source_present_unverified`, leaving continuity and
-drills blocked. A later reviewed slice must add complete metric-source
-aggregation, alert-state/incident/outbox CAS repositories, Worker/Cron wiring,
-repository-controlled same-run proof, dedicated alert Queue/DLQ, Email Service
-adapter, admin acknowledge/resolve/replay operations, and
+Schema, pure evaluator/parser, and the unwired evaluator runtime-status
+repository must still report observability as `source_present_unverified`,
+leaving continuity and drills blocked. A later reviewed slice must add full D1
+audit/other metric-source aggregation and
+`alert_state`/`security_alert`/`alert_outbox` CAS repositories, wire the runtime
+repository into evaluator Cron with same-run proof, and add dedicated alert
+Queue/DLQ, an Email Service adapter, admin acknowledge/resolve/replay operations, and
 redaction/race/failure tests. Archive crypto plus the `0021` ledger does not
 satisfy the separate encrypted archive dependency; `encrypted_r2_archive`
 remains `dependency_missing` until the disabled repository, R2 writer/bounded

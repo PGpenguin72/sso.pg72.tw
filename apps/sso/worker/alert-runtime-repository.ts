@@ -5,8 +5,11 @@ import {
 } from "./alert-rules";
 
 const EVALUATOR_COMPONENT = "evaluator";
+// Generation rollover remains an explicit operational migration dependency.
 const MAX_GENERATION = 1_000_000;
 const MAX_REVISION = 1_000_000_000;
+// An active lease must retain one revision for its terminal success or failure.
+const MAX_ACTIVE_LEASE_REVISION = MAX_REVISION - 1;
 const MAX_LEASE_SECONDS = 300;
 
 export type AlertEvaluatorFailureStatus =
@@ -195,7 +198,11 @@ function exactRecord(value: unknown, keys: readonly string[]): UnknownRecord {
 function canonicalTimestamp(value: unknown): { iso: string; time: number } {
   if (typeof value !== "string") fail("invalid_input");
   const time = new Date(value).getTime();
-  if (!Number.isFinite(time) || new Date(time).toISOString() !== value) {
+  if (
+    value.length !== 24 ||
+    !Number.isFinite(time) ||
+    new Date(time).toISOString() !== value
+  ) {
     fail("invalid_input");
   }
   return { iso: value, time };
@@ -347,10 +354,10 @@ export async function acquireAlertEvaluatorLease(
         WHERE component = ?
           AND generation < ?
           AND revision < ?
-          AND unixepoch(updated_at) < unixepoch(?)
+          AND updated_at < ?
           AND (
             lease_id IS NULL
-            OR unixepoch(lease_expires_at) <= unixepoch(?)
+            OR lease_expires_at <= ?
           )
         ${LEASE_RETURNING}`,
     )
@@ -361,7 +368,7 @@ export async function acquireAlertEvaluatorLease(
         startedAt.iso,
         EVALUATOR_COMPONENT,
         MAX_GENERATION,
-        MAX_REVISION,
+        MAX_ACTIVE_LEASE_REVISION,
         startedAt.iso,
         startedAt.iso,
       )
@@ -392,7 +399,7 @@ export async function renewAlertEvaluatorLease(
       renewedAt.time <= new Date(current.updatedAt).getTime() ||
       renewedAt.time >= new Date(current.leaseExpiresAt).getTime() ||
       new Date(expiresAt).getTime() < new Date(current.leaseExpiresAt).getTime() ||
-      current.revision >= MAX_REVISION
+      current.revision >= MAX_ACTIVE_LEASE_REVISION
     ) {
       fail("invalid_input");
     }
@@ -404,6 +411,7 @@ export async function renewAlertEvaluatorLease(
         WHERE component = ?
           AND generation = ?
           AND revision = ?
+          AND revision < ?
           AND lease_id = ?
           AND lease_expires_at = ?
           AND last_started_at = ?
@@ -416,6 +424,7 @@ export async function renewAlertEvaluatorLease(
         EVALUATOR_COMPONENT,
         current.generation,
         current.revision,
+        MAX_ACTIVE_LEASE_REVISION,
         current.leaseId,
         current.leaseExpiresAt,
         current.startedAt,

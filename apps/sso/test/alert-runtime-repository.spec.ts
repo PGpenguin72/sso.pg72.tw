@@ -18,6 +18,10 @@ function at(seconds: number): string {
   return new Date(BASE_TIME + seconds * 1_000).toISOString();
 }
 
+function atMilliseconds(milliseconds: number): string {
+  return new Date(BASE_TIME + milliseconds).toISOString();
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -69,6 +73,14 @@ function transformProjectionDatabase(
   });
 }
 
+function replaceRuntimeTableDatabase(tableName: string): D1Database {
+  return proxyDatabase({
+    prepare(target, query) {
+      return target.prepare(query.replaceAll("alert_runtime_status", tableName));
+    },
+  });
+}
+
 interface RuntimeRow {
   generation: number;
   last_error_at: string | null;
@@ -110,6 +122,11 @@ async function bootstrapRow(): Promise<BootstrapRow | null> {
 
 describe.sequential("alert evaluator runtime repository", () => {
   it("keeps initialization pre-bootstrap and rejects caller proof", async () => {
+    await expect(
+      initializeAlertEvaluatorRuntime(env.PG72_ID_DB, {
+        initializedAt: "+010000-01-01T00:00:00.000Z",
+      }),
+    ).rejects.toEqual(new AlertRuntimeRepositoryError("invalid_input"));
     expect(await readAlertRuntimeThresholdInput(env.PG72_ID_DB, at(0)))
       .toBeNull();
     expect(
@@ -432,5 +449,187 @@ describe.sequential("alert evaluator runtime repository", () => {
     expect(
       (await env.PG72_ID_DB.prepare("PRAGMA foreign_key_check").all()).results,
     ).toEqual([]);
+  });
+
+  it("preserves millisecond lease ownership through exact expiry", async () => {
+    const sameSecondLease = await acquireAlertEvaluatorLease(env.PG72_ID_DB, {
+      leaseDurationSeconds: 1,
+      startedAt: atMilliseconds(20_500),
+    });
+    if (!sameSecondLease) throw new Error("expected a same-second lease");
+    expect(sameSecondLease.leaseExpiresAt).toBe(atMilliseconds(21_500));
+
+    expect(
+      await acquireAlertEvaluatorLease(env.PG72_ID_DB, {
+        leaseDurationSeconds: 1,
+        startedAt: atMilliseconds(21_100),
+      }),
+    ).toBeNull();
+    expect(await runtimeRow()).toMatchObject({
+      generation: sameSecondLease.generation,
+      lease_expires_at: atMilliseconds(21_500),
+      lease_id: sameSecondLease.leaseId,
+      revision: sameSecondLease.revision,
+      updated_at: atMilliseconds(20_500),
+    });
+
+    const exactExpiryLease = await acquireAlertEvaluatorLease(
+      env.PG72_ID_DB,
+      {
+        leaseDurationSeconds: 2,
+        startedAt: atMilliseconds(21_500),
+      },
+    );
+    if (!exactExpiryLease) throw new Error("expected exact-expiry takeover");
+    expect(exactExpiryLease.generation).toBe(sameSecondLease.generation + 1);
+    expect(
+      await recordAlertEvaluatorFailure(env.PG72_ID_DB, exactExpiryLease, {
+        completedAt: atMilliseconds(22_000),
+        errorCode: "evaluator_failed",
+        status: "degraded",
+      }),
+    ).toBe(true);
+
+    const crossSecondLease = await acquireAlertEvaluatorLease(env.PG72_ID_DB, {
+      leaseDurationSeconds: 1,
+      startedAt: atMilliseconds(23_100),
+    });
+    if (!crossSecondLease) throw new Error("expected a cross-second lease");
+    expect(crossSecondLease.leaseExpiresAt).toBe(atMilliseconds(24_100));
+    expect(
+      await acquireAlertEvaluatorLease(env.PG72_ID_DB, {
+        leaseDurationSeconds: 1,
+        startedAt: atMilliseconds(23_900),
+      }),
+    ).toBeNull();
+
+    const crossSecondTakeover = await acquireAlertEvaluatorLease(
+      env.PG72_ID_DB,
+      {
+        leaseDurationSeconds: 2,
+        startedAt: atMilliseconds(24_100),
+      },
+    );
+    if (!crossSecondTakeover) {
+      throw new Error("expected cross-second exact-expiry takeover");
+    }
+    expect(
+      await recordAlertEvaluatorFailure(env.PG72_ID_DB, crossSecondTakeover, {
+        completedAt: atMilliseconds(25_000),
+        errorCode: "evaluator_failed",
+        status: "degraded",
+      }),
+    ).toBe(true);
+  });
+
+  it("reserves the final revision for terminal lease release", async () => {
+    const tableName = "alert_runtime_status_revision_boundary";
+    const boundaryDatabase = replaceRuntimeTableDatabase(tableName);
+    await env.PG72_ID_DB.prepare(
+      `CREATE TABLE ${tableName} (
+        component TEXT PRIMARY KEY NOT NULL,
+        status TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        revision INTEGER NOT NULL,
+        lease_id TEXT,
+        lease_expires_at TEXT,
+        last_started_at TEXT,
+        last_success_at TEXT,
+        last_error_at TEXT,
+        last_error_code TEXT,
+        watermark_at TEXT,
+        updated_at TEXT NOT NULL
+      )`,
+    ).run();
+
+    try {
+      await env.PG72_ID_DB.prepare(
+        `INSERT INTO ${tableName}
+          (component, status, generation, revision, updated_at)
+         VALUES ('evaluator', 'healthy', 1, 999999999, ?)`,
+      )
+        .bind(at(30))
+        .run();
+      expect(
+        await acquireAlertEvaluatorLease(boundaryDatabase, {
+          leaseDurationSeconds: 120,
+          startedAt: at(31),
+        }),
+      ).toBeNull();
+
+      const maxMinusOneLease = {
+        component: "evaluator" as const,
+        generation: 1,
+        leaseExpiresAt: at(60),
+        leaseId: crypto.randomUUID(),
+        revision: 999_999_999,
+        startedAt: at(31),
+        updatedAt: at(31),
+      };
+      await env.PG72_ID_DB.prepare(
+        `UPDATE ${tableName}
+            SET lease_id = ?, lease_expires_at = ?, last_started_at = ?,
+                updated_at = ?
+          WHERE component = 'evaluator'`,
+      )
+        .bind(
+          maxMinusOneLease.leaseId,
+          maxMinusOneLease.leaseExpiresAt,
+          maxMinusOneLease.startedAt,
+          maxMinusOneLease.updatedAt,
+        )
+        .run();
+      await expect(
+        renewAlertEvaluatorLease(boundaryDatabase, maxMinusOneLease, {
+          leaseDurationSeconds: 120,
+          renewedAt: at(32),
+        }),
+      ).rejects.toEqual(new AlertRuntimeRepositoryError("invalid_input"));
+
+      await env.PG72_ID_DB.prepare(
+        `UPDATE ${tableName}
+            SET revision = 999999998, lease_id = NULL,
+                lease_expires_at = NULL, last_started_at = NULL,
+                updated_at = ?
+          WHERE component = 'evaluator'`,
+      )
+        .bind(at(30))
+        .run();
+      const lastLegalLease = await acquireAlertEvaluatorLease(
+        boundaryDatabase,
+        { leaseDurationSeconds: 120, startedAt: at(31) },
+      );
+      expect(lastLegalLease).toMatchObject({
+        generation: 2,
+        revision: 999_999_999,
+      });
+      if (!lastLegalLease) throw new Error("expected the last legal lease");
+      expect(
+        await recordAlertEvaluatorFailure(boundaryDatabase, lastLegalLease, {
+          completedAt: at(32),
+          errorCode: "evaluator_failed",
+          status: "degraded",
+        }),
+      ).toBe(true);
+      expect(
+        await env.PG72_ID_DB.prepare(
+          `SELECT revision, lease_id, lease_expires_at
+             FROM ${tableName}
+            WHERE component = 'evaluator'`,
+        ).first(),
+      ).toEqual({
+        lease_expires_at: null,
+        lease_id: null,
+        revision: 1_000_000_000,
+      });
+      expect(
+        await acquireAlertEvaluatorLease(boundaryDatabase, {
+          leaseDurationSeconds: 120,
+          startedAt: at(33),
+        }),
+      ).toBeNull();
+    } finally {
+      await env.PG72_ID_DB.prepare(`DROP TABLE ${tableName}`).run();
+    }
   });
 });

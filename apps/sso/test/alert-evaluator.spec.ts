@@ -77,9 +77,11 @@ function unknownQueueObservation(asOf: string) {
     dimension: { kind: "queue", queue: "alert_deliveries_dlq" },
     ruleId: "pgid.queue.dlq_approximate.v1",
     snapshot: {
+      backlogBytes: null,
+      backlogCount: null,
       consecutiveNonzeroSamples: null,
-      depth: null,
       nonzeroSinceAt: null,
+      oldestMessageTimestamp: null,
       sampledAt: null,
     },
   };
@@ -103,11 +105,13 @@ function knownQueueObservation(
     },
     ruleId: "pgid.queue.dlq_approximate.v1",
     snapshot: {
+      backlogBytes: depth * 10,
+      backlogCount: depth,
       consecutiveNonzeroSamples: options.consecutiveNonzeroSamples ?? (depth === 0 ? 0 : 1),
-      depth,
       nonzeroSinceAt: options.nonzeroSinceAt === undefined
         ? (depth === 0 ? null : asOf)
         : options.nonzeroSinceAt,
+      oldestMessageTimestamp: depth === 0 ? null : asOf,
       sampledAt: asOf,
     },
   };

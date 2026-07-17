@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ALERT_HMAC_REFERENCE_DOMAINS,
   ALERT_QUEUE_COMPONENTS,
   ALERT_QUEUE_NAMES,
   ALERT_RULE_DEFINITIONS,
@@ -375,6 +376,7 @@ const EXPECTED_SOURCES = {
     mode: "oauth_client_report",
     reasonColumn: "reason",
     reporterRefColumn: "reporter_ref",
+    reporterRefDomain: "reporter_hmac",
     reporterRefHashVersionColumn: "reporter_ref_hash_version",
     reporterUserIdColumn: "reporter_user_id",
     table: "oauth_client_report",
@@ -468,38 +470,83 @@ const EXPECTED_SOURCES = {
     sourceTimeColumn: "occurred_at",
   },
   "pgid.logout.delivery_health.v1": {
-    attemptCompletedAtColumn: "completed_at",
-    attemptDeliveryIdColumn: "delivery_id",
-    attemptOutcomeColumn: "outcome",
-    attemptTable: "logout_delivery_attempt",
-    deadStatus: "dead",
-    deliveryClientIdColumn: "client_id",
-    deliveryCohortColumn: "created_at",
-    deliveryIdColumn: "id",
-    deliveryStatusColumn: "status",
-    deliveryTable: "logout_delivery",
+    currentSnapshot: {
+      clientIdColumn: "client_id",
+      createdAtColumn: "created_at",
+      deadStatus: "dead",
+      oldestAgeSecondsSemantics: "as_of_minus_oldest_current_unresolved_created_at_floor_seconds",
+      scope: "all_current_rows_at_as_of",
+      statusColumn: "status",
+      unresolvedStatuses: ["pending", "processing", "retry", "dead"],
+    },
     dimensions: ["global", "client_id"],
-    eligibleStatuses: ["pending", "processing", "retry", "delivered", "dead"],
-    leaseExpiredOutcome: "lease_expired",
     mode: "logout_delivery",
-    unresolvedStatuses: ["pending", "processing", "retry", "dead"],
+    windows: {
+      attemptCompletedAtColumn: "completed_at",
+      attemptCohortScope: "completed_at_in_half_open_window",
+      attemptDeliveryIdColumn: "delivery_id",
+      attemptOutcomeColumn: "outcome",
+      attemptTable: "logout_delivery_attempt",
+      deliveryClientIdColumn: "client_id",
+      deliveryCohortColumn: "created_at",
+      deliveryCohortScope: "created_at_in_half_open_window",
+      deliveryIdColumn: "id",
+      deliveryStatusColumn: "status",
+      deliveryTable: "logout_delivery",
+      eligibleStatuses: ["pending", "processing", "retry", "delivered", "dead"],
+      leaseExpiredOutcome: "lease_expired",
+      unresolvedStatuses: ["pending", "processing", "retry", "dead"],
+    },
   },
   "pgid.alert.runtime_health.v1": {
     dimension: "global",
+    evaluator: {
+      ageSecondsSemantics: "as_of_minus_last_success_at_floor_seconds",
+      bootstrapRequirement: "enabled_row_created_before_rule_evaluation",
+      component: "evaluator",
+      componentColumn: "component",
+      enabledStatuses: ["healthy", "degraded", "failing", "unavailable"],
+      lastSuccessAtColumn: "last_success_at",
+      nullAgeSemantics: "last_success_at_is_null",
+      statusColumn: "status",
+    },
     mode: "alert_runtime",
-    outboxTable: "alert_outbox",
+    outbox: {
+      currentDeadCountSemantics: "status_equals_dead_at_as_of",
+      currentDeadStatus: "dead",
+      dueAgeSecondsSemantics: "as_of_minus_oldest_due_or_expired_time_floor_seconds",
+      dueAgeSecondsNullSemantics: "no_due_or_expired_work_at_as_of",
+      dueStatuses: ["pending", "retry"],
+      dueTimeColumn: "next_attempt_at",
+      expiredProcessingStatus: "processing",
+      expiredProcessingTimeColumn: "lease_expires_at",
+      statusColumn: "status",
+      table: "alert_outbox",
+    },
     runtimeTable: "alert_runtime_status",
   },
   "pgid.queue.dlq_approximate.v1": {
+    backlogBytesBindingField: "backlogBytes",
+    backlogBytesColumn: "backlog_bytes",
+    backlogBytesMaximum: 1_000_000_000_000,
+    backlogCountBindingField: "backlogCount",
     backlogCountColumn: "backlog_count",
+    backlogCountMaximum: 1_000_000_000,
     componentColumn: "component",
     consecutiveNonzeroSamplesColumn: "consecutive_nonzero_samples",
+    consecutiveNonzeroSamplesMaximum: 1_000_000,
     criticalDurationSeconds: 900,
     dimension: "queue_name",
+    invalidBindingMetrics: "unknown",
     method: "metrics",
     metricSampledAtColumn: "metric_sampled_at",
     mode: "queue_metrics",
     nonzeroSinceAtColumn: "nonzero_since_at",
+    numericValidation: "finite_safe_nonnegative_integer",
+    oldestMessageAgeSecondsColumn: "oldest_message_age_seconds",
+    oldestMessageAgeSecondsMaximum: 1_000_000_000,
+    oldestMessageTimestampBindingField: "oldestMessageTimestamp",
+    oldestMessageTimestampNormalization: "sampled_at_minus_oldest_message_timestamp_floor_seconds",
     queueComponentByName: {
       alert_deliveries_dlq: "alert_dlq",
       audit_archive_dlq: "audit_archive_dlq",
@@ -557,10 +604,12 @@ function runtimeObservation(
 }
 
 function queueObservation(snapshot: {
-  consecutiveNonzeroSamples: number | null;
-  depth: number | null;
-  nonzeroSinceAt: string | null;
-  sampledAt: string | null;
+  backlogBytes: unknown;
+  backlogCount: unknown;
+  consecutiveNonzeroSamples: unknown;
+  nonzeroSinceAt: unknown;
+  oldestMessageTimestamp?: unknown;
+  sampledAt: unknown;
 }) {
   return {
     asOf: AS_OF,
@@ -744,14 +793,19 @@ describe("redacted observation parsing", () => {
     });
     expect(subject.value).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(subject.value).not.toContain("subject-1");
-    expect(await deriveAlertReferenceV1(key, "actor_hmac", "subject-1"))
-      .not.toEqual(subject);
+    const domains = await Promise.all(ALERT_HMAC_REFERENCE_DOMAINS.map((domain) =>
+      deriveAlertReferenceV1(key, domain, "subject-1")
+    ));
+    expect(new Set(domains.map(({ value }) => value)).size).toBe(4);
+    expect(domains[3]).toEqual({
+      keyVersion: 1,
+      value: await expectedHmac(keyBytes, "reporter_hmac", "subject-1"),
+    });
     const otherKey = base64Url(Uint8Array.from({ length: 32 }, (_, index) => index + 1));
     expect(await deriveAlertReferenceV1(otherKey, "subject_hmac", "subject-1"))
       .not.toEqual(subject);
-    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    const finalIndex = alphabet.indexOf(key.at(-1) ?? "");
-    const noncanonical = `${key.slice(0, -1)}${alphabet[finalIndex ^ 1]}`;
+    const canonicalZeroKey = base64Url(new Uint8Array(32));
+    const noncanonical = `${canonicalZeroKey.slice(0, -1)}B`;
     await expect(deriveAlertReferenceV1(noncanonical, "subject_hmac", "subject-1"))
       .rejects.toThrow("32-byte");
     await expect(deriveAlertReferenceV1("short", "subject_hmac", "subject-1"))
@@ -796,6 +850,10 @@ describe("redacted observation parsing", () => {
     })).toThrow("canonical keys");
     expect(() => parseAlertObservation({
       ...valid,
+      dimension: { kind: "reporter_hmac", reference: REFERENCE },
+    })).toThrow("not supported");
+    expect(() => parseAlertObservation({
+      ...valid,
       windows: {
         ...valid.windows,
         "5m": { ...valid.windows["5m"], raw: 1 },
@@ -806,9 +864,11 @@ describe("redacted observation parsing", () => {
       dimension: { kind: "queue", queue: "not_a_real_queue" },
       ruleId: "pgid.queue.dlq_approximate.v1",
       snapshot: {
+        backlogBytes: 0,
+        backlogCount: 0,
         consecutiveNonzeroSamples: 0,
-        depth: 0,
         nonzeroSinceAt: null,
+        oldestMessageTimestamp: null,
         sampledAt: AS_OF,
       },
     })).toThrow("Queue name");
@@ -949,28 +1009,27 @@ describe("rule evaluation", () => {
   it("makes a 50 percent five-minute logout cohort critical", () => {
     const evaluation = evaluateAlertRule({
       asOf: AS_OF,
+      current: {
+        currentDead: 0,
+        currentUnresolved: 3,
+        oldestUnresolvedAgeSeconds: 0,
+      },
       dimension: GLOBAL,
       ruleId: "pgid.logout.delivery_health.v1",
       windows: windowed(
         {
-          dead: 0,
           eligible: 5,
           leaseExpired: 0,
-          oldestUnresolvedAgeSeconds: 0,
           unresolved: 3,
         },
         {
-          dead: 0,
           eligible: 5,
           leaseExpired: 0,
-          oldestUnresolvedAgeSeconds: 0,
           unresolved: 3,
         },
         {
-          dead: 0,
           eligible: 5,
           leaseExpired: 0,
-          oldestUnresolvedAgeSeconds: 0,
           unresolved: 3,
         },
       ),
@@ -991,6 +1050,100 @@ describe("rule evaluation", () => {
       },
       severity: "critical",
     });
+  });
+
+  it("keeps old current logout failures visible with empty recent cohorts", () => {
+    const emptyWindows = windowed(
+      { eligible: 0, leaseExpired: 0, unresolved: 0 },
+    );
+    expect(evaluateAlertRule({
+      asOf: AS_OF,
+      current: {
+        currentDead: 1,
+        currentUnresolved: 1,
+        oldestUnresolvedAgeSeconds: 3_601,
+      },
+      dimension: GLOBAL,
+      ruleId: "pgid.logout.delivery_health.v1",
+      windows: emptyWindows,
+    })).toMatchObject({
+      immediateCritical: true,
+      selectedEvidence: {
+        metricName: "dead",
+        observedValue: 1,
+        windowSeconds: 300,
+      },
+      severity: "critical",
+    });
+    expect(evaluateAlertRule({
+      asOf: AS_OF,
+      current: {
+        currentDead: 0,
+        currentUnresolved: 1,
+        oldestUnresolvedAgeSeconds: 3_601,
+      },
+      dimension: GLOBAL,
+      ruleId: "pgid.logout.delivery_health.v1",
+      windows: emptyWindows,
+    })).toMatchObject({
+      immediateCritical: false,
+      selectedEvidence: {
+        metricName: "oldest_unresolved_age_seconds",
+        observedValue: 3_601,
+        windowSeconds: 900,
+      },
+      severity: "critical",
+    });
+  });
+
+  it("rejects invalid current logout subsets and non-nested window cohorts", () => {
+    const base = {
+      asOf: AS_OF,
+      current: {
+        currentDead: 0,
+        currentUnresolved: 0,
+        oldestUnresolvedAgeSeconds: null,
+      },
+      dimension: GLOBAL,
+      ruleId: "pgid.logout.delivery_health.v1",
+      windows: windowed({ eligible: 0, leaseExpired: 0, unresolved: 0 }),
+    };
+    expect(() => evaluateAlertRule({
+      ...base,
+      current: {
+        currentDead: 2,
+        currentUnresolved: 1,
+        oldestUnresolvedAgeSeconds: 1,
+      },
+    })).toThrow("cannot exceed");
+    expect(() => evaluateAlertRule({
+      ...base,
+      current: {
+        currentDead: 0,
+        currentUnresolved: 0,
+        oldestUnresolvedAgeSeconds: 0,
+      },
+    })).toThrow("must agree");
+    expect(() => evaluateAlertRule({
+      ...base,
+      current: {
+        currentDead: 0,
+        currentUnresolved: 1,
+        oldestUnresolvedAgeSeconds: null,
+      },
+    })).toThrow("must agree");
+    expect(() => evaluateAlertRule({
+      ...base,
+      windows: windowed({ eligible: 1, leaseExpired: 0, unresolved: 2 }),
+    })).toThrow("cannot exceed");
+    expect(() => evaluateAlertRule({
+      ...base,
+      windows: windowed(
+        { eligible: 2, leaseExpired: 0, unresolved: 1 },
+        { eligible: 1, leaseExpired: 0, unresolved: 1 },
+        { eligible: 3, leaseExpired: 0, unresolved: 1 },
+      ),
+    })).toThrow("nondecreasing");
   });
 
   it("uses strict runtime ages and only exact dead/missing state is immediate", () => {
@@ -1022,28 +1175,27 @@ describe("rule evaluation", () => {
   it("selects the durable immediate cause ahead of a competing critical metric", () => {
     const logout = evaluateAlertRule({
       asOf: AS_OF,
+      current: {
+        currentDead: 1,
+        currentUnresolved: 1,
+        oldestUnresolvedAgeSeconds: 3_601,
+      },
       dimension: GLOBAL,
       ruleId: "pgid.logout.delivery_health.v1",
       windows: windowed(
         {
-          dead: 0,
           eligible: 5,
           leaseExpired: 0,
-          oldestUnresolvedAgeSeconds: 0,
           unresolved: 3,
         },
         {
-          dead: 0,
           eligible: 5,
           leaseExpired: 0,
-          oldestUnresolvedAgeSeconds: 0,
           unresolved: 3,
         },
         {
-          dead: 1,
           eligible: 5,
           leaseExpired: 0,
-          oldestUnresolvedAgeSeconds: 0,
           unresolved: 3,
         },
       ),
@@ -1054,7 +1206,7 @@ describe("rule evaluation", () => {
         metricName: "dead",
         observedValue: 1,
         severity: "critical",
-        windowSeconds: 3_600,
+        windowSeconds: 300,
       },
     });
 
@@ -1119,27 +1271,35 @@ describe("rule evaluation", () => {
   it("returns unknown for missing or inconsistent Queue samples", () => {
     const unknowns = [
       queueObservation({
+        backlogBytes: null,
+        backlogCount: null,
         consecutiveNonzeroSamples: null,
-        depth: null,
         nonzeroSinceAt: null,
+        oldestMessageTimestamp: null,
         sampledAt: null,
       }),
       queueObservation({
+        backlogBytes: 10,
+        backlogCount: 1,
         consecutiveNonzeroSamples: 1,
-        depth: 1,
         nonzeroSinceAt: AS_OF,
+        oldestMessageTimestamp: "2026-07-17T11:58:00.000Z",
         sampledAt: "2026-07-17T11:59:00.000Z",
       }),
       queueObservation({
+        backlogBytes: 10,
+        backlogCount: 1,
         consecutiveNonzeroSamples: 999,
-        depth: 1,
         nonzeroSinceAt: "2026-07-17T11:45:00.000Z",
+        oldestMessageTimestamp: "2026-07-17T11:44:00.000Z",
         sampledAt: AS_OF,
       }),
       queueObservation({
+        backlogBytes: 0,
+        backlogCount: 0,
         consecutiveNonzeroSamples: 1,
-        depth: 0,
         nonzeroSinceAt: AS_OF,
+        oldestMessageTimestamp: null,
         sampledAt: AS_OF,
       }),
     ];
@@ -1152,19 +1312,80 @@ describe("rule evaluation", () => {
     }
   });
 
+  it("validates every Queue metrics field before using persisted streak state", () => {
+    const queueMetricsUnknown = (overrides: Record<string, unknown>) =>
+      queueObservation({
+        backlogBytes: 10,
+        backlogCount: 1,
+        consecutiveNonzeroSamples: 1,
+        nonzeroSinceAt: AS_OF,
+        oldestMessageTimestamp: AS_OF,
+        sampledAt: AS_OF,
+        ...overrides,
+      });
+    const unknowns = [
+      queueMetricsUnknown({ backlogCount: -1 }),
+      queueMetricsUnknown({ backlogBytes: Number.NaN }),
+      queueMetricsUnknown({ backlogCount: Number.POSITIVE_INFINITY }),
+      queueMetricsUnknown({ backlogCount: 1_000_000_001 }),
+      queueMetricsUnknown({ backlogBytes: 1_000_000_000_001 }),
+      queueMetricsUnknown({ oldestMessageTimestamp: "not-a-timestamp" }),
+      queueMetricsUnknown({ oldestMessageTimestamp: "2026-07-17T12:00:01.000Z" }),
+      queueMetricsUnknown({ oldestMessageTimestamp: "1990-01-01T00:00:00.000Z" }),
+      queueObservation({
+        backlogBytes: 10,
+        backlogCount: 1,
+        consecutiveNonzeroSamples: 1,
+        nonzeroSinceAt: AS_OF,
+        sampledAt: AS_OF,
+      }),
+    ];
+    for (const observation of unknowns) {
+      expect(evaluateAlertRule(observation)).toMatchObject({
+        evidence: "unknown",
+        selectedEvidence: null,
+        severity: "none",
+      });
+    }
+
+    const dateInput = queueMetricsUnknown({
+      oldestMessageTimestamp: new Date(AS_OF),
+    });
+    expect(parseAlertObservation(dateInput)).toMatchObject({
+      snapshot: { oldestMessageTimestamp: AS_OF },
+    });
+    expect(evaluateAlertRule(dateInput)).toMatchObject({
+      evidence: "known",
+      severity: "warning",
+    });
+
+    expect(() => evaluateAlertRule(queueMetricsUnknown({
+      consecutiveNonzeroSamples: 1_000_001,
+    }))).toThrow("persistence domain");
+    expect(parseAlertObservation(queueMetricsUnknown({
+      consecutiveNonzeroSamples: 1_000_000,
+    }))).toMatchObject({
+      snapshot: { consecutiveNonzeroSamples: 1_000_000 },
+    });
+  });
+
   it("requires both Queue streak and duration for duration critical", () => {
     const short = evaluateAlertRule(queueObservation({
+      backlogBytes: 10,
+      backlogCount: 1,
       consecutiveNonzeroSamples: 15,
-      depth: 1,
       nonzeroSinceAt: "2026-07-17T11:45:01.000Z",
+      oldestMessageTimestamp: "2026-07-17T11:44:00.000Z",
       sampledAt: AS_OF,
     }));
     expect(short.severity).toBe("warning");
 
     const duration = evaluateAlertRule(queueObservation({
+      backlogBytes: 10,
+      backlogCount: 1,
       consecutiveNonzeroSamples: 15,
-      depth: 1,
       nonzeroSinceAt: "2026-07-17T11:45:00.000Z",
+      oldestMessageTimestamp: "2026-07-17T11:44:00.000Z",
       sampledAt: AS_OF,
     }));
     expect(duration).toMatchObject({
@@ -1179,9 +1400,11 @@ describe("rule evaluation", () => {
     });
 
     expect(evaluateAlertRule(queueObservation({
+      backlogBytes: 100,
+      backlogCount: 10,
       consecutiveNonzeroSamples: 1,
-      depth: 10,
       nonzeroSinceAt: AS_OF,
+      oldestMessageTimestamp: AS_OF,
       sampledAt: AS_OF,
     }))).toMatchObject({
       selectedEvidence: { metricName: "depth", secondary: null },

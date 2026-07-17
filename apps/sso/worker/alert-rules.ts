@@ -34,8 +34,7 @@ export const ALERT_WINDOW_SECONDS: Readonly<Record<AlertWindowKey, number>> = {
 
 const MAX_EVIDENCE_VALUE = 1_000_000_000;
 const MAX_RATIO_FIELD = 1_000_000;
-const BASE64URL_ALPHABET =
-  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+const MAX_QUEUE_BACKLOG_BYTES = 1_000_000_000_000;
 const HMAC_REFERENCE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const RULE_ID_SET = new Set<string>(ALERT_RULE_IDS);
 
@@ -68,9 +67,16 @@ export const ALERT_HASHED_DIMENSION_KINDS = [
 ] as const;
 export type AlertHashedDimensionKind =
   (typeof ALERT_HASHED_DIMENSION_KINDS)[number];
+export const ALERT_HMAC_REFERENCE_DOMAINS = [
+  ...ALERT_HASHED_DIMENSION_KINDS,
+  "reporter_hmac",
+] as const;
+export type AlertHmacReferenceDomain =
+  (typeof ALERT_HMAC_REFERENCE_DOMAINS)[number];
 const HASHED_DIMENSION_KIND_SET = new Set<string>(
   ALERT_HASHED_DIMENSION_KINDS,
 );
+const HMAC_REFERENCE_DOMAIN_SET = new Set<string>(ALERT_HMAC_REFERENCE_DOMAINS);
 
 export interface HashedAlertReference {
   keyVersion: 1;
@@ -172,8 +178,19 @@ function parseHashedReference(value: unknown): HashedAlertReference {
 
 function isCanonicalBase64Url32(value: string): boolean {
   if (!HMAC_REFERENCE_PATTERN.test(value)) return false;
-  const finalIndex = BASE64URL_ALPHABET.indexOf(value.at(-1) ?? "");
+  const finalIndex = base64UrlIndex(value.at(-1) ?? "");
   return finalIndex >= 0 && finalIndex % 4 === 0;
+}
+
+function base64UrlIndex(character: string): number {
+  if (character.length !== 1) return -1;
+  const code = character.charCodeAt(0);
+  if (code >= 65 && code <= 90) return code - 65;
+  if (code >= 97 && code <= 122) return code - 97 + 26;
+  if (code >= 48 && code <= 57) return code - 48 + 52;
+  if (character === "-") return 62;
+  if (character === "_") return 63;
+  return -1;
 }
 
 function decodeHmacKey(value: string): Uint8Array<ArrayBuffer> {
@@ -210,10 +227,10 @@ function base64Url(bytes: Uint8Array): string {
 
 export async function deriveAlertReferenceV1(
   keyBase64Url: string,
-  kind: AlertHashedDimensionKind,
+  kind: AlertHmacReferenceDomain,
   raw: string,
 ): Promise<HashedAlertReference> {
-  if (!HASHED_DIMENSION_KIND_SET.has(kind)) {
+  if (!HMAC_REFERENCE_DOMAIN_SET.has(kind)) {
     throw new Error("alert HMAC kind is not supported");
   }
   if (typeof raw !== "string" || raw.length < 1 || raw.length > 512) {
@@ -355,6 +372,7 @@ export type AlertSourceDescriptor =
       mode: "oauth_client_report";
       reasonColumn: "reason";
       reporterRefColumn: "reporter_ref";
+      reporterRefDomain: "reporter_hmac";
       reporterRefHashVersionColumn: "reporter_ref_hash_version";
       reporterUserIdColumn: "reporter_user_id";
       table: "oauth_client_report";
@@ -373,44 +391,89 @@ export type AlertSourceDescriptor =
       sourceTimeColumn: "occurred_at";
     }>
   | Readonly<{
-      attemptCompletedAtColumn: "completed_at";
-      attemptDeliveryIdColumn: "delivery_id";
-      attemptOutcomeColumn: "outcome";
-      attemptTable: "logout_delivery_attempt";
-      deadStatus: "dead";
-      deliveryClientIdColumn: "client_id";
-      deliveryCohortColumn: "created_at";
-      deliveryIdColumn: "id";
-      deliveryStatusColumn: "status";
-      deliveryTable: "logout_delivery";
+      currentSnapshot: Readonly<{
+        clientIdColumn: "client_id";
+        createdAtColumn: "created_at";
+        deadStatus: "dead";
+        oldestAgeSecondsSemantics: "as_of_minus_oldest_current_unresolved_created_at_floor_seconds";
+        scope: "all_current_rows_at_as_of";
+        statusColumn: "status";
+        unresolvedStatuses: readonly ["pending", "processing", "retry", "dead"];
+      }>;
       dimensions: readonly ["global", "client_id"];
-      eligibleStatuses: readonly [
-        "pending",
-        "processing",
-        "retry",
-        "delivered",
-        "dead",
-      ];
-      leaseExpiredOutcome: "lease_expired";
       mode: "logout_delivery";
-      unresolvedStatuses: readonly ["pending", "processing", "retry", "dead"];
+      windows: Readonly<{
+        attemptCompletedAtColumn: "completed_at";
+        attemptCohortScope: "completed_at_in_half_open_window";
+        attemptDeliveryIdColumn: "delivery_id";
+        attemptOutcomeColumn: "outcome";
+        attemptTable: "logout_delivery_attempt";
+        deliveryClientIdColumn: "client_id";
+        deliveryCohortColumn: "created_at";
+        deliveryCohortScope: "created_at_in_half_open_window";
+        deliveryIdColumn: "id";
+        deliveryStatusColumn: "status";
+        deliveryTable: "logout_delivery";
+        eligibleStatuses: readonly [
+          "pending",
+          "processing",
+          "retry",
+          "delivered",
+          "dead",
+        ];
+        leaseExpiredOutcome: "lease_expired";
+        unresolvedStatuses: readonly ["pending", "processing", "retry", "dead"];
+      }>;
     }>
   | Readonly<{
       dimension: "global";
+      evaluator: Readonly<{
+        ageSecondsSemantics: "as_of_minus_last_success_at_floor_seconds";
+        bootstrapRequirement: "enabled_row_created_before_rule_evaluation";
+        component: "evaluator";
+        componentColumn: "component";
+        enabledStatuses: readonly ["healthy", "degraded", "failing", "unavailable"];
+        lastSuccessAtColumn: "last_success_at";
+        nullAgeSemantics: "last_success_at_is_null";
+        statusColumn: "status";
+      }>;
       mode: "alert_runtime";
-      outboxTable: "alert_outbox";
+      outbox: Readonly<{
+        currentDeadCountSemantics: "status_equals_dead_at_as_of";
+        currentDeadStatus: "dead";
+        dueAgeSecondsSemantics: "as_of_minus_oldest_due_or_expired_time_floor_seconds";
+        dueAgeSecondsNullSemantics: "no_due_or_expired_work_at_as_of";
+        dueStatuses: readonly ["pending", "retry"];
+        dueTimeColumn: "next_attempt_at";
+        expiredProcessingStatus: "processing";
+        expiredProcessingTimeColumn: "lease_expires_at";
+        statusColumn: "status";
+        table: "alert_outbox";
+      }>;
       runtimeTable: "alert_runtime_status";
     }>
   | Readonly<{
+      backlogBytesBindingField: "backlogBytes";
+      backlogBytesColumn: "backlog_bytes";
+      backlogBytesMaximum: 1_000_000_000_000;
+      backlogCountBindingField: "backlogCount";
       backlogCountColumn: "backlog_count";
+      backlogCountMaximum: 1_000_000_000;
       componentColumn: "component";
       consecutiveNonzeroSamplesColumn: "consecutive_nonzero_samples";
+      consecutiveNonzeroSamplesMaximum: 1_000_000;
       criticalDurationSeconds: 900;
       dimension: "queue_name";
+      invalidBindingMetrics: "unknown";
       method: "metrics";
       metricSampledAtColumn: "metric_sampled_at";
       mode: "queue_metrics";
       nonzeroSinceAtColumn: "nonzero_since_at";
+      numericValidation: "finite_safe_nonnegative_integer";
+      oldestMessageAgeSecondsColumn: "oldest_message_age_seconds";
+      oldestMessageAgeSecondsMaximum: 1_000_000_000;
+      oldestMessageTimestampBindingField: "oldestMessageTimestamp";
+      oldestMessageTimestampNormalization: "sampled_at_minus_oldest_message_timestamp_floor_seconds";
       queueComponentByName: typeof ALERT_QUEUE_COMPONENTS;
       queueNames: readonly AlertQueueName[];
       sampleCadenceSeconds: 60;
@@ -793,6 +856,7 @@ export const ALERT_RULE_DEFINITIONS = {
       mode: "oauth_client_report",
       reasonColumn: "reason",
       reporterRefColumn: "reporter_ref",
+      reporterRefDomain: "reporter_hmac",
       reporterRefHashVersionColumn: "reporter_ref_hash_version",
       reporterUserIdColumn: "reporter_user_id",
       table: "oauth_client_report",
@@ -921,21 +985,33 @@ export const ALERT_RULE_DEFINITIONS = {
     id: "pgid.logout.delivery_health.v1",
     resolutionMode: automatic,
     source: {
-      attemptCompletedAtColumn: "completed_at",
-      attemptDeliveryIdColumn: "delivery_id",
-      attemptOutcomeColumn: "outcome",
-      attemptTable: "logout_delivery_attempt",
-      deadStatus: "dead",
-      deliveryClientIdColumn: "client_id",
-      deliveryCohortColumn: "created_at",
-      deliveryIdColumn: "id",
-      deliveryStatusColumn: "status",
-      deliveryTable: "logout_delivery",
+      currentSnapshot: {
+        clientIdColumn: "client_id",
+        createdAtColumn: "created_at",
+        deadStatus: "dead",
+        oldestAgeSecondsSemantics: "as_of_minus_oldest_current_unresolved_created_at_floor_seconds",
+        scope: "all_current_rows_at_as_of",
+        statusColumn: "status",
+        unresolvedStatuses: ["pending", "processing", "retry", "dead"],
+      },
       dimensions: ["global", "client_id"],
-      eligibleStatuses: ["pending", "processing", "retry", "delivered", "dead"],
-      leaseExpiredOutcome: "lease_expired",
       mode: "logout_delivery",
-      unresolvedStatuses: ["pending", "processing", "retry", "dead"],
+      windows: {
+        attemptCompletedAtColumn: "completed_at",
+        attemptCohortScope: "completed_at_in_half_open_window",
+        attemptDeliveryIdColumn: "delivery_id",
+        attemptOutcomeColumn: "outcome",
+        attemptTable: "logout_delivery_attempt",
+        deliveryClientIdColumn: "client_id",
+        deliveryCohortColumn: "created_at",
+        deliveryCohortScope: "created_at_in_half_open_window",
+        deliveryIdColumn: "id",
+        deliveryStatusColumn: "status",
+        deliveryTable: "logout_delivery",
+        eligibleStatuses: ["pending", "processing", "retry", "delivered", "dead"],
+        leaseExpiredOutcome: "lease_expired",
+        unresolvedStatuses: ["pending", "processing", "retry", "dead"],
+      },
     },
     sourceKind: d1Exact,
     thresholds: {
@@ -975,8 +1051,29 @@ export const ALERT_RULE_DEFINITIONS = {
     resolutionMode: automatic,
     source: {
       dimension: "global",
+      evaluator: {
+        ageSecondsSemantics: "as_of_minus_last_success_at_floor_seconds",
+        bootstrapRequirement: "enabled_row_created_before_rule_evaluation",
+        component: "evaluator",
+        componentColumn: "component",
+        enabledStatuses: ["healthy", "degraded", "failing", "unavailable"],
+        lastSuccessAtColumn: "last_success_at",
+        nullAgeSemantics: "last_success_at_is_null",
+        statusColumn: "status",
+      },
       mode: "alert_runtime",
-      outboxTable: "alert_outbox",
+      outbox: {
+        currentDeadCountSemantics: "status_equals_dead_at_as_of",
+        currentDeadStatus: "dead",
+        dueAgeSecondsSemantics: "as_of_minus_oldest_due_or_expired_time_floor_seconds",
+        dueAgeSecondsNullSemantics: "no_due_or_expired_work_at_as_of",
+        dueStatuses: ["pending", "retry"],
+        dueTimeColumn: "next_attempt_at",
+        expiredProcessingStatus: "processing",
+        expiredProcessingTimeColumn: "lease_expires_at",
+        statusColumn: "status",
+        table: "alert_outbox",
+      },
       runtimeTable: "alert_runtime_status",
     },
     sourceKind: d1Exact,
@@ -1007,15 +1104,27 @@ export const ALERT_RULE_DEFINITIONS = {
     id: "pgid.queue.dlq_approximate.v1",
     resolutionMode: automatic,
     source: {
+      backlogBytesBindingField: "backlogBytes",
+      backlogBytesColumn: "backlog_bytes",
+      backlogBytesMaximum: MAX_QUEUE_BACKLOG_BYTES,
+      backlogCountBindingField: "backlogCount",
       backlogCountColumn: "backlog_count",
+      backlogCountMaximum: MAX_EVIDENCE_VALUE,
       componentColumn: "component",
       consecutiveNonzeroSamplesColumn: "consecutive_nonzero_samples",
+      consecutiveNonzeroSamplesMaximum: MAX_RATIO_FIELD,
       criticalDurationSeconds: 900,
       dimension: "queue_name",
+      invalidBindingMetrics: "unknown",
       method: "metrics",
       metricSampledAtColumn: "metric_sampled_at",
       mode: "queue_metrics",
       nonzeroSinceAtColumn: "nonzero_since_at",
+      numericValidation: "finite_safe_nonnegative_integer",
+      oldestMessageAgeSecondsColumn: "oldest_message_age_seconds",
+      oldestMessageAgeSecondsMaximum: MAX_EVIDENCE_VALUE,
+      oldestMessageTimestampBindingField: "oldestMessageTimestamp",
+      oldestMessageTimestampNormalization: "sampled_at_minus_oldest_message_timestamp_floor_seconds",
       queueComponentByName: ALERT_QUEUE_COMPONENTS,
       queueNames: ALERT_QUEUE_NAMES,
       sampleCadenceSeconds: 60,
@@ -1109,11 +1218,15 @@ export interface FanoutGapSnapshot {
   missingOlderThan5mCount: number;
 }
 
+export interface LogoutDeliveryCurrentSnapshot {
+  currentDead: number;
+  currentUnresolved: number;
+  oldestUnresolvedAgeSeconds: number | null;
+}
+
 export interface LogoutDeliveryWindowMetrics {
-  dead: number;
   eligible: number;
   leaseExpired: number;
-  oldestUnresolvedAgeSeconds: number | null;
   unresolved: number;
 }
 
@@ -1124,9 +1237,11 @@ export interface AlertRuntimeSnapshot {
 }
 
 export interface QueueDepthSnapshot {
+  backlogBytes: number | null;
+  backlogCount: number | null;
   consecutiveNonzeroSamples: number | null;
-  depth: number | null;
   nonzeroSinceAt: string | null;
+  oldestMessageTimestamp: string | null;
   sampledAt: string | null;
 }
 
@@ -1181,11 +1296,11 @@ export type AlertRuleObservation =
       "pgid.security.fanout_gap.v1",
       { kind: "global" }
     > & { snapshot: FanoutGapSnapshot })
-  | WindowObservationBase<
+  | (WindowObservationBase<
       "pgid.logout.delivery_health.v1",
       { kind: "global" } | Extract<AlertDimension, { kind: "client_hmac" }>,
       LogoutDeliveryWindowMetrics
-    >
+    > & { current: LogoutDeliveryCurrentSnapshot })
   | (ObservationBase<
       "pgid.alert.runtime_health.v1",
       { kind: "global" }
@@ -1615,6 +1730,33 @@ function nullableInteger(
   return value === null ? null : integer(value, name, maximum);
 }
 
+function queueBindingInteger(
+  value: unknown,
+  maximum: number,
+): { valid: boolean; value: number | null } {
+  if (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > maximum) {
+    return { valid: false, value: null };
+  }
+  return { valid: true, value: value as number };
+}
+
+function queueBindingTimestamp(
+  value: unknown,
+): { valid: boolean; value: string | null } {
+  if (value === undefined || value === null) return { valid: true, value: null };
+  if (value instanceof Date) {
+    const timestamp = value.getTime();
+    return Number.isFinite(timestamp)
+      ? { valid: true, value: new Date(timestamp).toISOString() }
+      : { valid: false, value: null };
+  }
+  try {
+    return { valid: true, value: canonicalTimestamp(value, "oldestMessageTimestamp") };
+  } catch {
+    return { valid: false, value: null };
+  }
+}
+
 function parseCountMetrics(value: unknown): CountWindowMetrics {
   const record = exactRecord(value, ["count"], "count metrics");
   return { count: integer(record.count, "count") };
@@ -1688,27 +1830,43 @@ function parseAdminSensitiveMetrics(value: unknown): AdminSensitiveWindowMetrics
   return { protectedDenials, successes };
 }
 
-function parseLogoutMetrics(value: unknown): LogoutDeliveryWindowMetrics {
+function parseLogoutCurrentSnapshot(value: unknown): LogoutDeliveryCurrentSnapshot {
   const record = exactRecord(
     value,
-    ["dead", "eligible", "leaseExpired", "oldestUnresolvedAgeSeconds", "unresolved"],
-    "logout-delivery metrics",
+    ["currentDead", "currentUnresolved", "oldestUnresolvedAgeSeconds"],
+    "logout-delivery current snapshot",
   );
-  const dead = integer(record.dead, "dead deliveries");
-  const eligible = integer(record.eligible, "eligible deliveries", MAX_RATIO_FIELD);
-  const leaseExpired = integer(record.leaseExpired, "expired leases");
+  const currentDead = integer(record.currentDead, "current dead deliveries");
+  const currentUnresolved = integer(
+    record.currentUnresolved,
+    "current unresolved deliveries",
+  );
   const oldestUnresolvedAgeSeconds = nullableInteger(
     record.oldestUnresolvedAgeSeconds,
     "oldest unresolved age",
   );
+  if (currentDead > currentUnresolved) {
+    throw new Error("current dead deliveries cannot exceed current unresolved deliveries");
+  }
+  if ((currentUnresolved === 0) !== (oldestUnresolvedAgeSeconds === null)) {
+    throw new Error("current unresolved count and oldest age must agree");
+  }
+  return { currentDead, currentUnresolved, oldestUnresolvedAgeSeconds };
+}
+
+function parseLogoutMetrics(value: unknown): LogoutDeliveryWindowMetrics {
+  const record = exactRecord(
+    value,
+    ["eligible", "leaseExpired", "unresolved"],
+    "logout-delivery window metrics",
+  );
+  const eligible = integer(record.eligible, "eligible deliveries", MAX_RATIO_FIELD);
+  const leaseExpired = integer(record.leaseExpired, "expired leases");
   const unresolved = integer(record.unresolved, "unresolved deliveries", MAX_RATIO_FIELD);
-  if (unresolved > eligible || dead > unresolved) {
-    throw new Error("logout delivery subsets cannot exceed their cohort");
+  if (unresolved > eligible) {
+    throw new Error("logout unresolved deliveries cannot exceed their window cohort");
   }
-  if ((unresolved === 0) !== (oldestUnresolvedAgeSeconds === null)) {
-    throw new Error("logout unresolved count and oldest age must agree");
-  }
-  return { dead, eligible, leaseExpired, oldestUnresolvedAgeSeconds, unresolved };
+  return { eligible, leaseExpired, unresolved };
 }
 
 function parseWindows<T>(
@@ -1728,19 +1886,6 @@ function nondecreasing(values: readonly number[], name: string): void {
     if (values[index] < values[index - 1]) {
       throw new Error(`${name} must be nondecreasing across nested windows`);
     }
-  }
-}
-
-function nullableAgeNondecreasing(
-  values: readonly (number | null)[],
-  name: string,
-): void {
-  let prior: number | null = null;
-  for (const value of values) {
-    if (prior !== null && (value === null || value < prior)) {
-      throw new Error(`${name} must be nondecreasing across nested windows`);
-    }
-    if (value !== null) prior = value;
   }
 }
 
@@ -1824,13 +1969,9 @@ function validateNestedWindows(
       break;
     case "pgid.logout.delivery_health.v1": {
       const logout = entries as LogoutDeliveryWindowMetrics[];
-      for (const key of ["dead", "eligible", "leaseExpired", "unresolved"] as const) {
+      for (const key of ["eligible", "leaseExpired", "unresolved"] as const) {
         nondecreasing(logout.map((entry) => entry[key]), key);
       }
-      nullableAgeNondecreasing(
-        logout.map((entry) => entry.oldestUnresolvedAgeSeconds),
-        "oldest unresolved age",
-      );
       break;
     }
     default:
@@ -1928,29 +2069,73 @@ export function parseAlertObservation(value: unknown): AlertRuleObservation {
       throw new Error("Queue alert dimension must name a Queue");
     }
     const dimension = base.dimension;
-    const snapshotRecord = exactRecord(
-      record.snapshot,
-      ["consecutiveNonzeroSamples", "depth", "nonzeroSinceAt", "sampledAt"],
-      "Queue snapshot",
+    const snapshotRecord = recordValue(record.snapshot, "Queue snapshot");
+    const queueSnapshotKeys = [
+      "backlogBytes",
+      "backlogCount",
+      "consecutiveNonzeroSamples",
+      "nonzeroSinceAt",
+      "oldestMessageTimestamp",
+      "sampledAt",
+    ] as const;
+    if (Object.keys(snapshotRecord).some((key) => !queueSnapshotKeys.includes(
+      key as (typeof queueSnapshotKeys)[number],
+    ))) {
+      throw new Error("Queue snapshot must contain only the canonical keys");
+    }
+    const backlogBytes = queueBindingInteger(
+      snapshotRecord.backlogBytes,
+      MAX_QUEUE_BACKLOG_BYTES,
     );
+    const backlogCount = queueBindingInteger(
+      snapshotRecord.backlogCount,
+      MAX_EVIDENCE_VALUE,
+    );
+    const oldestMessageTimestamp = queueBindingTimestamp(
+      snapshotRecord.oldestMessageTimestamp,
+    );
+    const bindingMetricsValid = backlogBytes.valid &&
+      backlogCount.valid &&
+      oldestMessageTimestamp.valid;
     return {
       asOf: base.asOf,
       dimension,
       ruleId,
       snapshot: {
+        backlogBytes: bindingMetricsValid ? backlogBytes.value : null,
+        backlogCount: bindingMetricsValid ? backlogCount.value : null,
         consecutiveNonzeroSamples: nullableInteger(
           snapshotRecord.consecutiveNonzeroSamples,
           "consecutive Queue samples",
+          MAX_RATIO_FIELD,
         ),
-        depth: nullableInteger(snapshotRecord.depth, "Queue depth"),
         nonzeroSinceAt: snapshotRecord.nonzeroSinceAt === null
           ? null
           : canonicalTimestamp(snapshotRecord.nonzeroSinceAt, "nonzeroSinceAt"),
+        oldestMessageTimestamp: bindingMetricsValid
+          ? oldestMessageTimestamp.value
+          : null,
         sampledAt: snapshotRecord.sampledAt === null
           ? null
           : canonicalTimestamp(snapshotRecord.sampledAt, "sampledAt"),
       },
     };
+  }
+  if (ruleId === "pgid.logout.delivery_health.v1") {
+    const record = exactRecord(
+      value,
+      ["asOf", "current", "dimension", "ruleId", "windows"],
+      "logout-delivery observation",
+    );
+    const base = observationBase(record, ruleId);
+    if (base.dimension.kind !== "global" && base.dimension.kind !== "client_hmac") {
+      throw new Error("logout-delivery alert dimension must be global or client HMAC");
+    }
+    const dimension = base.dimension;
+    const current = parseLogoutCurrentSnapshot(record.current);
+    const windows = parseWindows(record.windows, parseLogoutMetrics);
+    validateNestedWindows(ruleId, windows);
+    return { asOf: base.asOf, current, dimension, ruleId, windows };
   }
   const record = exactRecord(
     value,
@@ -1994,11 +2179,6 @@ export function parseAlertObservation(value: unknown): AlertRuleObservation {
       validateNestedWindows(ruleId, windows);
       return { ...base, ruleId, windows } as AlertRuleObservation;
     }
-    case "pgid.logout.delivery_health.v1": {
-      const windows = parseWindows(record.windows, parseLogoutMetrics);
-      validateNestedWindows(ruleId, windows);
-      return { ...base, ruleId, windows } as AlertRuleObservation;
-    }
     default: {
       const exhaustive: never = ruleId;
       throw new Error(`unsupported alert observation: ${String(exhaustive)}`);
@@ -2015,8 +2195,10 @@ function ratioBag(metrics: RatioWindowMetrics): MetricBag {
 }
 
 interface KnownQueueSnapshot {
+  backlogBytes: number;
   consecutiveNonzeroSamples: number;
   depth: number;
+  oldestMessageAgeSeconds: number;
 }
 
 function knownQueueSnapshot(
@@ -2024,26 +2206,41 @@ function knownQueueSnapshot(
   asOf: string,
 ): KnownQueueSnapshot | null {
   if (
-    snapshot.depth === null ||
+    snapshot.backlogBytes === null ||
+    snapshot.backlogCount === null ||
     snapshot.sampledAt === null ||
     snapshot.consecutiveNonzeroSamples === null ||
     snapshot.sampledAt !== asOf
   ) {
     return null;
   }
-  if (snapshot.depth === 0) {
+  if (snapshot.backlogCount === 0) {
     return snapshot.nonzeroSinceAt === null &&
-        snapshot.consecutiveNonzeroSamples === 0
-      ? { consecutiveNonzeroSamples: 0, depth: 0 }
+        snapshot.consecutiveNonzeroSamples === 0 &&
+        snapshot.backlogBytes === 0 &&
+        snapshot.oldestMessageTimestamp === null
+      ? {
+        backlogBytes: 0,
+        consecutiveNonzeroSamples: 0,
+        depth: 0,
+        oldestMessageAgeSeconds: 0,
+      }
       : null;
   }
   if (
     snapshot.nonzeroSinceAt === null ||
-    snapshot.consecutiveNonzeroSamples < 1
+    snapshot.consecutiveNonzeroSamples < 1 ||
+    snapshot.oldestMessageTimestamp === null
   ) {
     return null;
   }
-  const elapsed = new Date(snapshot.sampledAt).getTime() -
+  const sampledAt = new Date(snapshot.sampledAt).getTime();
+  const oldestMessageAgeMilliseconds = sampledAt -
+    new Date(snapshot.oldestMessageTimestamp).getTime();
+  if (oldestMessageAgeMilliseconds < 0) return null;
+  const oldestMessageAgeSeconds = Math.floor(oldestMessageAgeMilliseconds / 1_000);
+  if (oldestMessageAgeSeconds > MAX_EVIDENCE_VALUE) return null;
+  const elapsed = sampledAt -
     new Date(snapshot.nonzeroSinceAt).getTime();
   if (elapsed < 0) return null;
   const samples = snapshot.consecutiveNonzeroSamples;
@@ -2052,10 +2249,12 @@ function knownQueueSnapshot(
   }
   const elapsedFullMinutes = Math.floor(elapsed / 60_000);
   return {
+    backlogBytes: snapshot.backlogBytes,
     // One persisted metric proves both a contiguous sample streak and elapsed
     // duration. Fifteen samples without fifteen full minutes remains fourteen.
     consecutiveNonzeroSamples: Math.min(samples, elapsedFullMinutes),
-    depth: snapshot.depth,
+    depth: snapshot.backlogCount,
+    oldestMessageAgeSeconds,
   };
 }
 
@@ -2138,11 +2337,12 @@ function metricsForObservation(
       for (const window of ALERT_WINDOW_KEYS) {
         const metrics = observation.windows[window];
         mapped[window] = {
-          dead: metrics.dead,
+          dead: observation.current.currentDead,
           denominator: metrics.eligible,
           leaseExpired: metrics.leaseExpired,
           numerator: metrics.unresolved,
-          oldestUnresolvedAgeSeconds: metrics.oldestUnresolvedAgeSeconds ?? 0,
+          oldestUnresolvedAgeSeconds:
+            observation.current.oldestUnresolvedAgeSeconds ?? 0,
         };
       }
       return mapped;

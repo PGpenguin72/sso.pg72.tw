@@ -33,13 +33,32 @@ export function expectedPreviewJobCondition(policy = dastPolicy) {
   )} && github.ref == '${policy.preview.defaultRef}' }}`;
 }
 
+const codeOwnedExactEnvironmentValues = Object.freeze({
+  DAST_ALLOWED_PREVIEW_ORIGIN: "${{ vars.PGID_DAST_PREVIEW_ORIGIN }}",
+  DAST_PREVIEW_OPT_IN: "${{ vars.PGID_DAST_PREVIEW_OPT_IN }}",
+  DAST_TARGET: "${{ vars.PGID_DAST_PREVIEW_ORIGIN }}",
+});
+const codeOwnedStaticEnvironmentValues = Object.freeze({
+  CI: "1",
+  NO_COLOR: "1",
+});
+const codeOwnedEnvironmentValues = Object.freeze({
+  ...codeOwnedExactEnvironmentValues,
+  ...codeOwnedStaticEnvironmentValues,
+});
+const codeOwnedExpressionContexts = Object.freeze([
+  "vars.PGID_DAST_PREVIEW_ORIGIN",
+  "vars.PGID_DAST_PREVIEW_OPT_IN",
+]);
+
 function forbiddenEnvironmentKey(key) {
   const normalized = key.toUpperCase();
   return (
+    normalized.startsWith("CLOUDFLARE_") ||
+    normalized.startsWith("CF_") ||
+    normalized.startsWith("WRANGLER_") ||
     [
       "BASH_ENV",
-      "CLOUDFLARE_API_KEY",
-      "CLOUDFLARE_API_TOKEN",
       "ENV",
       "GITHUB_ENV",
       "GITHUB_PATH",
@@ -60,13 +79,64 @@ function forbiddenEnvironmentKey(key) {
 }
 
 function environmentValue(policy, key) {
-  return policy.exactValues[key] ?? policy.safeStaticValues[key];
+  return policy.exactValues?.[key] ?? policy.safeStaticValues?.[key];
 }
 
 function expressionContexts(value) {
   const contexts = [];
   for (const match of value.matchAll(/\$\{\{\s*([^{}]+?)\s*}}/g)) contexts.push(match[1].trim());
   return contexts;
+}
+
+function validateEnvironmentPolicyDefinition(environmentPolicy, label) {
+  const errors = [];
+  if (!environmentPolicy || typeof environmentPolicy !== "object") {
+    return [`${label} lacks a code-owned environment policy`];
+  }
+  const groups = [
+    ["exactValues", environmentPolicy.exactValues, codeOwnedExactEnvironmentValues],
+    ["safeStaticValues", environmentPolicy.safeStaticValues, codeOwnedStaticEnvironmentValues],
+  ];
+  for (const [groupName, configured, codeOwned] of groups) {
+    if (!configured || typeof configured !== "object" || Array.isArray(configured)) {
+      errors.push(`${label} ${groupName} must be a mapping`);
+      continue;
+    }
+    for (const [key, value] of Object.entries(configured)) {
+      if (forbiddenEnvironmentKey(key)) {
+        errors.push(`${label} environment policy contains a code-owned forbidden key`);
+      }
+      if (!Object.hasOwn(codeOwned, key)) {
+        errors.push(`${label} environment policy key is outside the code-owned allowlist`);
+      } else if (value !== codeOwned[key]) {
+        errors.push(`${label} environment policy value differs from the code-owned value`);
+      }
+    }
+  }
+  const contexts = environmentPolicy.allowedExpressionContexts;
+  if (
+    !Array.isArray(contexts) ||
+    JSON.stringify([...new Set(contexts)].sort()) !==
+      JSON.stringify([...codeOwnedExpressionContexts].sort())
+  ) {
+    errors.push(`${label} expression contexts differ from the code-owned allowlist`);
+  }
+  for (const [workflowName, scopes] of Object.entries(environmentPolicy.scopes ?? {})) {
+    const scopedKeys = [
+      ...(scopes.workflow ?? []),
+      ...Object.values(scopes.jobs ?? {}).flat(),
+      ...Object.values(scopes.steps ?? {}).flat(),
+    ];
+    for (const key of scopedKeys) {
+      if (forbiddenEnvironmentKey(key) || !Object.hasOwn(codeOwnedEnvironmentValues, key)) {
+        errors.push(`${label}.${workflowName} scope contains a non-code-owned environment key`);
+      }
+      if (environmentValue(environmentPolicy, key) === undefined) {
+        errors.push(`${label}.${workflowName} scope references an undefined environment key`);
+      }
+    }
+  }
+  return [...new Set(errors)];
 }
 
 function validateEnvironmentScope(
@@ -96,12 +166,16 @@ function validateEnvironmentScope(
     }
     const actual = value[key];
     const expected = environmentValue(environmentPolicy, key);
+    const codeOwnedExpected = codeOwnedEnvironmentValues[key];
     if (typeof actual !== "string") {
       errors.push(`${label} env values must be exact strings`);
       continue;
     }
     if (expected === undefined || actual !== expected) {
       errors.push(`${label} env value differs from the exact key/value policy`);
+    }
+    if (!Object.hasOwn(codeOwnedEnvironmentValues, key) || actual !== codeOwnedExpected) {
+      errors.push(`${label} env value differs from the code-owned key/value allowlist`);
     }
     const contexts = expressionContexts(actual);
     if (/[\r\n]/.test(actual)) errors.push(`${label} env values must be single-line`);
@@ -128,8 +202,11 @@ export function validateWorkflowEnvironment(document, filename, policy = workflo
   const basename = path.basename(filename);
   const environmentPolicy = policy.environmentPolicy;
   const scopes = environmentPolicy?.scopes?.[basename];
-  if (!environmentPolicy || !scopes) return [`${basename} lacks an exact environment policy`];
-  const errors = [];
+  const errors = validateEnvironmentPolicyDefinition(environmentPolicy, basename);
+  if (!environmentPolicy || !scopes) {
+    errors.push(`${basename} lacks an exact environment policy`);
+    return [...new Set(errors)];
+  }
   const workflow = validateEnvironmentScope(
     document.env,
     scopes.workflow ?? [],

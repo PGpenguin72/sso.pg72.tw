@@ -51,10 +51,15 @@ reconciliation, a production Worker dry-run artifact scan, and a
 dependency/license inventory. The artifact gate uses the same redacted secret
 families for text and bounded binary strings and rejects source maps, private
 machine paths, unexpected files, binding/config drift, and size regressions. CI
-keeps only the redacted inventories for seven days. Source fixture and reviewed
-generated non-secret assignment allowances are exact path/key/value triples,
-never placeholder substrings. Unsafe diagnostic paths are normalized and
-represented only by a short SHA-256 identifier.
+keeps only the redacted inventories for seven days. Assignment keys are
+case/separator-normalized only after bounded declaration/object-key parsing;
+source fixture and reviewed generated enum/metadata/fallback-sentinel allowances
+are exact raw-path, normalized-key, complete-value triples, never placeholder
+substrings. Workflow
+environment keys/values are restricted by a code-owned allowlist; all
+`CLOUDFLARE_*`, legacy `CF_*`, and `WRANGLER_*` keys are independently denied.
+Unsafe diagnostic paths are normalized and represented only by a short SHA-256
+identifier.
 
 `pnpm dast:local` starts only ephemeral loopback Workers with synthetic values
 and fresh local D1 state. Its credential-free probes cover health/readiness,

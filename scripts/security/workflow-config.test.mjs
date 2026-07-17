@@ -137,7 +137,7 @@ test("rejects dynamic, secret-context, multiline, and default-denied env values"
   );
 });
 
-test("rejects execution preload, package-manager, PATH, and credential environment keys", () => {
+test("rejects execution, credential, and every Cloudflare/Wrangler environment key", () => {
   for (const key of [
     "NODE_OPTIONS",
     "BASH_ENV",
@@ -150,7 +150,32 @@ test("rejects execution preload, package-manager, PATH, and credential environme
     "npm_config_prefix",
     "PNPM_CONFIG_GLOBALCONFIG",
     "PNPM_HOME",
+    "CLOUDFLARE_EMAIL",
+    "CLOUDFLARE_ACCESS_CLIENT_ID",
+    "CLOUDFLARE_ACCESS_CLIENT_SECRET",
+    "CLOUDFLARE_ENV",
+    "CLOUDFLARE_API_BASE_URL",
+    "CLOUDFLARE_ACCOUNT_ID",
     "CLOUDFLARE_API_TOKEN",
+    "CLOUDFLARE_API_KEY",
+    "CF_EMAIL",
+    "CF_ACCESS_CLIENT_ID",
+    "CF_ACCESS_CLIENT_SECRET",
+    "CF_ENV",
+    "CF_API_BASE_URL",
+    "CF_ACCOUNT_ID",
+    "cf_api_token",
+    "CF_API_KEY",
+    "WRANGLER_EMAIL",
+    "WRANGLER_ACCESS_CLIENT_ID",
+    "WRANGLER_ACCESS_CLIENT_SECRET",
+    "WRANGLER_ENV",
+    "WRANGLER_ENVIRONMENT",
+    "WRANGLER_API_BASE_URL",
+    "WRANGLER_ACCOUNT_ID",
+    "WRANGLER_API_TOKEN",
+    "WRANGLER_API_KEY",
+    "WRANGLER_SEND_METRICS",
     "AWS_SECRET_ACCESS_KEY",
   ]) {
     const document = workflow();
@@ -167,24 +192,75 @@ test("rejects execution preload, package-manager, PATH, and credential environme
   }
 });
 
-test("document and command validators reject malicious env on an approved command", () => {
+test("code-owned policy rejects forbidden and newly invented environment allowances", () => {
+  for (const [group, key] of [
+    ["exactValues", "CLOUDFLARE_EMAIL"],
+    ["safeStaticValues", "CF_ACCOUNT_ID"],
+    ["safeStaticValues", "WRANGLER_SEND_METRICS"],
+    ["safeStaticValues", "REVIEWED_BUT_NOT_CODE_OWNED"],
+  ]) {
+    const policy = structuredClone(workflowPolicy);
+    policy.environmentPolicy[group][key] = "fixed-value";
+    const errors = validateWorkflowEnvironment(workflow(), "ci.yml", policy);
+    assert.ok(
+      errors.some((error) => /code-owned forbidden|outside the code-owned allowlist/.test(error)),
+      key,
+    );
+  }
+
   const document = YAML.parse(
     readFileSync(new URL("../../.github/workflows/dast-preview.yml", import.meta.url), "utf8"),
   );
-  const stepIndex = document.jobs["safe-dast"].steps.findIndex(
-    (step) => step.run === "pnpm dast:preview",
-  );
-  document.jobs["safe-dast"].steps[stepIndex].env = {
-    NODE_OPTIONS: "--require ./payload.cjs",
-  };
+  document.jobs["safe-dast"].env.DAST_TARGET = "${{ vars.UNREVIEWED_TARGET }}";
   const policy = structuredClone(workflowPolicy);
-  policy.environmentPolicy.exactValues.NODE_OPTIONS = "--require ./payload.cjs";
-  policy.environmentPolicy.scopes["dast-preview.yml"].steps[`safe-dast:${stepIndex}`] = [
-    "NODE_OPTIONS",
+  policy.environmentPolicy.exactValues.DAST_TARGET = "${{ vars.UNREVIEWED_TARGET }}";
+  policy.environmentPolicy.allowedExpressionContexts = [
+    ...policy.environmentPolicy.allowedExpressionContexts,
+    "vars.UNREVIEWED_TARGET",
   ];
-  const context = loadWorkflowCommandContext(undefined, policy);
-  assert.notDeepEqual(validateWorkflowDocument(document, "dast-preview.yml", undefined, policy), []);
-  assert.notDeepEqual(validateWorkflowCommands(document, "dast-preview.yml", context), []);
+  const errors = validateWorkflowEnvironment(document, "dast-preview.yml", policy);
+  assert.ok(errors.some((error) => error.includes("code-owned value")));
+  assert.ok(errors.some((error) => error.includes("code-owned allowlist")));
+});
+
+test("hard-denies a forbidden inherited workflow environment even with matching policy", () => {
+  const document = workflow();
+  document.env = { CLOUDFLARE_EMAIL: "operator@example.invalid" };
+  const policy = structuredClone(workflowPolicy);
+  policy.environmentPolicy.exactValues.CLOUDFLARE_EMAIL = "operator@example.invalid";
+  policy.environmentPolicy.scopes["ci.yml"].workflow = ["CLOUDFLARE_EMAIL"];
+  assert.ok(
+    validateWorkflowEnvironment(document, "ci.yml", policy).some((error) =>
+      error.includes("forbidden execution/credential key"),
+    ),
+  );
+});
+
+test("document and command validators reject malicious env on an approved command", () => {
+  for (const [key, value] of [
+    ["NODE_OPTIONS", "--require ./payload.cjs"],
+    ["CLOUDFLARE_EMAIL", "operator@example.invalid"],
+    ["CF_ACCOUNT_ID", "preview-account"],
+    ["WRANGLER_API_BASE_URL", "https://example.invalid"],
+  ]) {
+    const document = YAML.parse(
+      readFileSync(new URL("../../.github/workflows/dast-preview.yml", import.meta.url), "utf8"),
+    );
+    const stepIndex = document.jobs["safe-dast"].steps.findIndex(
+      (step) => step.run === "pnpm dast:preview",
+    );
+    document.jobs["safe-dast"].steps[stepIndex].env = { [key]: value };
+    const policy = structuredClone(workflowPolicy);
+    policy.environmentPolicy.exactValues[key] = value;
+    policy.environmentPolicy.scopes["dast-preview.yml"].steps[`safe-dast:${stepIndex}`] = [key];
+    const context = loadWorkflowCommandContext(undefined, policy);
+    assert.notDeepEqual(
+      validateWorkflowDocument(document, "dast-preview.yml", undefined, policy),
+      [],
+      key,
+    );
+    assert.notDeepEqual(validateWorkflowCommands(document, "dast-preview.yml", context), [], key);
+  }
 });
 
 test("rejects multiline environment-file writes and command-level environment injection", () => {
@@ -194,7 +270,11 @@ test("rejects multiline environment-file writes and command-level environment in
     'cat <<EOF >> "$GITHUB_ENV"\nBASH_ENV=/tmp/payload\nEOF',
     "env NODE_OPTIONS=--import=./payload.mjs pnpm check",
     "npm_config_userconfig=/tmp/npmrc pnpm install --frozen-lockfile",
+    "CLOUDFLARE_EMAIL=operator@example.invalid pnpm check",
     "CLOUDFLARE_API_TOKEN=credential pnpm check",
+    "env CF_ACCOUNT_ID=preview-account pnpm check",
+    "export WRANGLER_ENV=preview; pnpm check",
+    'echo "CF_API_TOKEN=credential" >> "$GITHUB_ENV"',
     "echo '${{ secrets.CLOUDFLARE_API_TOKEN }}'",
   ]) {
     assert.notDeepEqual(dangerousCommandErrors(command), [], command);
@@ -207,6 +287,17 @@ test("enforces exact Preview actor/ref condition and authorization step order", 
   );
   assert.equal(document.jobs["safe-dast"].if, expectedPreviewJobCondition());
   assert.deepEqual(validateWorkflowDocument(document, "dast-preview.yml"), []);
+  const previewEnvironmentKeys = Object.keys(document.jobs["safe-dast"].env).sort();
+  assert.deepEqual(previewEnvironmentKeys, [
+    "DAST_ALLOWED_PREVIEW_ORIGIN",
+    "DAST_PREVIEW_OPT_IN",
+    "DAST_TARGET",
+  ]);
+  assert.ok(
+    previewEnvironmentKeys.every(
+      (key) => !/^(?:CLOUDFLARE_|CF_|WRANGLER_)/i.test(key),
+    ),
+  );
 
   for (const mutate of [
     (value) => (value.jobs["safe-dast"].if = "${{ github.ref == 'refs/heads/main' }}"),

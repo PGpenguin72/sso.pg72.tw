@@ -1,8 +1,13 @@
 # Release Security Assurance
 
-This runbook describes source-only release gates. None of these commands deploys
-a Worker, touches remote D1/Queue state, provisions a client, or sends real
-credentials.
+This runbook records the tested source-local boundary for one exact checkout.
+The checked-in command/workflow validators permit Wrangler types, local dev, and
+`deploy --dry-run` paths, while rejecting deploy and remote-resource commands;
+they do not authorize any remote mutation or credential use. Tool installation
+and the live advisory check still contact their public download/registry
+sources. A passing run is evidence for the exact source, pinned tools, runner
+environment, and probes exercised; it is not proof about a compromised
+dependency/toolchain or an untested operator command.
 
 ## Required Local Gate
 
@@ -20,8 +25,8 @@ pnpm dast:local
 | Gate | Command / evidence |
 | --- | --- |
 | Worker static analysis | Oxlint type-aware `no-floating-promises` and `no-misused-promises` over both Worker implementations |
-| Secret scan | required checksum-pinned Gitleaks over complete Git history; explicit bounded/redacted tracked, ordinary-untracked, and ignored-sensitive-filename traversal; exact audited path/key/value assignment allowances; captured Secretlint output |
-| Workflow/config | actionlint, immutable Action SHAs, least permissions, exact workflow command order and workflow/job/step environment scopes, recursively exact package scripts/local-script allowlist, and exact source/generated Wrangler binding targets |
+| Secret scan | required checksum-pinned Gitleaks over complete Git history; explicit bounded/redacted tracked, ordinary-untracked, and ignored-sensitive-filename traversal; normalized assignment keys with exact audited raw-path/key/value allowances; captured Secretlint output |
+| Workflow/config | actionlint, immutable Action SHAs, least permissions, exact workflow command order and code-owned workflow/job/step environment scopes, recursively exact package scripts/local-script allowlist, and exact source/generated Wrangler binding targets |
 | Dependency policy | live `pnpm audit --json` reconciled field-for-field with `security/accepted-advisories.json` |
 | Production artifact | `wrangler deploy --dry-run --outdir` modules plus Static Assets scanned against `security/release-policy.json`, including bounded text/binary secret families |
 | Inventory | path-free package/version/license inventory generated from the frozen pnpm install |
@@ -30,9 +35,9 @@ pnpm dast:local
 CI first runs `pnpm check`, installs actionlint and Gitleaks from the exact
 versions and SHA-256 checksums in `security/tool-versions.json`, then runs the
 security and local DAST gates. Every third-party Action is pinned to the
-immutable commit recorded in the same file. CI retains only
-`.artifacts/release/` for seven days; it does not retain the dry-run bundle or
-temporary D1 state.
+immutable commit recorded in the same file. The checked-in upload step selects
+only `.artifacts/release/` with seven-day retention; the dry-run bundle and
+temporary D1 state are outside that selected path.
 
 The npm tools are exact-pinned in `package.json` and the lockfile. Type-aware
 analysis uses `oxlint-tsgolint@0.24.0`, the newest release old enough to satisfy
@@ -47,11 +52,16 @@ source JSONC and the Vite-generated config must match exactly. The inventory
 records that typed contract plus module/asset allowlists, hashes, and byte
 limits. It rejects `.map`, `.dev.vars`, key files, private machine paths,
 embedded text or binary credential families, symlinks, and unexpected files.
-Generated config path metadata is validated in place but never uploaded.
+Generated config path metadata is validated in place and is outside the current
+artifact upload allowlist.
 
 `security/workflow-policy.json` default-denies environment keys at workflow,
-job, and step scope. Each approved key has one exact static value or one complete
-approved `vars.*` expression; inheritance cannot be overridden. Execution
+job, and step scope. Policy may select only the code-owned `DAST_*` expressions
+and exact `CI=1`/`NO_COLOR=1` values; policy cannot invent another key, value, or
+expression context. All `CLOUDFLARE_*`, legacy `CF_*`, and `WRANGLER_*` keys are
+code-owned hard denials, including inherited scopes, inline shell assignments,
+and policy/workflow co-mutations. Preview DAST therefore accepts its three
+non-credential `DAST_*` variables, not a Cloudflare API credential. Execution
 preload, package-manager configuration, `PATH`, credential contexts, and writes
 to `GITHUB_ENV`/`GITHUB_PATH` are independently rejected by both the document
 and reachable-command validators.
@@ -60,12 +70,19 @@ The explicit working-tree scanner obtains tracked and ordinary untracked files
 from Git, then traverses ignored dependency/build-cache trees only to find
 sensitive filenames such as root/nested `.dev.vars*`, `.env*`, key/PEM and
 credential configuration paths. `.git` is excluded. Files larger than the
-bounded scan limit and symlinks fail closed. Assignment parsing is bounded and
+bounded scan limit and symlinks fail closed. Assignment parsing strips one
+bounded `const`/`let`/`var`/`export const` or quoted-object-key prefix, normalizes
+camelCase and non-alphanumeric separators into case-insensitive key tokens, and
 supports single, double, and backtick quoting, whitespace/passphrases,
-colon/equal separators, and multiline quoted values. Source fixtures and
-reviewed generated non-secret enums are exempt only as exact
-path/key/complete-value triples; words such as `test`, `example`, or
-`placeholder` have no special meaning. Findings expose a
+colon/equal separators, and multiline quoted values. Nonliteral code/type/shell
+expressions are not embedded credential bytes and are excluded before literal
+allowance matching. Source fixtures, generated error/format metadata, PGID token
+prefixes, and Better Auth's bundled default-secret fallback sentinel are exempt
+only as exact raw-path/normalized-key/complete-value triples; words such as
+`test`, `example`, or `placeholder` have no special meaning. PGID's source and
+generated config contracts separately require `BETTER_AUTH_SECRET`; the sentinel
+allowance is not evidence for an untested runtime path if that requirement later
+changes. Findings expose a
 rule and a normalized safe relative path, never matching bytes. Sensitive,
 secret-bearing, absolute/outside, control-character, and other terminal-unsafe
 paths are replaced with a short SHA-256 identifier across working-tree and
@@ -100,21 +117,25 @@ source change. Do not add an audit ignore.
 1. It checks that fixed loopback ports `5173` and `5174` are free.
 2. It builds PGID, creates two temporary persistence directories, and applies
    SSO/test-RP migrations locally.
-3. It starts both Workers with `wrangler dev --local`, synthetic placeholder
-   values, and no real credentials.
+3. It starts both Workers with `wrangler dev --local` and command-line synthetic
+   values. The runner removes `CLOUDFLARE_*`, `WRANGLER_OAUTH_TOKEN`, and
+   credential-suffixed inherited variables; use a clean local shell because the
+   test does not assert that every unrelated host variable is absent.
 4. It probes health/readiness, discovery/JWKS, public OIDC error behavior,
    resource-indicator rejection, dynamic-registration denial, logout/admin
    denial, cache/security headers, CSRF rejection, and test-RP error handling.
 5. A `finally` block terminates both process groups and deletes the temporary
    persistence root.
 
-The scanner accepts only canonical literal `http://127.0.0.1:5173` and
+The currently tested scanner accepts only canonical literal
+`http://127.0.0.1:5173` and
 `http://127.0.0.1:5174`; `localhost`, DNS, IPv6, credentials, paths, queries and
 other ports fail. Requests cannot override Host/forwarding headers and use
-manual redirect handling, so no redirect hop is followed. It sends no cookies,
-bearer tokens, client secrets, OAuth codes, Passkey data, or user credentials.
-It does not test real Google/Passkey login, consent, authenticated admin
-mutations, rate exhaustion, destructive behavior, or load.
+manual redirect handling. The asserted 15 PGID and two test-RP probes construct
+no cookies, bearer tokens, client secrets, OAuth codes, Passkey data, or user
+credentials. Passing this set does not cover real Google/Passkey login, consent,
+authenticated admin mutations, rate exhaustion, destructive behavior, load, or
+an unreviewed future probe.
 
 ## Isolated Preview
 

@@ -157,9 +157,15 @@ workflow/job/step environment scopes, exact source/generated Wrangler binding
 targets, the dependency advisory policy, a production
 `wrangler deploy --dry-run --outdir` artifact gate, a path-free
 dependency/license inventory, and negative tests for the automation itself.
-Assignment exceptions, including source fixtures and reviewed generated
-non-secret enums, require an exact path, key, and complete value; marker
-substrings do not waive a finding. Diagnostics normalize
+Assignment parsing strips one bounded declaration/quoted-object-key prefix and
+normalizes camelCase and non-alphanumeric separators before secret-family
+classification. Exceptions, including source fixtures and reviewed generated
+enums/metadata plus Better Auth's required-config fallback sentinel, require an
+exact raw path, normalized key, and complete value;
+marker substrings do not waive a finding. Workflow environment policy can select
+only code-owned `DAST_*`, `CI`, and `NO_COLOR` values; `CLOUDFLARE_*`, legacy
+`CF_*`, and `WRANGLER_*` remain hard-denied even if policy and workflow are
+changed together. Diagnostics normalize
 safe relative paths and replace sensitive, secret-bearing, absolute/outside, or
 terminal-unsafe paths with a short SHA-256 identifier. The audit covers runtime,
 build, and development dependencies so tooling advisories cannot bypass the

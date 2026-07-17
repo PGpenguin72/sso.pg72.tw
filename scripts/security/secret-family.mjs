@@ -16,43 +16,88 @@ const tokenRules = [
   { name: "private-key", pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/ },
 ];
 
-const secretKeySource =
-  "[A-Z][A-Z0-9_.-]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL)[A-Z0-9_.-]*";
-const assignmentPrefix =
-  `^[\\t ]*(?:["'\\\`](${secretKeySource})["'\\\`]|(${secretKeySource}))[\\t ]*[:=][\\t ]*`;
-const quotedAssignmentPatterns = ['"', "'", "`"].map((quote) => {
-  const escapedQuote = quote === "`" ? "\\`" : quote;
-  return new RegExp(
-    `${assignmentPrefix}${escapedQuote}((?:\\\\[\\s\\S]|(?!${escapedQuote})[\\s\\S]){8,4096})${escapedQuote}[\\t ]*[,;]?[\\t ]*(?:(?:#|//).*)?$`,
-    "gim",
-  );
-});
-const oversizedQuotedAssignmentPatterns = ['"', "'", "`"].map((quote) => {
-  const escapedQuote = quote === "`" ? "\\`" : quote;
-  return new RegExp(
-    `${assignmentPrefix}${escapedQuote}(?:\\\\[\\s\\S]|(?!${escapedQuote})[\\s\\S]){4097}`,
-    "gim",
-  );
-});
-const unquotedAssignmentPattern = new RegExp(
-  `^[\\t ]*(?:["'\\\`](${secretKeySource})["'\\\`]|(${secretKeySource}))[\\t ]*[:=][\\t ]*([^\\r\\n]{8,4096})$`,
-  "gim",
+const MIN_ASSIGNMENT_VALUE_CHARS = 8;
+const MAX_ASSIGNMENT_VALUE_CHARS = 4096;
+const assignmentDeclarationSource =
+  "(?:(?:export[\\t ]+const|const|let|var)[\\t ]+)?";
+const bareAssignmentKeySource = "([A-Za-z_$][A-Za-z0-9_$./@-]{0,127})";
+
+function escapedDelimiter(quote) {
+  return quote === "`" ? "\\`" : quote;
+}
+
+const assignmentKeySources = [
+  ...['"', "'", "`"].map((quote) => {
+    const delimiter = escapedDelimiter(quote);
+    return `${delimiter}((?:\\\\[^\\r\\n]|(?!${delimiter})[^\\r\\n]){1,128})${delimiter}`;
+  }),
+  bareAssignmentKeySource,
+];
+
+function assignmentPrefixSource(keySource) {
+  return `^[\\t ]*${assignmentDeclarationSource}${keySource}[\\t ]*[:=][\\t ]*`;
+}
+
+const quotedAssignmentPatterns = assignmentKeySources.flatMap((keySource) =>
+  ['"', "'", "`"].map((quote) => {
+    const delimiter = escapedDelimiter(quote);
+    return {
+      pattern: new RegExp(
+        `${assignmentPrefixSource(keySource)}${delimiter}((?:\\\\[\\s\\S]|(?!${delimiter})[\\s\\S]){${MIN_ASSIGNMENT_VALUE_CHARS},${MAX_ASSIGNMENT_VALUE_CHARS}})${delimiter}[\\t ]*[,;]?[\\t ]*(?:(?:#|//).*)?$`,
+        "gm",
+      ),
+      quote,
+    };
+  }),
 );
-const oversizedUnquotedAssignmentPattern = new RegExp(
-  `${assignmentPrefix}[^\\r\\n]{4097}`,
-  "gm",
+const oversizedQuotedAssignmentPatterns = assignmentKeySources.flatMap((keySource) =>
+  ['"', "'", "`"].map((quote) => {
+    const delimiter = escapedDelimiter(quote);
+    return new RegExp(
+      `${assignmentPrefixSource(keySource)}${delimiter}(?:\\\\[\\s\\S]|(?!${delimiter})[\\s\\S]){${MAX_ASSIGNMENT_VALUE_CHARS + 1}}`,
+      "gm",
+    );
+  }),
+);
+const unquotedAssignmentPatterns = assignmentKeySources.map(
+  (keySource) =>
+    new RegExp(
+      `${assignmentPrefixSource(keySource)}([^\\r\\n]{${MIN_ASSIGNMENT_VALUE_CHARS},${MAX_ASSIGNMENT_VALUE_CHARS}})$`,
+      "gm",
+    ),
+);
+const oversizedUnquotedAssignmentPatterns = assignmentKeySources.map(
+  (keySource) =>
+    new RegExp(
+      `${assignmentPrefixSource(keySource)}[^\\r\\n]{${MAX_ASSIGNMENT_VALUE_CHARS + 1}}`,
+      "gm",
+    ),
 );
 const binaryAssignmentPattern = new RegExp(
-  `(?:^|[\\x00\\r\\n])(${secretKeySource})[\\x00\\t ]{0,8}[:=][\\x00\\t ]{0,8}([^\\x00\\r\\n]{8,4096})`,
+  `(?:^|[\\x00\\r\\n])(?:(?:export[\\x00\\t ]+const|const|let|var)[\\x00\\t ]+)?${bareAssignmentKeySource}[\\x00\\t ]{0,8}[:=][\\x00\\t ]{0,8}([^\\x00\\r\\n]{${MIN_ASSIGNMENT_VALUE_CHARS},${MAX_ASSIGNMENT_VALUE_CHARS}})`,
   "gm",
 );
 
 // These reviewed source fixtures and generated error enums are not substring
-// heuristics. An allowance applies only when path, key, and complete value match.
+// heuristics. An allowance applies only when raw path, normalized key, and
+// complete value match.
+function assignmentAllowances(entries) {
+  const allowances = new Map();
+  for (const [normalizedKey, value] of entries) {
+    if (!/^[A-Z0-9]+(?:_[A-Z0-9]+)*$/.test(normalizedKey)) {
+      throw new Error("assignment allowance keys must already be normalized");
+    }
+    const values = allowances.get(normalizedKey) ?? new Set();
+    values.add(value);
+    allowances.set(normalizedKey, values);
+  }
+  return allowances;
+}
+
 const auditedAssignmentAllowances = new Map([
   [
     "apps/sso/.dev.vars.example",
-    new Map([
+    assignmentAllowances([
       ["BETTER_AUTH_SECRET", "generate-with-openssl-rand-base64-32"],
       ["GOOGLE_CLIENT_SECRET", "replace-with-google-oauth-client-secret"],
       ["TURNSTILE_SECRET_KEY", "replace-with-turnstile-secret-key"],
@@ -60,7 +105,7 @@ const auditedAssignmentAllowances = new Map([
   ],
   [
     "apps/sso/vitest.config.ts",
-    new Map([
+    assignmentAllowances([
       ["BETTER_AUTH_SECRET", "test-only-better-auth-secret-0000000000000000"],
       ["GOOGLE_CLIENT_SECRET", "test-only-google-secret"],
       ["TURNSTILE_SECRET_KEY", "test-only-turnstile-secret"],
@@ -69,43 +114,119 @@ const auditedAssignmentAllowances = new Map([
   ],
   [
     "apps/sso/test/registration.spec.ts",
-    new Map([
+    assignmentAllowances([
       ["GITHUB_CLIENT_SECRET", "test-github-client-secret"],
-      ["TURNSTILE_SECRET_KEY", "undefined"],
+      ["TURNSTILE_TOKEN", "test-route-token"],
+      ["TURNSTILE_TOKEN", "not-used"],
+      ["ACCESS_TOKEN", "test-google-access-token"],
+      ["ACCESS_TOKEN", "test-github-access-token"],
     ]),
   ],
   [
     "apps/sso/worker/auth.cli.ts",
-    new Map([
+    assignmentAllowances([
       ["BETTER_AUTH_SECRET", "cli-only-placeholder-secret-at-least-32-characters"],
       ["GOOGLE_CLIENT_SECRET", "cli-placeholder"],
     ]),
   ],
   [
+    "apps/sso/test/introspection.spec.ts",
+    assignmentAllowances([
+      ["TOKEN", "pg72_at_sensitive-token"],
+      ["TOKEN", "pg72_at_unknown"],
+    ]),
+  ],
+  [
+    "apps/sso/test/sid.spec.ts",
+    assignmentAllowances([["CLIENT_SECRET_PREFIX", "pg72_cs_"]]),
+  ],
+  [
+    "apps/sso/test/telegram.spec.ts",
+    assignmentAllowances([["BOT_TOKEN", "123456:AAvitest-telegram-bot-token"]]),
+  ],
+  [
+    "apps/sso/worker/auth.ts",
+    assignmentAllowances([
+      ["OPAQUE_ACCESS_TOKEN", "pg72_at_"],
+      ["REFRESH_TOKEN", "pg72_rt_"],
+    ]),
+  ],
+  [
+    "apps/sso/worker/config.ts",
+    assignmentAllowances([["CLIENT_SECRET_PREFIX", "pg72_cs_"]]),
+  ],
+  [
+    "apps/test-rp/test/worker.spec.ts",
+    assignmentAllowances([
+      ["ACCESS_TOKEN", "test-access-token"],
+      ["TOKEN", "legacy-null-sid-session-token"],
+    ]),
+  ],
+  [
     "wiki/developers/register-client.md",
-    new Map([["OIDC_CLIENT_SECRET", "pg72_cs_xxxxxxxx"]]),
+    assignmentAllowances([["OIDC_CLIENT_SECRET", "pg72_cs_xxxxxxxx"]]),
   ],
   [
     "artifact:worker/index.js",
-    new Map([
+    assignmentAllowances([
       ["INVALID_PASSWORD", "Invalid password"],
       ["INVALID_EMAIL_OR_PASSWORD", "Invalid email or password"],
       ["INVALID_TOKEN", "Invalid token"],
+      ["TOKEN_EXPIRED", "Token expired"],
       ["ID_TOKEN_NOT_SUPPORTED", "id_token not supported"],
+      ["PASSWORD_TOO_SHORT", "Password too short"],
+      ["PASSWORD_TOO_LONG", "Password too long"],
+      ["CREDENTIAL_ACCOUNT_NOT_FOUND", "Credential account not found"],
       [
         "USER_ALREADY_HAS_PASSWORD",
         "User already has a password. Provide that to delete the account.",
       ],
+      ["PASSWORD_ALREADY_SET", "User already has a password set"],
+      ["DEFAULT_SECRET", "better-auth-secret-12345678901234567890"],
+      ["PEM_CONVERTER_PRIVATE_KEY_TAG", "PRIVATE KEY"],
+      ["CHALLENGE_PASSWORD_ATTRIBUTE_NAME", "Challenge Password"],
+      ["CLIENT_SECRET_PREFIX", "pg72_cs_"],
+      ["OPAQUE_ACCESS_TOKEN", "pg72_at_"],
+      ["REFRESH_TOKEN", "pg72_rt_"],
     ]),
   ],
 ]);
 
-function normalizedRelativePath(value) {
-  return typeof value === "string" ? value.replaceAll("\\", "/") : "";
+function normalizeAssignmentKey(value) {
+  return value
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toUpperCase();
 }
 
-function isAuditedFixture(relativePath, key, value) {
-  return auditedAssignmentAllowances.get(normalizedRelativePath(relativePath))?.get(key) === value;
+function isSecretAssignmentKey(normalizedKey) {
+  const tokens = normalizedKey.split("_").filter(Boolean);
+  const tokenSet = new Set(tokens);
+  if (tokenSet.has("CREDENTIAL") && tokenSet.has("DEVICE") && tokenSet.has("TYPE")) {
+    return false;
+  }
+  if (
+    tokens.some((token) =>
+      ["SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "CREDENTIALS"].includes(token),
+    ) ||
+    (tokenSet.has("API") && tokenSet.has("KEY")) ||
+    (tokenSet.has("PRIVATE") && tokenSet.has("KEY"))
+  ) {
+    return true;
+  }
+  if (!tokenSet.has("TOKEN")) return false;
+  if (tokenSet.has("ENDPOINT")) return false;
+  if (tokenSet.has("TYPE") && tokenSet.has("HINT")) return false;
+  return true;
+}
+
+function isAuditedFixture(relativePath, normalizedKey, value) {
+  return (
+    typeof relativePath === "string" &&
+    auditedAssignmentAllowances.get(relativePath)?.get(normalizedKey)?.has(value) === true
+  );
 }
 
 function unquotedValue(value) {
@@ -117,29 +238,24 @@ function unquotedValue(value) {
 
 function assignments(content) {
   const matches = [];
-  for (const pattern of quotedAssignmentPatterns) {
+  for (const { pattern, quote } of quotedAssignmentPatterns) {
     pattern.lastIndex = 0;
     for (let match = pattern.exec(content); match; match = pattern.exec(content)) {
-      const key = match[1] ?? match[2];
-      if (match[1] !== undefined || key === key.toUpperCase()) {
-        matches.push({ key, value: match[3] });
-      }
+      matches.push({
+        normalizedKey: normalizeAssignmentKey(match[1]),
+        quotedValue: true,
+        valueQuote: quote,
+        value: match[2],
+      });
     }
   }
-  unquotedAssignmentPattern.lastIndex = 0;
-  for (
-    let match = unquotedAssignmentPattern.exec(content);
-    match;
-    match = unquotedAssignmentPattern.exec(content)
-  ) {
-    const value = unquotedValue(match[3]);
-    const key = match[1] ?? match[2];
-    if (
-      value.length >= 8 &&
-      !/^["'`]/.test(value) &&
-      (match[1] !== undefined || key === key.toUpperCase())
-    ) {
-      matches.push({ key, value });
+  for (const pattern of unquotedAssignmentPatterns) {
+    pattern.lastIndex = 0;
+    for (let match = pattern.exec(content); match; match = pattern.exec(content)) {
+      const value = unquotedValue(match[2]);
+      if (value.length >= MIN_ASSIGNMENT_VALUE_CHARS && !/^["'`]/.test(value)) {
+        matches.push({ normalizedKey: normalizeAssignmentKey(match[1]), quotedValue: false, value });
+      }
     }
   }
   binaryAssignmentPattern.lastIndex = 0;
@@ -149,21 +265,28 @@ function assignments(content) {
     match = binaryAssignmentPattern.exec(content)
   ) {
     if (match[0].includes("\0")) {
-      matches.push({ key: match[1], value: unquotedValue(match[2]) });
+      matches.push({
+        normalizedKey: normalizeAssignmentKey(match[1]),
+        quotedValue: false,
+        value: unquotedValue(match[2]),
+      });
     }
   }
   return matches;
 }
 
-function hasOversizedAssignment(content) {
-  for (const pattern of [...oversizedQuotedAssignmentPatterns, oversizedUnquotedAssignmentPattern]) {
+function oversizedAssignmentKeys(content) {
+  const normalizedKeys = [];
+  for (const pattern of [
+    ...oversizedQuotedAssignmentPatterns,
+    ...oversizedUnquotedAssignmentPatterns,
+  ]) {
     pattern.lastIndex = 0;
     for (let match = pattern.exec(content); match; match = pattern.exec(content)) {
-      const key = match[1] ?? match[2];
-      if (match[1] !== undefined || key === key.toUpperCase()) return true;
+      normalizedKeys.push(normalizeAssignmentKey(match[1]));
     }
   }
-  return false;
+  return normalizedKeys;
 }
 
 function representations(bytes) {
@@ -182,16 +305,43 @@ function representations(bytes) {
   return [raw, printable.join("\n"), raw.replace(/[^\x09\x0a\x0d\x20-\x7e]+/g, "\n")];
 }
 
+function isCodeLikePath(relativePath) {
+  return /\.(?:[cm]?[jt]sx?|jsonc?|patch|sql)$/i.test(relativePath);
+}
+
+function isNonliteralAssignment(relativePath, quotedValue, valueQuote, value) {
+  if (quotedValue) {
+    return isCodeLikePath(relativePath) && valueQuote === "`" && value.includes("${");
+  }
+  if (/\$\(|\$\{|^(?:await|new)\b|=>/.test(value)) return true;
+  if (!isCodeLikePath(relativePath)) return false;
+  return (
+    /^(?:true|false|null|undefined|void|[+-]?(?:\d+\.?\d*|\.\d+))$/.test(value) ||
+    /^[a-z_$][A-Za-z0-9_$]*$/.test(value) ||
+    /^(?=[A-Za-z0-9_$]*[a-z])[A-Z][A-Za-z0-9_$]*$/.test(value) ||
+    /^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(value) ||
+    /^![A-Za-z_$][A-Za-z0-9_$]*$/.test(value) ||
+    /^[A-Za-z_$][A-Za-z0-9_$]*(?:\??\.[A-Za-z_$][A-Za-z0-9_$]*)+$/.test(value) ||
+    /(?:===?|!==?|<=|>=|\?|&&|\|\||[.()[\]{}]|^!|\s[|&+*/-]\s)/.test(value)
+  );
+}
+
 export function scanBufferForSecrets(bytes, { relativePath = "" } = {}) {
   const findings = new Set();
   for (const content of representations(bytes)) {
-    if (hasOversizedAssignment(content)) findings.add("assigned-secret");
     for (const rule of tokenRules) {
       rule.pattern.lastIndex = 0;
       if (rule.pattern.test(content)) findings.add(rule.name);
     }
-    for (const { key, value } of assignments(content)) {
-      if (!isAuditedFixture(relativePath, key, value)) findings.add("assigned-secret");
+    if (oversizedAssignmentKeys(content).some(isSecretAssignmentKey)) {
+      findings.add("assigned-secret");
+    }
+    for (const { normalizedKey, quotedValue, valueQuote, value } of assignments(content)) {
+      if (!isSecretAssignmentKey(normalizedKey)) continue;
+      if (isNonliteralAssignment(relativePath, quotedValue, valueQuote, value)) continue;
+      if (!isAuditedFixture(relativePath, normalizedKey, value)) {
+        findings.add("assigned-secret");
+      }
     }
   }
   return [...findings].sort();

@@ -27,8 +27,7 @@
     },
     "safeStaticValues": {
       "CI": "1",
-      "NO_COLOR": "1",
-      "WRANGLER_SEND_METRICS": "false"
+      "NO_COLOR": "1"
     },
     "allowedExpressionContexts": [
       "vars.PGID_DAST_PREVIEW_ORIGIN",

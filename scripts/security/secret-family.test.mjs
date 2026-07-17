@@ -165,7 +165,6 @@ test("allows only exact audited path, key, and complete value triples", () => {
       "GITHUB_CLIENT_SECRET",
       "test-github-client-secret",
     ],
-    ["apps/sso/test/registration.spec.ts", "TURNSTILE_SECRET_KEY", "undefined"],
     [
       "apps/sso/worker/auth.cli.ts",
       "BETTER_AUTH_SECRET",
@@ -198,6 +197,12 @@ test("allows only exact audited path, key, and complete value triples", () => {
       relativePath,
     );
     assert.ok(
+      scanBufferForSecrets(bytes, { relativePath: relativePath.replaceAll("/", "\\") }).includes(
+        "assigned-secret",
+      ),
+      relativePath,
+    );
+    assert.ok(
       scanBufferForSecrets(Buffer.from(`${key}="${value}-appended"`), { relativePath }).includes(
         "assigned-secret",
       ),
@@ -210,6 +215,118 @@ test("allows only exact audited path, key, and complete value triples", () => {
       relativePath,
     );
   }
+});
+
+test("normalizes declarations and quoted or unquoted secret keys before classification", () => {
+  for (const assignment of [
+    'clientSecret: "camel case secret material 123456"',
+    'const SERVICE_SECRET = "const declaration material 123456"',
+    "let apiKey = 'let declaration material 123456'",
+    "var accessToken = `var declaration material 123456`",
+    'export const privateKey = "export declaration material 123456"',
+    '"client-secret": "quoted kebab material 123456"',
+    "'client.secret': 'quoted dot material 123456'",
+    "`client@secret`: `quoted nonalnum material 123456`",
+    "const clientSecret = unquoted passphrase with spaces : and = punctuation 123456",
+  ]) {
+    assert.ok(
+      scanBufferForSecrets(Buffer.from(assignment)).includes("assigned-secret"),
+      assignment,
+    );
+  }
+  assert.ok(
+    scanBufferForSecrets(Buffer.from(`const serviceSecret = ${"F".repeat(40)}`), {
+      relativePath: "artifact:worker/extra.js",
+    }).includes("assigned-secret"),
+  );
+});
+
+test("excludes nonliteral source expressions rather than treating them as embedded bytes", () => {
+  for (const assignment of [
+    "const clientSecret = env.CLIENT_SECRET",
+    "privateKey: CryptoKey;",
+    "hasSecret: row.hasSecret === 1,",
+    "const accessToken = `pg72_at_${runtimeSuffix}`",
+    "const tokenResponse = await oauth.authorizationCodeGrantRequest(",
+    "sessionTokenMaxAge: dontRememberMe ? void 0 : ctx.context.sessionConfig.expiresIn",
+    "sendResetPassword: !!options.emailAndPassword?.sendResetPassword",
+  ]) {
+    assert.ok(
+      !scanBufferForSecrets(Buffer.from(assignment), { relativePath: "example.ts" }).includes(
+        "assigned-secret",
+      ),
+      assignment,
+    );
+  }
+});
+
+test("applies allowances to normalized keys only after detecting the secret family", () => {
+  const relativePath = "apps/sso/.dev.vars.example";
+  const value = "generate-with-openssl-rand-base64-32";
+  const camelAssignment = Buffer.from(`betterAuthSecret="${value}"`);
+  assert.ok(
+    !scanBufferForSecrets(camelAssignment, { relativePath }).includes("assigned-secret"),
+  );
+  assert.ok(
+    scanBufferForSecrets(camelAssignment, { relativePath: `other/${relativePath}` }).includes(
+      "assigned-secret",
+    ),
+  );
+
+  const directToken = ["xoxb", "314159265358979323846264"].join("-");
+  const findings = scanBufferForSecrets(
+    Buffer.from(`betterAuthSecret="${directToken}"`),
+    { relativePath },
+  );
+  assert.ok(findings.includes("slack-token"));
+  assert.ok(findings.includes("assigned-secret"));
+});
+
+test("allows exact generated enums but rejects wrong paths, keys, and values", () => {
+  const exactEnums = [
+    ["INVALID_PASSWORD", "Invalid password"],
+    ["INVALID_EMAIL_OR_PASSWORD", "Invalid email or password"],
+    ["INVALID_TOKEN", "Invalid token"],
+    ["TOKEN_EXPIRED", "Token expired"],
+    ["ID_TOKEN_NOT_SUPPORTED", "id_token not supported"],
+    ["PASSWORD_TOO_SHORT", "Password too short"],
+    ["PASSWORD_TOO_LONG", "Password too long"],
+    ["CREDENTIAL_ACCOUNT_NOT_FOUND", "Credential account not found"],
+    [
+      "USER_ALREADY_HAS_PASSWORD",
+      "User already has a password. Provide that to delete the account.",
+    ],
+    ["PASSWORD_ALREADY_SET", "User already has a password set"],
+    ["DEFAULT_SECRET", "better-auth-secret-12345678901234567890"],
+    ["PEM_CONVERTER_PRIVATE_KEY_TAG", "PRIVATE KEY"],
+    ["CHALLENGE_PASSWORD_ATTRIBUTE_NAME", "Challenge Password"],
+    ["CLIENT_SECRET_PREFIX", "pg72_cs_"],
+    ["OPAQUE_ACCESS_TOKEN", "pg72_at_"],
+    ["REFRESH_TOKEN", "pg72_rt_"],
+  ];
+  const source = Buffer.from(
+    exactEnums.map(([key, value]) => `${key}: "${value}",`).join("\n"),
+  );
+  assert.ok(
+    !scanBufferForSecrets(source, { relativePath: "artifact:worker/index.js" }).includes(
+      "assigned-secret",
+    ),
+  );
+  assert.ok(
+    scanBufferForSecrets(source, { relativePath: "artifact:static/index.js" }).includes(
+      "assigned-secret",
+    ),
+  );
+  assert.ok(
+    !scanBufferForSecrets(Buffer.from('invalidPassword: "Invalid password",'), {
+      relativePath: "artifact:worker/index.js",
+    }).includes("assigned-secret"),
+  );
+  assert.ok(
+    scanBufferForSecrets(Buffer.from('INVALID_PASSWORD: "Invalid password changed",'), {
+      relativePath: "artifact:worker/index.js",
+    }).includes("assigned-secret"),
+  );
 });
 
 test("placeholder-like substrings never waive an unaudited assigned value", () => {
@@ -267,6 +384,14 @@ test("parses quote variants, whitespace, passphrases, punctuation, and multiline
 
   const oversized = `SERVICE_SECRET="${"Z".repeat(4097)}"`;
   assert.ok(scanBufferForSecrets(Buffer.from(oversized)).includes("assigned-secret"));
+
+  for (const metadata of [
+    'tokenEndpoint: "https://issuer.example/token"',
+    'tokenEndpointAuthMethod: "client_secret_post"',
+    'token_type_hint: "access_token"',
+  ]) {
+    assert.ok(!scanBufferForSecrets(Buffer.from(metadata)).includes("assigned-secret"), metadata);
+  }
 });
 
 test("hashes secret-family, sensitive, outside, and terminal-unsafe diagnostic paths", () => {

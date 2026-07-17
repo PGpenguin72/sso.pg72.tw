@@ -74,10 +74,11 @@ test("renders a private synthetic fixture through every integrated migration", a
           WHERE type = 'table'
             AND name IN (
               'alert_state', 'security_alert', 'alert_outbox',
-              'alert_delivery_attempt', 'alert_runtime_status'
+              'alert_delivery_attempt', 'alert_runtime_status',
+              'alert_evaluator_bootstrap'
             );`,
       ),
-      "5",
+      "6",
     );
     assert.equal(
       sqlite(

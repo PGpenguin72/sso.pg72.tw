@@ -37,8 +37,9 @@ CREATE TRIGGER "audit_event_actor_ref_update_guard"
 BEFORE UPDATE OF "actor_ref", "actor_ref_hash_version" ON "audit_event"
 WHEN (NEW."actor_ref" IS NULL) <> (NEW."actor_ref_hash_version" IS NULL)
   OR (OLD."actor_ref" IS NULL
-    AND OLD."actor_user_id" IS NULL
-    AND NEW."actor_ref" IS NOT NULL)
+    AND NEW."actor_ref" IS NOT NULL
+    AND (OLD."actor_user_id" IS NULL
+      OR NEW."actor_user_id" IS NOT OLD."actor_user_id"))
   OR (OLD."actor_ref" IS NOT NULL AND (
     NEW."actor_ref" IS NOT OLD."actor_ref"
     OR NEW."actor_ref_hash_version" IS NOT OLD."actor_ref_hash_version"
@@ -88,8 +89,9 @@ BEFORE UPDATE OF "reporter_ref", "reporter_ref_hash_version"
 ON "oauth_client_report"
 WHEN (NEW."reporter_ref" IS NULL) <> (NEW."reporter_ref_hash_version" IS NULL)
   OR (OLD."reporter_ref" IS NULL
-    AND OLD."reporter_user_id" IS NULL
-    AND NEW."reporter_ref" IS NOT NULL)
+    AND NEW."reporter_ref" IS NOT NULL
+    AND (OLD."reporter_user_id" IS NULL
+      OR NEW."reporter_user_id" IS NOT OLD."reporter_user_id"))
   OR (OLD."reporter_ref" IS NOT NULL AND (
     NEW."reporter_ref" IS NOT OLD."reporter_ref"
     OR NEW."reporter_ref_hash_version" IS NOT OLD."reporter_ref_hash_version"
@@ -1898,6 +1900,7 @@ WHEN unixepoch(NEW."updated_at") < unixepoch(OLD."updated_at")
     ))
   OR (NEW."replay_count" = OLD."replay_count" + 1
     AND OLD."status" IN ('accepted', 'dead')
+    AND OLD."last_error_code" IS NOT 'payload_integrity'
     AND NEW."status" = 'pending'
     AND NEW."attempts" = 0
     AND unixepoch(NEW."next_attempt_at") >= unixepoch(NEW."updated_at"))
@@ -2193,6 +2196,14 @@ WHEN NEW."generation" <> 0
   OR NEW."revision" <> 0
   OR NEW."lease_id" IS NOT NULL
   OR NEW."lease_expires_at" IS NOT NULL
+  OR (NEW."component" = 'evaluator' AND (
+    NEW."status" <> 'disabled'
+    OR NEW."last_started_at" IS NOT NULL
+    OR NEW."last_success_at" IS NOT NULL
+    OR NEW."last_error_at" IS NOT NULL
+    OR NEW."last_error_code" IS NOT NULL
+    OR NEW."watermark_at" IS NOT NULL
+  ))
   OR (NEW."backlog_count" > 0 AND (
     NEW."consecutive_nonzero_samples" <> 1
     OR NEW."nonzero_since_at" <> NEW."metric_sampled_at"
@@ -2303,6 +2314,58 @@ WHEN NEW."component" <> OLD."component"
   )
 BEGIN
   SELECT RAISE(ABORT, 'invalid alert runtime status transition');
+END;
+
+-- The repository creates this anchor only after its first controlled evaluator
+-- success. SQL proves an immutable persisted transition tied to the exact
+-- current runtime row; it does not attest that external evaluator work ran.
+CREATE TABLE "alert_evaluator_bootstrap" (
+  "component" text PRIMARY KEY NOT NULL CHECK ("component" = 'evaluator'),
+  "first_success_at" date NOT NULL CHECK (
+    unixepoch("first_success_at") IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "first_success_at")
+      = "first_success_at"
+  ),
+  "source_generation" integer NOT NULL CHECK (
+    typeof("source_generation") = 'integer'
+    AND "source_generation" BETWEEN 1 AND 1000000
+  ),
+  "source_revision" integer NOT NULL CHECK (
+    typeof("source_revision") = 'integer'
+    AND "source_revision" BETWEEN 1 AND 1000000000
+  ),
+  FOREIGN KEY ("component") REFERENCES "alert_runtime_status" ("component")
+    ON DELETE RESTRICT
+);
+
+CREATE TRIGGER "alert_evaluator_bootstrap_insert_guard"
+BEFORE INSERT ON "alert_evaluator_bootstrap"
+WHEN EXISTS (SELECT 1 FROM "alert_evaluator_bootstrap")
+  OR NOT EXISTS (
+    SELECT 1
+      FROM "alert_runtime_status" AS runtime
+     WHERE runtime."component" = 'evaluator'
+       AND runtime."component" = NEW."component"
+       AND runtime."status" = 'healthy'
+       AND runtime."last_started_at" IS NOT NULL
+       AND runtime."last_success_at" = NEW."first_success_at"
+       AND runtime."generation" = NEW."source_generation"
+       AND runtime."revision" = NEW."source_revision"
+  )
+BEGIN
+  SELECT RAISE(ABORT, 'evaluator bootstrap must match controlled runtime success');
+END;
+
+CREATE TRIGGER "alert_evaluator_bootstrap_update_guard"
+BEFORE UPDATE ON "alert_evaluator_bootstrap"
+BEGIN
+  SELECT RAISE(ABORT, 'evaluator bootstrap is immutable');
+END;
+
+CREATE TRIGGER "alert_evaluator_bootstrap_delete_guard"
+BEFORE DELETE ON "alert_evaluator_bootstrap"
+BEGIN
+  SELECT RAISE(ABORT, 'evaluator bootstrap is immutable');
 END;
 
 CREATE INDEX "alert_runtime_status_operator_idx"

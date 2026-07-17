@@ -82,6 +82,14 @@ function createDependencyFixture() {
        id text,
        "consecutive_nonzero_samples" integer
      );
+     CREATE TABLE "alert_evaluator_bootstrap" (
+       "component" text,
+       "first_success_at" date,
+       "source_generation" integer,
+       "source_revision" integer,
+       FOREIGN KEY ("component") REFERENCES "alert_runtime_status" ("component")
+         ON DELETE RESTRICT
+     );
      CREATE UNIQUE INDEX "alert_state_semantic_identity_idx"
        ON "alert_state" (id);
      CREATE UNIQUE INDEX "security_alert_unresolved_state_idx"
@@ -101,6 +109,12 @@ function createDependencyFixture() {
        AFTER UPDATE ON "alert_delivery_attempt" BEGIN SELECT 1; END;
      CREATE TRIGGER "alert_runtime_status_transition_guard"
        AFTER UPDATE ON "alert_runtime_status" BEGIN SELECT 1; END;
+     CREATE TRIGGER "alert_evaluator_bootstrap_insert_guard"
+       BEFORE INSERT ON "alert_evaluator_bootstrap" BEGIN SELECT 1; END;
+     CREATE TRIGGER "alert_evaluator_bootstrap_update_guard"
+       BEFORE UPDATE ON "alert_evaluator_bootstrap" BEGIN SELECT 1; END;
+     CREATE TRIGGER "alert_evaluator_bootstrap_delete_guard"
+       BEFORE DELETE ON "alert_evaluator_bootstrap" BEGIN SELECT 1; END;
      CREATE INDEX "audit_event_type_subject_time_bounded_idx"
        ON "alert_state" (id);
      CREATE INDEX "audit_event_time_bounded_idx" ON "alert_state" (id);

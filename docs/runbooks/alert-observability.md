@@ -7,7 +7,7 @@
 
 ## What `0020` provides
 
-The additive migration creates five alert D1 sources, extends OAuth report
+The additive migration creates six alert D1 sources, extends OAuth report
 provenance, and defines one key-continuity sentinel:
 
 - `alert_state`: one immutable rule/environment/dimension identity with current
@@ -25,6 +25,9 @@ provenance, and defines one key-continuity sentinel:
   tuples and immutable terminal outcomes;
 - `alert_runtime_status`: bounded evaluator/delivery/Queue health watermarks,
   monotonic clocks, and five-minute maximum ownership leases;
+- `alert_evaluator_bootstrap`: one immutable evaluator-first-success anchor tied
+  by restricted foreign key to the runtime component and guarded against its
+  exact generation and revision;
 - `audit_event.actor_ref`/`actor_ref_hash_version` and
   `oauth_client_report.reporter_ref`/`reporter_ref_hash_version`: nullable
   persistent provenance for rows whose raw actor/reporter FK may later become
@@ -64,11 +67,49 @@ more than five minutes after its update. Samples cannot regress; a positive
 sample increments only at an exact 60-second interval, a late/missing sample
 restarts at one, and zero resets both continuity fields. Schema presence does
 not prove that the sampling loop exists. In particular, D1 cannot prove that an
-inserted `healthy`/`last_success_at` pair came from executed evaluator work. Only
-the future evaluator repository may publish that pair inside its controlled
-successful-run transaction, and consumers must require the
-`repository_controlled_successful_run_only` parser contract; status, generation,
-or revision alone is not bootstrap evidence.
+inserted `healthy`/`last_success_at` pair came from executed evaluator work. The
+evaluator therefore starts as `disabled` with null history. On its first
+repository-controlled success, one ordered D1 batch updates the runtime row to
+`healthy` with non-null success evidence, then inserts
+`alert_evaluator_bootstrap` with `INSERT ... SELECT` from that exact runtime row.
+The anchor is immutable and its parent runtime row cannot be deleted or
+replaced. This proves the persisted repository transition, not the external
+work itself; status, generation, or revision alone is never bootstrap evidence.
+
+Repository readers use this exact anchored projection and column order:
+
+```sql
+SELECT
+  b.component AS bootstrap_component,
+  b.first_success_at AS first_success_at,
+  b.source_generation AS source_generation,
+  b.source_revision AS source_revision,
+  r.component AS runtime_component,
+  r.status AS runtime_status,
+  r.generation AS runtime_generation,
+  r.revision AS runtime_revision,
+  r.last_started_at AS runtime_last_started_at,
+  r.last_success_at AS runtime_last_success_at,
+  r.last_error_at AS runtime_last_error_at,
+  r.last_error_code AS runtime_last_error_code,
+  r.updated_at AS runtime_updated_at
+FROM (SELECT 'evaluator' AS expected_component) AS e
+LEFT JOIN alert_evaluator_bootstrap AS b
+  ON b.component = e.expected_component
+LEFT JOIN alert_runtime_status AS r
+  ON r.component = e.expected_component
+```
+
+All four bootstrap aliases null means pre-bootstrap, regardless of the runtime
+row. Any non-null bootstrap alias means post-bootstrap forever; a corrupt or
+missing runtime projection is missing threshold input, never a return to
+pre-bootstrap. The parser accepts only component `evaluator`, canonical
+timestamps, source generation `1..1,000,000`, source revision
+`1..1,000,000,000`, a current generation/revision not behind the anchor, and the
+closed runtime status/error domains. It also requires
+`first_success_at <= last_success_at <= updated_at <= asOf` and
+`last_started_at <= updated_at`; current `last_started_at` need not precede the
+retained `last_success_at` after a later run starts.
 
 Logout health has two different time domains. `dead` counts every row currently
 dead until replay changes its state, and `oldest_unresolved_age_seconds` scans
@@ -213,7 +254,7 @@ table was introduced.
 Source presence alone must report observability as
 `source_present_unverified`, leaving continuity and drills blocked. A later
 reviewed slice must add the deterministic evaluator, versioned rule definitions,
-repository-controlled successful-run projection/parser and same-run proof,
+repository-controlled successful-run writer and same-run proof,
 dedicated alert Queue/DLQ, Email Service adapter, admin
 acknowledge/resolve/replay operations, and redaction/race/failure tests.
 

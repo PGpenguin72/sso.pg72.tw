@@ -598,7 +598,8 @@ describe("alert observability migration", () => {
          FROM sqlite_schema
         WHERE name IN (
           'alert_state', 'security_alert', 'alert_outbox',
-          'alert_delivery_attempt', 'alert_runtime_status',
+          'alert_delivery_attempt', 'alert_evaluator_bootstrap',
+          'alert_runtime_status',
           'alert_hash_key_sentinel', 'alert_state_semantic_identity_idx',
           'alert_outbox_due_idx', 'security_alert_unresolved_state_idx',
           'audit_event_time_bounded_idx',
@@ -614,6 +615,7 @@ describe("alert observability migration", () => {
     ).all<{ name: string; sql: string; type: string }>();
     expect(schema.results.map(({ name }) => name)).toEqual([
       "alert_delivery_attempt",
+      "alert_evaluator_bootstrap",
       "alert_hash_key_sentinel",
       "alert_outbox",
       "alert_outbox_due_idx",
@@ -633,6 +635,7 @@ describe("alert observability migration", () => {
     ]);
     for (const table of [
       "alert_delivery_attempt",
+      "alert_evaluator_bootstrap",
       "alert_hash_key_sentinel",
       "alert_outbox",
       "alert_runtime_status",
@@ -737,7 +740,33 @@ describe("alert observability migration", () => {
         .run();
     await expect(insertReport(opaque43(), null)).rejects.toThrow();
     await expect(insertReport(nonCanonical43(), 1)).rejects.toThrow();
-    await insertReport(opaque43(), 1);
+    await insertReport(null, null);
+    const reporterRef = opaque43();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE oauth_client_report
+            SET reporter_user_id = NULL, reporter_ref = ?,
+                reporter_ref_hash_version = 1
+          WHERE id = ?`,
+      )
+        .bind(reporterRef, reportId)
+        .run(),
+    ).rejects.toThrow();
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT reporter_user_id, reporter_ref
+           FROM oauth_client_report WHERE id = ?`,
+      )
+        .bind(reportId)
+        .first<{ reporter_ref: string | null; reporter_user_id: string }>(),
+    ).toEqual({ reporter_ref: null, reporter_user_id: sourceUserId });
+    await env.PG72_ID_DB.prepare(
+      `UPDATE oauth_client_report
+          SET reporter_ref = ?, reporter_ref_hash_version = 1
+        WHERE id = ?`,
+    )
+      .bind(reporterRef, reportId)
+      .run();
     await expect(
       env.PG72_ID_DB.prepare(
         `UPDATE oauth_client_report SET reporter_ref_hash_version = NULL
@@ -781,7 +810,31 @@ describe("alert observability migration", () => {
         .run();
     await expect(insertActorEvent(opaque43(), null)).rejects.toThrow();
     await expect(insertActorEvent(nonCanonical43(), 1)).rejects.toThrow();
-    await insertActorEvent(opaque43(), 1);
+    await insertActorEvent(null, null);
+    const actorRef = opaque43();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE audit_event
+            SET actor_user_id = NULL, actor_ref = ?, actor_ref_hash_version = 1
+          WHERE id = ?`,
+      )
+        .bind(actorRef, actorEventId)
+        .run(),
+    ).rejects.toThrow();
+    expect(
+      await env.PG72_ID_DB.prepare(
+        "SELECT actor_user_id, actor_ref FROM audit_event WHERE id = ?",
+      )
+        .bind(actorEventId)
+        .first<{ actor_ref: string | null; actor_user_id: string }>(),
+    ).toEqual({ actor_ref: null, actor_user_id: sourceUserId });
+    await env.PG72_ID_DB.prepare(
+      `UPDATE audit_event
+          SET actor_ref = ?, actor_ref_hash_version = 1
+        WHERE id = ?`,
+    )
+      .bind(actorRef, actorEventId)
+      .run();
     const noRefReportId = crypto.randomUUID();
     const noRefActorEventId = crypto.randomUUID();
     await env.PG72_ID_DB.batch([
@@ -2780,15 +2833,40 @@ describe("alert observability migration", () => {
     )
       .bind(NOW, NOW, deliveryKey("K"))
       .run();
+    const integrityDeadRow = await env.PG72_ID_DB.prepare(
+      `SELECT status, replay_count, attempts, next_attempt_at, lease_id,
+              lease_expires_at, accepted_at, dead_at, last_error_code,
+              updated_at
+         FROM alert_outbox WHERE delivery_key = ?`,
+    )
+      .bind(deliveryKey("K"))
+      .first();
     await expect(
       env.PG72_ID_DB.prepare(
         `UPDATE alert_outbox
-            SET status = 'pending', last_error_code = NULL, updated_at = ?
+            SET status = 'pending', replay_count = replay_count + 1,
+                attempts = 0, next_attempt_at = ?, lease_id = NULL,
+                lease_expires_at = NULL, accepted_at = NULL, dead_at = NULL,
+                last_error_code = NULL, updated_at = ?
           WHERE delivery_key = ?`,
       )
-        .bind(NOW, deliveryKey("K"))
+        .bind(
+          "2026-07-17T10:02:00.000Z",
+          "2026-07-17T10:02:00.000Z",
+          deliveryKey("K"),
+        )
         .run(),
     ).rejects.toThrow();
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT status, replay_count, attempts, next_attempt_at, lease_id,
+                lease_expires_at, accepted_at, dead_at, last_error_code,
+                updated_at
+           FROM alert_outbox WHERE delivery_key = ?`,
+      )
+        .bind(deliveryKey("K"))
+        .first(),
+    ).toEqual(integrityDeadRow);
     await insertOutbox({
       alertId,
       deliveryKey: deliveryKey("N"),
@@ -3182,11 +3260,9 @@ describe("alert observability migration", () => {
 
     await env.PG72_ID_DB.batch([
       env.PG72_ID_DB.prepare(
-        `INSERT INTO alert_runtime_status
-          (component, status, last_started_at, last_success_at, watermark_at,
-           updated_at)
-         VALUES ('evaluator', 'healthy', ?, ?, ?, ?)`,
-      ).bind(NOW, NOW, NOW, NOW),
+        `INSERT INTO alert_runtime_status (component, updated_at)
+         VALUES ('evaluator', ?)`,
+      ).bind(NOW),
       env.PG72_ID_DB.prepare(
         `INSERT INTO alert_runtime_status (component, updated_at)
          VALUES ('delivery', ?)`,
@@ -3513,7 +3589,7 @@ describe("alert observability migration", () => {
       )
         .bind(NOW, NOW)
         .run(),
-    ).resolves.toBeDefined();
+    ).rejects.toThrow();
     await expect(
       env.PG72_ID_DB.prepare(
         `INSERT INTO alert_runtime_status
@@ -3523,5 +3599,319 @@ describe("alert observability migration", () => {
         .bind(NOW, NOW)
         .run(),
     ).rejects.toThrow();
+  });
+
+  it("anchors the first controlled evaluator success exactly once", async () => {
+    const projectionSql = `SELECT
+      b.component AS bootstrap_component,
+      b.first_success_at AS first_success_at,
+      b.source_generation AS source_generation,
+      b.source_revision AS source_revision,
+      r.component AS runtime_component,
+      r.status AS runtime_status,
+      r.generation AS runtime_generation,
+      r.revision AS runtime_revision,
+      r.last_started_at AS runtime_last_started_at,
+      r.last_success_at AS runtime_last_success_at,
+      r.last_error_at AS runtime_last_error_at,
+      r.last_error_code AS runtime_last_error_code,
+      r.updated_at AS runtime_updated_at
+    FROM (SELECT 'evaluator' AS expected_component) AS e
+    LEFT JOIN alert_evaluator_bootstrap AS b
+      ON b.component = e.expected_component
+    LEFT JOIN alert_runtime_status AS r
+      ON r.component = e.expected_component`;
+    const projectionKeys = [
+      "bootstrap_component",
+      "first_success_at",
+      "source_generation",
+      "source_revision",
+      "runtime_component",
+      "runtime_status",
+      "runtime_generation",
+      "runtime_revision",
+      "runtime_last_started_at",
+      "runtime_last_success_at",
+      "runtime_last_error_at",
+      "runtime_last_error_code",
+      "runtime_updated_at",
+    ];
+    const preBootstrap = await env.PG72_ID_DB.prepare(projectionSql).first();
+    expect(Object.keys(preBootstrap ?? {})).toEqual(projectionKeys);
+    expect(preBootstrap).toEqual({
+      bootstrap_component: null,
+      first_success_at: null,
+      source_generation: null,
+      source_revision: null,
+      runtime_component: null,
+      runtime_status: null,
+      runtime_generation: null,
+      runtime_revision: null,
+      runtime_last_started_at: null,
+      runtime_last_success_at: null,
+      runtime_last_error_at: null,
+      runtime_last_error_code: null,
+      runtime_updated_at: null,
+    });
+
+    const bootstrapColumns = await env.PG72_ID_DB.prepare(
+      "PRAGMA table_info('alert_evaluator_bootstrap')",
+    ).all<{ name: string }>();
+    expect(bootstrapColumns.results.map(({ name }) => name)).toEqual([
+      "component",
+      "first_success_at",
+      "source_generation",
+      "source_revision",
+    ]);
+    const bootstrapForeignKeys = await env.PG72_ID_DB.prepare(
+      "PRAGMA foreign_key_list('alert_evaluator_bootstrap')",
+    ).all<{ from: string; on_delete: string; table: string; to: string }>();
+    expect(bootstrapForeignKeys.results).toEqual([
+      expect.objectContaining({
+        from: "component",
+        on_delete: "RESTRICT",
+        table: "alert_runtime_status",
+        to: "component",
+      }),
+    ]);
+
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO alert_runtime_status
+          (component, status, last_started_at, last_success_at, updated_at)
+         VALUES ('evaluator', 'healthy', ?, ?, ?)`,
+      )
+        .bind(NOW, NOW, NOW)
+        .run(),
+    ).rejects.toThrow();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO alert_evaluator_bootstrap
+          (component, first_success_at, source_generation)
+         VALUES ('evaluator', ?, 1)`,
+      )
+        .bind(NOW)
+        .run(),
+    ).rejects.toThrow();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO alert_evaluator_bootstrap
+          (component, first_success_at, source_generation, source_revision)
+         VALUES ('evaluator', ?, 1, 2)`,
+      )
+        .bind(NOW)
+        .run(),
+    ).rejects.toThrow();
+
+    await env.PG72_ID_DB.prepare(
+      `INSERT INTO alert_runtime_status (component, updated_at)
+       VALUES ('evaluator', ?)`,
+    )
+      .bind(NOW)
+      .run();
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT status, generation, revision, lease_id, lease_expires_at,
+                last_started_at, last_success_at, last_error_at,
+                last_error_code, watermark_at
+           FROM alert_runtime_status WHERE component = 'evaluator'`,
+      ).first(),
+    ).toEqual({
+      generation: 0,
+      last_error_at: null,
+      last_error_code: null,
+      last_started_at: null,
+      last_success_at: null,
+      lease_expires_at: null,
+      lease_id: null,
+      revision: 0,
+      status: "disabled",
+      watermark_at: null,
+    });
+    expect(
+      (
+        await env.PG72_ID_DB.prepare(
+          `INSERT INTO alert_evaluator_bootstrap
+            (component, first_success_at, source_generation, source_revision)
+           SELECT component, last_success_at, generation, revision
+             FROM alert_runtime_status
+            WHERE component = 'evaluator'
+              AND status = 'healthy'
+              AND last_success_at IS NOT NULL`,
+        ).run()
+      ).meta.changes,
+    ).toBe(0);
+
+    const leaseId = crypto.randomUUID();
+    await env.PG72_ID_DB.prepare(
+      `UPDATE alert_runtime_status
+          SET generation = 1, revision = 1, lease_id = ?,
+              lease_expires_at = '2026-07-17T10:05:01.000Z',
+              updated_at = '2026-07-17T10:00:01.000Z'
+        WHERE component = 'evaluator'`,
+    )
+      .bind(leaseId)
+      .run();
+    const successAt = "2026-07-17T10:00:02.000Z";
+    const successUpdate = () =>
+      env.PG72_ID_DB.prepare(
+        `UPDATE alert_runtime_status
+            SET status = 'healthy', revision = 2,
+                lease_id = NULL, lease_expires_at = NULL,
+                last_started_at = '2026-07-17T10:00:01.000Z',
+                last_success_at = ?, updated_at = ?
+          WHERE component = 'evaluator' AND lease_id = ?`,
+      ).bind(successAt, successAt, leaseId);
+    const explicitAnchor = (
+      firstSuccessAt: string,
+      sourceGeneration: number,
+      sourceRevision: number,
+    ) =>
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO alert_evaluator_bootstrap
+          (component, first_success_at, source_generation, source_revision)
+         VALUES ('evaluator', ?, ?, ?)`,
+      ).bind(firstSuccessAt, sourceGeneration, sourceRevision);
+
+    await expect(
+      env.PG72_ID_DB.batch([
+        successUpdate(),
+        explicitAnchor(successAt, 2, 2),
+      ]),
+    ).rejects.toThrow();
+    await expect(
+      env.PG72_ID_DB.batch([
+        successUpdate(),
+        explicitAnchor(successAt, 1, 3),
+      ]),
+    ).rejects.toThrow();
+    await expect(
+      env.PG72_ID_DB.batch([
+        successUpdate(),
+        explicitAnchor("2026-07-17T10:00:02Z", 1, 2),
+      ]),
+    ).rejects.toThrow();
+    await expect(
+      env.PG72_ID_DB.batch([
+        successUpdate(),
+        explicitAnchor(successAt, 1.5, 2),
+      ]),
+    ).rejects.toThrow();
+    await expect(
+      env.PG72_ID_DB.batch([
+        successUpdate(),
+        explicitAnchor(successAt, 1, 2.5),
+      ]),
+    ).rejects.toThrow();
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT status, generation, revision, lease_id, last_success_at
+           FROM alert_runtime_status WHERE component = 'evaluator'`,
+      ).first(),
+    ).toEqual({
+      generation: 1,
+      last_success_at: null,
+      lease_id: leaseId,
+      revision: 1,
+      status: "disabled",
+    });
+
+    const firstSuccessBatch = await env.PG72_ID_DB.batch([
+      successUpdate(),
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO alert_evaluator_bootstrap
+          (component, first_success_at, source_generation, source_revision)
+         SELECT component, last_success_at, generation, revision
+           FROM alert_runtime_status
+          WHERE component = 'evaluator'
+            AND status = 'healthy'
+            AND last_success_at IS NOT NULL
+            AND lease_id IS NULL`,
+      ),
+    ]);
+    expect(firstSuccessBatch.map(({ meta }) => meta.changes)).toEqual([1, 1]);
+    const anchoredProjection = await env.PG72_ID_DB.prepare(projectionSql).first();
+    expect(Object.keys(anchoredProjection ?? {})).toEqual(projectionKeys);
+    expect(anchoredProjection).toEqual({
+      bootstrap_component: "evaluator",
+      first_success_at: successAt,
+      source_generation: 1,
+      source_revision: 2,
+      runtime_component: "evaluator",
+      runtime_status: "healthy",
+      runtime_generation: 1,
+      runtime_revision: 2,
+      runtime_last_started_at: "2026-07-17T10:00:01.000Z",
+      runtime_last_success_at: successAt,
+      runtime_last_error_at: null,
+      runtime_last_error_code: null,
+      runtime_updated_at: successAt,
+    });
+
+    await env.PG72_ID_DB.prepare(
+      `UPDATE alert_runtime_status
+          SET status = 'degraded', revision = 3,
+              last_error_at = '2026-07-17T10:00:03.000Z',
+              last_error_code = 'evaluator_failed',
+              updated_at = '2026-07-17T10:00:03.000Z'
+        WHERE component = 'evaluator'`,
+    ).run();
+    const anchoredRow = await env.PG72_ID_DB.prepare(
+      "SELECT * FROM alert_evaluator_bootstrap WHERE component = 'evaluator'",
+    ).first();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE alert_evaluator_bootstrap SET first_success_at = ?
+          WHERE component = 'evaluator'`,
+      )
+        .bind("2026-07-17T10:00:03.000Z")
+        .run(),
+    ).rejects.toThrow();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        "DELETE FROM alert_evaluator_bootstrap WHERE component = 'evaluator'",
+      ).run(),
+    ).rejects.toThrow();
+    await expect(
+      explicitAnchor(successAt, 1, 2).run(),
+    ).rejects.toThrow();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `INSERT OR REPLACE INTO alert_evaluator_bootstrap
+          (component, first_success_at, source_generation, source_revision)
+         VALUES ('evaluator', ?, 1, 2)`,
+      )
+        .bind(successAt)
+        .run(),
+    ).rejects.toThrow();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        "DELETE FROM alert_runtime_status WHERE component = 'evaluator'",
+      ).run(),
+    ).rejects.toThrow();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `INSERT OR REPLACE INTO alert_runtime_status (component, updated_at)
+         VALUES ('evaluator', '2026-07-17T10:00:04.000Z')`,
+      ).run(),
+    ).rejects.toThrow();
+    expect(
+      await env.PG72_ID_DB.prepare(
+        "SELECT * FROM alert_evaluator_bootstrap WHERE component = 'evaluator'",
+      ).first(),
+    ).toEqual(anchoredRow);
+    expect(
+      await env.PG72_ID_DB.prepare(
+        "SELECT status FROM alert_runtime_status WHERE component = 'evaluator'",
+      ).first<string>("status"),
+    ).toBe("degraded");
+    expect(
+      (await env.PG72_ID_DB.prepare("PRAGMA foreign_key_check").all()).results,
+    ).toEqual([]);
+    expect(
+      await env.PG72_ID_DB.prepare("PRAGMA quick_check").first<string>(
+        "quick_check",
+      ),
+    ).toBe("ok");
   });
 });

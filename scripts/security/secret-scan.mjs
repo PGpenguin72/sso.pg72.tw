@@ -4,7 +4,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { redactedFindings, scanWorkingTree } from "./secret-family.mjs";
+import { diagnosticPath, redactedFindings, scanWorkingTree } from "./secret-family.mjs";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const tools = JSON.parse(
@@ -20,14 +20,21 @@ function executable(candidate) {
   }
 }
 
-function run(command, args) {
+export function runRedactedCommand(
+  command,
+  args,
+  { cwd = repoRoot, environment = process.env, label = "scanner" } = {},
+) {
   const result = spawnSync(command, args, {
-    cwd: repoRoot,
+    cwd,
     encoding: "utf8",
-    stdio: "inherit",
+    env: environment,
+    maxBuffer: 20 * 1024 * 1024,
   });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`${path.basename(command)} exited ${result.status}`);
+  if (result.error) throw new Error(`unable to execute ${label}`);
+  if (result.status !== 0) {
+    throw new Error(`${label} reported findings; subprocess output is redacted`);
+  }
 }
 
 function runSecretlint() {
@@ -56,7 +63,9 @@ function main() {
   for (const candidate of [configured, local].filter(Boolean)) {
     if (!executable(candidate)) continue;
     if (!hasExpectedVersion(candidate)) {
-      throw new Error(`${candidate} does not match pinned Gitleaks ${tools.tools.gitleaks.version}`);
+      throw new Error(
+        `${diagnosticPath(candidate)} does not match pinned Gitleaks ${tools.tools.gitleaks.version}`,
+      );
     }
     binary = candidate;
     break;
@@ -69,7 +78,11 @@ function main() {
     binary,
     `pinned Gitleaks ${tools.tools.gitleaks.version} is required; run pnpm security:tools:install`,
   );
-  run(binary, ["git", "--redact", "--no-banner", "--verbose", "--log-opts=--all", "."]);
+  runRedactedCommand(
+    binary,
+    ["git", "--redact", "--no-banner", "--verbose", "--log-opts=--all", "."],
+    { label: "Gitleaks" },
+  );
   const findings = scanWorkingTree(repoRoot);
   assert.deepEqual(
     findings,
@@ -82,9 +95,11 @@ function main() {
   );
 }
 
-try {
-  main();
-} catch (error) {
-  console.error(`Secret gate failed: ${error.message}`);
-  process.exitCode = 1;
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  try {
+    main();
+  } catch {
+    console.error("Secret gate failed; diagnostic details are redacted.");
+    process.exitCode = 1;
+  }
 }

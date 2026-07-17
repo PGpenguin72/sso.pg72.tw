@@ -152,12 +152,18 @@ and static builds.
 `pnpm security:check` runs type-aware Promise analysis over both Workers,
 required checksum-pinned Gitleaks history scanning, a redacted bounded scanner
 over tracked/untracked files and ignored sensitive filenames, captured
-Secretlint, recursive workflow/package-script allowlists, exact source/generated
-Wrangler binding targets, the dependency advisory policy, a production
+Secretlint, recursive workflow/package-script allowlists with exact
+workflow/job/step environment scopes, exact source/generated Wrangler binding
+targets, the dependency advisory policy, a production
 `wrangler deploy --dry-run --outdir` artifact gate, a path-free
-dependency/license inventory, and negative tests for the automation itself. The
-audit covers runtime, build, and development dependencies so tooling advisories
-cannot bypass the gate.
+dependency/license inventory, and negative tests for the automation itself.
+Assignment exceptions, including source fixtures and reviewed generated
+non-secret enums, require an exact path, key, and complete value; marker
+substrings do not waive a finding. Diagnostics normalize
+safe relative paths and replace sensitive, secret-bearing, absolute/outside, or
+terminal-unsafe paths with a short SHA-256 identifier. The audit covers runtime,
+build, and development dependencies so tooling advisories cannot bypass the
+gate.
 
 The audit currently reports the accepted Moderate `GHSA-p2fr-6hmx-4528`.
 [`security/accepted-advisories.json`](./security/accepted-advisories.json)

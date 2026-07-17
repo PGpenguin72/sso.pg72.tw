@@ -20,8 +20,8 @@ pnpm dast:local
 | Gate | Command / evidence |
 | --- | --- |
 | Worker static analysis | Oxlint type-aware `no-floating-promises` and `no-misused-promises` over both Worker implementations |
-| Secret scan | required checksum-pinned Gitleaks over complete Git history; explicit bounded/redacted tracked, ordinary-untracked, and ignored-sensitive-filename traversal; captured Secretlint output |
-| Workflow/config | actionlint, immutable Action SHAs, least permissions, exact workflow command order, recursively exact package scripts/local-script allowlist, and exact source/generated Wrangler binding targets |
+| Secret scan | required checksum-pinned Gitleaks over complete Git history; explicit bounded/redacted tracked, ordinary-untracked, and ignored-sensitive-filename traversal; exact audited path/key/value assignment allowances; captured Secretlint output |
+| Workflow/config | actionlint, immutable Action SHAs, least permissions, exact workflow command order and workflow/job/step environment scopes, recursively exact package scripts/local-script allowlist, and exact source/generated Wrangler binding targets |
 | Dependency policy | live `pnpm audit --json` reconciled field-for-field with `security/accepted-advisories.json` |
 | Production artifact | `wrangler deploy --dry-run --outdir` modules plus Static Assets scanned against `security/release-policy.json`, including bounded text/binary secret families |
 | Inventory | path-free package/version/license inventory generated from the frozen pnpm install |
@@ -49,13 +49,28 @@ limits. It rejects `.map`, `.dev.vars`, key files, private machine paths,
 embedded text or binary credential families, symlinks, and unexpected files.
 Generated config path metadata is validated in place but never uploaded.
 
+`security/workflow-policy.json` default-denies environment keys at workflow,
+job, and step scope. Each approved key has one exact static value or one complete
+approved `vars.*` expression; inheritance cannot be overridden. Execution
+preload, package-manager configuration, `PATH`, credential contexts, and writes
+to `GITHUB_ENV`/`GITHUB_PATH` are independently rejected by both the document
+and reachable-command validators.
+
 The explicit working-tree scanner obtains tracked and ordinary untracked files
 from Git, then traverses ignored dependency/build-cache trees only to find
 sensitive filenames such as root/nested `.dev.vars*`, `.env*`, key/PEM and
 credential configuration paths. `.git` is excluded. Files larger than the
-bounded scan limit and symlinks fail closed. Findings expose only a rule name
-and repository-relative path, never the matching bytes. Gitleaks is mandatory;
-run `pnpm security:tools:install` first on a new checkout.
+bounded scan limit and symlinks fail closed. Assignment parsing is bounded and
+supports single, double, and backtick quoting, whitespace/passphrases,
+colon/equal separators, and multiline quoted values. Source fixtures and
+reviewed generated non-secret enums are exempt only as exact
+path/key/complete-value triples; words such as `test`, `example`, or
+`placeholder` have no special meaning. Findings expose a
+rule and a normalized safe relative path, never matching bytes. Sensitive,
+secret-bearing, absolute/outside, control-character, and other terminal-unsafe
+paths are replaced with a short SHA-256 identifier across working-tree and
+artifact diagnostics. Gitleaks is mandatory; run
+`pnpm security:tools:install` first on a new checkout.
 
 The dependency/license inventory is platform-specific because pnpm installs
 only the optional native packages for the current runner. Linux CI evidence and

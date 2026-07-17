@@ -44,13 +44,17 @@ pnpm dast:local
 `pnpm security:check` combines type-aware Worker Promise analysis, required
 checksum-pinned Gitleaks full-history scanning, an explicit bounded/redacted
 tracked/untracked/ignored-sensitive-path scan plus captured Secretlint,
-actionlint and recursive workflow/package-script allowlists, exact source and
-generated Wrangler binding/resource contracts, dependency-advisory
+actionlint and recursive workflow/package-script allowlists with exact scoped
+environment key/value and expression contracts, exact source and generated
+Wrangler binding/resource contracts, dependency-advisory
 reconciliation, a production Worker dry-run artifact scan, and a
 dependency/license inventory. The artifact gate uses the same redacted secret
 families for text and bounded binary strings and rejects source maps, private
 machine paths, unexpected files, binding/config drift, and size regressions. CI
-keeps only the redacted inventories for seven days.
+keeps only the redacted inventories for seven days. Source fixture and reviewed
+generated non-secret assignment allowances are exact path/key/value triples,
+never placeholder substrings. Unsafe diagnostic paths are normalized and
+represented only by a short SHA-256 identifier.
 
 `pnpm dast:local` starts only ephemeral loopback Workers with synthetic values
 and fresh local D1 state. Its credential-free probes cover health/readiness,

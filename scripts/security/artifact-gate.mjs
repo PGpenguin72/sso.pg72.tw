@@ -12,7 +12,11 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { scanBufferForSecrets } from "./secret-family.mjs";
+import {
+  classifyDiagnosticPath,
+  diagnosticPath,
+  scanBufferForSecrets,
+} from "./secret-family.mjs";
 import { validateGeneratedSsoConfig } from "./wrangler-config.mjs";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -45,35 +49,71 @@ function scrubbedEnvironment() {
 
 function walk(directory, prefix = "") {
   const files = [];
-  for (const name of readdirSync(directory).sort()) {
+  let names;
+  try {
+    names = readdirSync(directory).sort();
+  } catch {
+    throw new Error(`unable to read artifact directory: ${diagnosticPath(prefix || ".")}`);
+  }
+  for (const name of names) {
     const absolute = path.join(directory, name);
     const relative = prefix ? `${prefix}/${name}` : name;
-    const stat = lstatSync(absolute);
-    assert.ok(!stat.isSymbolicLink(), `artifact symlink is forbidden: ${relative}`);
+    const classified = classifyDiagnosticPath(relative);
+    assert.ok(!classified.unsafe, `unsafe artifact path: ${classified.display}`);
+    let stat;
+    try {
+      stat = lstatSync(absolute);
+    } catch {
+      throw new Error(`unable to inspect artifact path: ${classified.display}`);
+    }
+    assert.ok(!stat.isSymbolicLink(), `artifact symlink is forbidden: ${classified.display}`);
     if (stat.isDirectory()) files.push(...walk(absolute, relative));
-    else if (stat.isFile()) files.push({ absolute, relative, size: stat.size });
-    else throw new Error(`unexpected artifact node: ${relative}`);
+    else if (stat.isFile()) {
+      files.push({
+        absolute,
+        relative: classified.normalized,
+        display: classified.display,
+        size: stat.size,
+      });
+    } else throw new Error(`unexpected artifact node: ${classified.display}`);
   }
   return files;
 }
 
-export function validateArtifactFiles(directory, filePolicy) {
+export function validateArtifactFiles(
+  directory,
+  filePolicy,
+  { scanRoot = "artifact:unclassified" } = {},
+) {
   const files = walk(directory);
-  assert.ok(files.some((file) => file.relative === filePolicy.entrypoint), `missing ${filePolicy.entrypoint}`);
+  assert.ok(
+    files.some((file) => file.relative === filePolicy.entrypoint),
+    `missing ${diagnosticPath(filePolicy.entrypoint)}`,
+  );
   const allowed = filePolicy.allowedFiles.map((pattern) => new RegExp(`^(?:${pattern})$`));
   let totalBytes = 0;
   const inventory = [];
   for (const file of files) {
-    assert.ok(allowed.some((pattern) => pattern.test(file.relative)), `unexpected artifact file: ${file.relative}`);
+    assert.ok(
+      allowed.some((pattern) => pattern.test(file.relative)),
+      `unexpected artifact file: ${file.display}`,
+    );
     assert.ok(!/(?:^|\/)(?:\.dev\.vars(?:\..*)?|\.env(?:\..*)?|[^/]+\.(?:map|pem|key|p8))$/.test(file.relative));
     totalBytes += file.size;
-    const bytes = readFileSync(file.absolute);
+    let bytes;
+    try {
+      bytes = readFileSync(file.absolute);
+    } catch {
+      throw new Error(`unable to read artifact file: ${file.display}`);
+    }
     const text = bytes.toString("utf8");
     for (const forbidden of forbiddenContent) {
-      assert.ok(!forbidden.pattern.test(text), `${file.relative} contains ${forbidden.name}`);
+      assert.ok(!forbidden.pattern.test(text), `${file.display} contains ${forbidden.name}`);
     }
-    for (const rule of scanBufferForSecrets(bytes)) {
-      assert.fail(`${file.relative} contains redacted secret family [${rule}]`);
+    for (const rule of scanBufferForSecrets(bytes, {
+      relativePath: `${scanRoot}/${file.relative}`,
+    })) {
+      assert.fail(`${file.display} contains redacted secret family [${rule}]`);
     }
     inventory.push({
       path: file.relative,
@@ -99,7 +139,13 @@ function runDryRun(outDirectory) {
     repoRoot,
     policy.environments.production.generatedConfig,
   );
-  assert.ok(lstatSync(config).isFile(), "production build config is missing; run the SSO build first");
+  let configStat;
+  try {
+    configStat = lstatSync(config);
+  } catch {
+    throw new Error("production build config is missing; run the SSO build first");
+  }
+  assert.ok(configStat.isFile(), "production build config is missing; run the SSO build first");
   const result = spawnSync(
     "pnpm",
     [
@@ -121,8 +167,8 @@ function runDryRun(outDirectory) {
       maxBuffer: 20 * 1024 * 1024,
     },
   );
-  if (result.error) throw result.error;
-  assert.equal(result.status, 0, `Wrangler dry-run failed:\n${result.stdout}${result.stderr}`);
+  if (result.error) throw new Error("unable to execute Wrangler dry-run");
+  assert.equal(result.status, 0, "Wrangler dry-run failed; subprocess output is redacted");
   assert.match(result.stdout + result.stderr, /--dry-run: exiting now\./);
 }
 
@@ -133,8 +179,8 @@ function runBuild() {
     env: scrubbedEnvironment(),
     maxBuffer: 20 * 1024 * 1024,
   });
-  if (result.error) throw result.error;
-  assert.equal(result.status, 0, `production build failed:\n${result.stdout}${result.stderr}`);
+  if (result.error) throw new Error("unable to execute production build");
+  assert.equal(result.status, 0, "production build failed; subprocess output is redacted");
 }
 
 function main() {
@@ -153,10 +199,13 @@ function main() {
   );
   const deploymentConfig = JSON.parse(readFileSync(deploymentConfigPath, "utf8"));
   validateDeploymentConfig(deploymentConfig);
-  const worker = validateArtifactFiles(workerDirectory, policy.artifact);
+  const worker = validateArtifactFiles(workerDirectory, policy.artifact, {
+    scanRoot: "artifact:worker",
+  });
   const staticAssets = validateArtifactFiles(
     path.join(repoRoot, "apps", "sso", "dist", "client"),
     policy.staticAssets,
+    { scanRoot: "artifact:static" },
   );
   const inventory = {
     schemaVersion: 1,
@@ -188,8 +237,8 @@ function main() {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
     main();
-  } catch (error) {
-    console.error(`Worker artifact gate failed: ${error.message}`);
+  } catch {
+    console.error("Worker artifact gate failed; diagnostic details are redacted.");
     process.exitCode = 1;
   }
 }

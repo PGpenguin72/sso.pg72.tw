@@ -1,6 +1,7 @@
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 export const DEFAULT_MAX_SCAN_BYTES = 8 * 1024 * 1024;
 
@@ -15,22 +16,154 @@ const tokenRules = [
   { name: "private-key", pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/ },
 ];
 
-const assignmentPatterns = [
-  /^\s*([A-Z][A-Z0-9_.-]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL)[A-Z0-9_.-]*)\s*[:=]\s*["'`]?([^\s"'`,;}\])]{12,})/gm,
-  /["']([A-Z0-9_.-]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL)[A-Z0-9_.-]*)["']\s*:\s*["'`]([^"'`\r\n]{12,})["'`]/gim,
-];
-
-function isPlaceholder(value) {
-  const normalized = value.toLowerCase();
-  return (
-    /(?:placeholder|replace|example|synthetic|dummy|change-?me|fake|fixture|generate-with|local-dast|test(?:-only)?[-_]|vitest|not-a-real|x{4,})/.test(
-      normalized,
-    ) ||
-    normalized.startsWith("${") ||
-    normalized.startsWith("<") ||
-    normalized.startsWith("your-") ||
-    normalized.startsWith("your_")
+const secretKeySource =
+  "[A-Z][A-Z0-9_.-]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL)[A-Z0-9_.-]*";
+const assignmentPrefix =
+  `^[\\t ]*(?:["'\\\`](${secretKeySource})["'\\\`]|(${secretKeySource}))[\\t ]*[:=][\\t ]*`;
+const quotedAssignmentPatterns = ['"', "'", "`"].map((quote) => {
+  const escapedQuote = quote === "`" ? "\\`" : quote;
+  return new RegExp(
+    `${assignmentPrefix}${escapedQuote}((?:\\\\[\\s\\S]|(?!${escapedQuote})[\\s\\S]){8,4096})${escapedQuote}[\\t ]*[,;]?[\\t ]*(?:(?:#|//).*)?$`,
+    "gim",
   );
+});
+const oversizedQuotedAssignmentPatterns = ['"', "'", "`"].map((quote) => {
+  const escapedQuote = quote === "`" ? "\\`" : quote;
+  return new RegExp(
+    `${assignmentPrefix}${escapedQuote}(?:\\\\[\\s\\S]|(?!${escapedQuote})[\\s\\S]){4097}`,
+    "gim",
+  );
+});
+const unquotedAssignmentPattern = new RegExp(
+  `^[\\t ]*(?:["'\\\`](${secretKeySource})["'\\\`]|(${secretKeySource}))[\\t ]*[:=][\\t ]*([^\\r\\n]{8,4096})$`,
+  "gim",
+);
+const oversizedUnquotedAssignmentPattern = new RegExp(
+  `${assignmentPrefix}[^\\r\\n]{4097}`,
+  "gm",
+);
+const binaryAssignmentPattern = new RegExp(
+  `(?:^|[\\x00\\r\\n])(${secretKeySource})[\\x00\\t ]{0,8}[:=][\\x00\\t ]{0,8}([^\\x00\\r\\n]{8,4096})`,
+  "gm",
+);
+
+// These reviewed source fixtures and generated error enums are not substring
+// heuristics. An allowance applies only when path, key, and complete value match.
+const auditedAssignmentAllowances = new Map([
+  [
+    "apps/sso/.dev.vars.example",
+    new Map([
+      ["BETTER_AUTH_SECRET", "generate-with-openssl-rand-base64-32"],
+      ["GOOGLE_CLIENT_SECRET", "replace-with-google-oauth-client-secret"],
+      ["TURNSTILE_SECRET_KEY", "replace-with-turnstile-secret-key"],
+    ]),
+  ],
+  [
+    "apps/sso/vitest.config.ts",
+    new Map([
+      ["BETTER_AUTH_SECRET", "test-only-better-auth-secret-0000000000000000"],
+      ["GOOGLE_CLIENT_SECRET", "test-only-google-secret"],
+      ["TURNSTILE_SECRET_KEY", "test-only-turnstile-secret"],
+      ["TELEGRAM_BOT_TOKEN", "123456:AAvitest-telegram-bot-token"],
+    ]),
+  ],
+  [
+    "apps/sso/test/registration.spec.ts",
+    new Map([
+      ["GITHUB_CLIENT_SECRET", "test-github-client-secret"],
+      ["TURNSTILE_SECRET_KEY", "undefined"],
+    ]),
+  ],
+  [
+    "apps/sso/worker/auth.cli.ts",
+    new Map([
+      ["BETTER_AUTH_SECRET", "cli-only-placeholder-secret-at-least-32-characters"],
+      ["GOOGLE_CLIENT_SECRET", "cli-placeholder"],
+    ]),
+  ],
+  [
+    "wiki/developers/register-client.md",
+    new Map([["OIDC_CLIENT_SECRET", "pg72_cs_xxxxxxxx"]]),
+  ],
+  [
+    "artifact:worker/index.js",
+    new Map([
+      ["INVALID_PASSWORD", "Invalid password"],
+      ["INVALID_EMAIL_OR_PASSWORD", "Invalid email or password"],
+      ["INVALID_TOKEN", "Invalid token"],
+      ["ID_TOKEN_NOT_SUPPORTED", "id_token not supported"],
+      [
+        "USER_ALREADY_HAS_PASSWORD",
+        "User already has a password. Provide that to delete the account.",
+      ],
+    ]),
+  ],
+]);
+
+function normalizedRelativePath(value) {
+  return typeof value === "string" ? value.replaceAll("\\", "/") : "";
+}
+
+function isAuditedFixture(relativePath, key, value) {
+  return auditedAssignmentAllowances.get(normalizedRelativePath(relativePath))?.get(key) === value;
+}
+
+function unquotedValue(value) {
+  return value
+    .replace(/[\t ]+(?:#|\/\/).*$/, "")
+    .replace(/[\t ]*[,;][\t ]*$/, "")
+    .trim();
+}
+
+function assignments(content) {
+  const matches = [];
+  for (const pattern of quotedAssignmentPatterns) {
+    pattern.lastIndex = 0;
+    for (let match = pattern.exec(content); match; match = pattern.exec(content)) {
+      const key = match[1] ?? match[2];
+      if (match[1] !== undefined || key === key.toUpperCase()) {
+        matches.push({ key, value: match[3] });
+      }
+    }
+  }
+  unquotedAssignmentPattern.lastIndex = 0;
+  for (
+    let match = unquotedAssignmentPattern.exec(content);
+    match;
+    match = unquotedAssignmentPattern.exec(content)
+  ) {
+    const value = unquotedValue(match[3]);
+    const key = match[1] ?? match[2];
+    if (
+      value.length >= 8 &&
+      !/^["'`]/.test(value) &&
+      (match[1] !== undefined || key === key.toUpperCase())
+    ) {
+      matches.push({ key, value });
+    }
+  }
+  binaryAssignmentPattern.lastIndex = 0;
+  for (
+    let match = binaryAssignmentPattern.exec(content);
+    match;
+    match = binaryAssignmentPattern.exec(content)
+  ) {
+    if (match[0].includes("\0")) {
+      matches.push({ key: match[1], value: unquotedValue(match[2]) });
+    }
+  }
+  return matches;
+}
+
+function hasOversizedAssignment(content) {
+  for (const pattern of [...oversizedQuotedAssignmentPatterns, oversizedUnquotedAssignmentPattern]) {
+    pattern.lastIndex = 0;
+    for (let match = pattern.exec(content); match; match = pattern.exec(content)) {
+      const key = match[1] ?? match[2];
+      if (match[1] !== undefined || key === key.toUpperCase()) return true;
+    }
+  }
+  return false;
 }
 
 function representations(bytes) {
@@ -49,24 +182,23 @@ function representations(bytes) {
   return [raw, printable.join("\n"), raw.replace(/[^\x09\x0a\x0d\x20-\x7e]+/g, "\n")];
 }
 
-export function scanBufferForSecrets(bytes) {
+export function scanBufferForSecrets(bytes, { relativePath = "" } = {}) {
   const findings = new Set();
   for (const content of representations(bytes)) {
+    if (hasOversizedAssignment(content)) findings.add("assigned-secret");
     for (const rule of tokenRules) {
+      rule.pattern.lastIndex = 0;
       if (rule.pattern.test(content)) findings.add(rule.name);
     }
-    for (const assignmentPattern of assignmentPatterns) {
-      assignmentPattern.lastIndex = 0;
-      for (let match = assignmentPattern.exec(content); match; match = assignmentPattern.exec(content)) {
-        if (!isPlaceholder(match[2])) findings.add("assigned-secret");
-      }
+    for (const { key, value } of assignments(content)) {
+      if (!isAuditedFixture(relativePath, key, value)) findings.add("assigned-secret");
     }
   }
   return [...findings].sort();
 }
 
 export function isSensitivePath(relativePath) {
-  const normalized = relativePath.replaceAll(path.sep, "/");
+  const normalized = relativePath.replaceAll("\\", "/");
   const basename = path.posix.basename(normalized);
   if (/^\.dev\.vars(?:\..*)?$/i.test(basename)) return true;
   if (/^\.env(?:\..*)?$/i.test(basename)) return true;
@@ -84,13 +216,40 @@ export function isSensitivePath(relativePath) {
   return normalized === ".docker/config.json" || normalized.endsWith("/.docker/config.json");
 }
 
+export function classifyDiagnosticPath(value) {
+  const original = String(value ?? "");
+  const slashed = original.replaceAll("\\", "/");
+  const normalized = path.posix.normalize(slashed || ".");
+  const escapesRoot = normalized === ".." || normalized.startsWith("../");
+  const secretBearingSegment = slashed
+    .split("/")
+    .some((segment) => scanBufferForSecrets(Buffer.from(segment, "utf8")).length > 0);
+  const unsafe =
+    original.length === 0 ||
+    /[^\x20-\x7e]/.test(original) ||
+    path.posix.isAbsolute(slashed) ||
+    /^[A-Za-z]:\//.test(slashed) ||
+    escapesRoot ||
+    isSensitivePath(normalized) ||
+    secretBearingSegment;
+  if (unsafe) {
+    const digest = createHash("sha256").update(original).digest("hex").slice(0, 16);
+    return { display: `[redacted-path:sha256:${digest}]`, normalized, unsafe: true };
+  }
+  return { display: normalized, normalized, unsafe: false };
+}
+
+export function diagnosticPath(value) {
+  return classifyDiagnosticPath(value).display;
+}
+
 function gitPaths(repoRoot, args) {
   const result = spawnSync("git", args, {
     cwd: repoRoot,
     encoding: "buffer",
     maxBuffer: 64 * 1024 * 1024,
   });
-  if (result.error) throw result.error;
+  if (result.error) throw new Error("unable to execute repository file enumeration");
   if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed`);
   return result.stdout
     .toString("utf8")
@@ -105,11 +264,22 @@ function discoverSensitivePaths(repoRoot, knownPaths) {
   // dependency/build caches only to find sensitive filenames, never to scan
   // their ordinary contents; `.git` alone is excluded completely.
   function walk(directory, prefix = "") {
-    for (const name of readdirSync(directory).sort()) {
+    let names;
+    try {
+      names = readdirSync(directory).sort();
+    } catch {
+      throw new Error(`unable to enumerate repository path: ${diagnosticPath(prefix || ".")}`);
+    }
+    for (const name of names) {
       if (fullyExcludedDirectories.has(name)) continue;
       const absolute = path.join(directory, name);
       const relative = prefix ? `${prefix}/${name}` : name;
-      const stat = lstatSync(absolute);
+      let stat;
+      try {
+        stat = lstatSync(absolute);
+      } catch {
+        throw new Error(`unable to inspect repository path: ${diagnosticPath(relative)}`);
+      }
       const sensitive = isSensitivePath(relative);
       if (stat.isSymbolicLink()) {
         if (!knownPaths.has(relative) && sensitive) {
@@ -143,7 +313,7 @@ export function enumerateWorkingTreeFiles(repoRoot) {
     try {
       stat = lstatSync(absolute);
     } catch {
-      continue;
+      throw new Error(`unable to inspect repository path: ${diagnosticPath(relative)}`);
     }
     if (stat.isDirectory()) continue;
     files.push({
@@ -164,13 +334,27 @@ export function scanWorkingTree(repoRoot, { maxFileBytes = DEFAULT_MAX_SCAN_BYTE
       findings.push({ path: file.path, rule: "symbolic-link" });
       continue;
     }
-    const stat = lstatSync(file.absolute);
+    let stat;
+    try {
+      stat = lstatSync(file.absolute);
+    } catch {
+      findings.push({ path: file.path, rule: "file-read-error" });
+      continue;
+    }
     if (stat.size > maxFileBytes) {
       findings.push({ path: file.path, rule: "file-too-large-to-scan" });
       continue;
     }
-    const bytes = readFileSync(file.absolute);
-    for (const rule of scanBufferForSecrets(bytes)) findings.push({ path: file.path, rule });
+    let bytes;
+    try {
+      bytes = readFileSync(file.absolute);
+    } catch {
+      findings.push({ path: file.path, rule: "file-read-error" });
+      continue;
+    }
+    for (const rule of scanBufferForSecrets(bytes, { relativePath: file.path })) {
+      findings.push({ path: file.path, rule });
+    }
   }
   return findings.sort(
     (left, right) => left.path.localeCompare(right.path) || left.rule.localeCompare(right.rule),
@@ -178,5 +362,7 @@ export function scanWorkingTree(repoRoot, { maxFileBytes = DEFAULT_MAX_SCAN_BYTE
 }
 
 export function redactedFindings(findings) {
-  return findings.map((finding) => `[${finding.rule}] ${finding.path}`).join("\n");
+  return findings
+    .map((finding) => `[${String(finding.rule).replace(/[^a-z0-9-]/gi, "?")}] ${diagnosticPath(finding.path)}`)
+    .join("\n");
 }

@@ -6,6 +6,8 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import {
+  classifyDiagnosticPath,
+  diagnosticPath,
   enumerateWorkingTreeFiles,
   redactedFindings,
   scanBufferForSecrets,
@@ -123,4 +125,205 @@ test("shared family engine covers artifact token and key families including bina
   for (const [expected, bytes] of fixtures) {
     assert.ok(scanBufferForSecrets(bytes).includes(expected), `missing ${expected}`);
   }
+});
+
+test("allows only exact audited path, key, and complete value triples", () => {
+  const fixtures = [
+    [
+      "apps/sso/.dev.vars.example",
+      "BETTER_AUTH_SECRET",
+      "generate-with-openssl-rand-base64-32",
+    ],
+    [
+      "apps/sso/.dev.vars.example",
+      "GOOGLE_CLIENT_SECRET",
+      "replace-with-google-oauth-client-secret",
+    ],
+    [
+      "apps/sso/.dev.vars.example",
+      "TURNSTILE_SECRET_KEY",
+      "replace-with-turnstile-secret-key",
+    ],
+    [
+      "apps/sso/vitest.config.ts",
+      "BETTER_AUTH_SECRET",
+      "test-only-better-auth-secret-0000000000000000",
+    ],
+    ["apps/sso/vitest.config.ts", "GOOGLE_CLIENT_SECRET", "test-only-google-secret"],
+    [
+      "apps/sso/vitest.config.ts",
+      "TURNSTILE_SECRET_KEY",
+      "test-only-turnstile-secret",
+    ],
+    [
+      "apps/sso/vitest.config.ts",
+      "TELEGRAM_BOT_TOKEN",
+      "123456:AAvitest-telegram-bot-token",
+    ],
+    [
+      "apps/sso/test/registration.spec.ts",
+      "GITHUB_CLIENT_SECRET",
+      "test-github-client-secret",
+    ],
+    ["apps/sso/test/registration.spec.ts", "TURNSTILE_SECRET_KEY", "undefined"],
+    [
+      "apps/sso/worker/auth.cli.ts",
+      "BETTER_AUTH_SECRET",
+      "cli-only-placeholder-secret-at-least-32-characters",
+    ],
+    ["apps/sso/worker/auth.cli.ts", "GOOGLE_CLIENT_SECRET", "cli-placeholder"],
+    ["wiki/developers/register-client.md", "OIDC_CLIENT_SECRET", "pg72_cs_xxxxxxxx"],
+    ["artifact:worker/index.js", "INVALID_PASSWORD", "Invalid password"],
+    [
+      "artifact:worker/index.js",
+      "INVALID_EMAIL_OR_PASSWORD",
+      "Invalid email or password",
+    ],
+    ["artifact:worker/index.js", "INVALID_TOKEN", "Invalid token"],
+    ["artifact:worker/index.js", "ID_TOKEN_NOT_SUPPORTED", "id_token not supported"],
+    [
+      "artifact:worker/index.js",
+      "USER_ALREADY_HAS_PASSWORD",
+      "User already has a password. Provide that to delete the account.",
+    ],
+  ];
+
+  for (const [relativePath, key, value] of fixtures) {
+    const bytes = Buffer.from(`${key}="${value}"`);
+    assert.ok(!scanBufferForSecrets(bytes, { relativePath }).includes("assigned-secret"));
+    assert.ok(
+      scanBufferForSecrets(bytes, { relativePath: `other/${path.basename(relativePath)}` }).includes(
+        "assigned-secret",
+      ),
+      relativePath,
+    );
+    assert.ok(
+      scanBufferForSecrets(Buffer.from(`${key}="${value}-appended"`), { relativePath }).includes(
+        "assigned-secret",
+      ),
+      relativePath,
+    );
+    assert.ok(
+      scanBufferForSecrets(Buffer.from(`OTHER_SECRET="${value}"`), { relativePath }).includes(
+        "assigned-secret",
+      ),
+      relativePath,
+    );
+  }
+});
+
+test("placeholder-like substrings never waive an unaudited assigned value", () => {
+  for (const value of [
+    "real-test-only-credential-material-123456",
+    "production-example-secret-material-123456",
+    "placeholder-inside-real-secret-material-123456",
+    "replace-this-marker-plus-real-material-123456",
+    "synthetic-word-does-not-waive-material-123456",
+    "dummy-marker-does-not-waive-material-123456",
+    "fake-marker-does-not-waive-material-123456",
+    "fixture-marker-does-not-waive-material-123456",
+    "not-a-real-marker-does-not-waive-material-123456",
+    "xxxxxxxx-followed-by-real-material-123456",
+    "your-secret-prefix-followed-by-material-123456",
+    "${UNTRUSTED_SECRET_EXPRESSION_WITH_PADDING}",
+  ]) {
+    assert.ok(
+      scanBufferForSecrets(Buffer.from(`SERVICE_SECRET="${value}"`)).includes("assigned-secret"),
+      value,
+    );
+  }
+});
+
+test("direct token and key families are never waived by marker words or fixture paths", () => {
+  const telegramPayload = "test_example_placeholder_".padEnd(35, "A");
+  for (const [expected, value] of [
+    ["aws-access-key-id", ["AKIA", "TESTEXAMPLE12345"].join("")],
+    ["telegram-bot-token", `123456789:${telegramPayload}`],
+    ["private-key", ["-----BEGIN TEST ", "PRIVATE KEY-----"].join("")],
+  ]) {
+    const findings = scanBufferForSecrets(Buffer.from(value), {
+      relativePath: "apps/sso/.dev.vars.example",
+    });
+    assert.ok(findings.includes(expected), expected);
+  }
+});
+
+test("parses quote variants, whitespace, passphrases, punctuation, and multiline values", () => {
+  for (const assignment of [
+    "SERVICE_SECRET = 'correct horse battery staple 1234'",
+    '\"SERVICE_TOKEN\" : \"value with spaces:and=punctuation 1234\"',
+    '\"clientSecret\" : \"quoted camel case example credential 1234\"',
+    "'SERVICE_API_KEY' = `backtick value with : colon and = equals 1234`",
+    "`SERVICE_PASSWORD` : 'single quoted passphrase with spaces 1234'",
+    "SERVICE_CREDENTIAL = unquoted passphrase with spaces : and = punctuation 1234",
+    "SERVICE_PRIVATE_KEY = `first bounded line 1234\nsecond line: value=5678`",
+    "SERVICE_PASSWORD='escaped \\' quote remains bounded secret 1234'",
+  ]) {
+    assert.ok(
+      scanBufferForSecrets(Buffer.from(assignment)).includes("assigned-secret"),
+      assignment,
+    );
+  }
+
+  const oversized = `SERVICE_SECRET="${"Z".repeat(4097)}"`;
+  assert.ok(scanBufferForSecrets(Buffer.from(oversized)).includes("assigned-secret"));
+});
+
+test("hashes secret-family, sensitive, outside, and terminal-unsafe diagnostic paths", () => {
+  const token = ["xoxb", "135791357913579135791357"].join("-");
+  const unsafePaths = [
+    `.env.${process.pid}`,
+    "nested/credentials.json",
+    `assets/${token}.js`,
+    `SERVICE_SECRET=${"Q".repeat(32)}/file.txt`,
+    `assets/SERVICE_SECRET=${"W".repeat(32)}.txt`,
+    `../outside/${token}.txt`,
+    "/absolute/path.txt",
+    "C:\\Users\\operator\\credential.txt",
+    "assets/line\nbreak.js",
+    "assets/escape\u001bsequence.js",
+    "assets/non-ascii-credential-\u00e9.js",
+  ];
+  for (const unsafePath of unsafePaths) {
+    const classified = classifyDiagnosticPath(unsafePath);
+    assert.equal(classified.unsafe, true, unsafePath);
+    assert.match(classified.display, /^\[redacted-path:sha256:[a-f0-9]{16}]$/);
+    assert.ok(!classified.display.includes(unsafePath));
+    assert.equal(diagnosticPath(unsafePath), classified.display);
+  }
+
+  assert.deepEqual(classifyDiagnosticPath("assets/../assets/chunk.js"), {
+    display: "assets/chunk.js",
+    normalized: "assets/chunk.js",
+    unsafe: false,
+  });
+});
+
+test("redacts hostile symlink, oversized, sensitive, control, and outside finding paths", (context) => {
+  const root = repository(context);
+  const token = ["xoxb", "246802468024680246802468"].join("-");
+  const oversizedName = `${token}.txt`;
+  writeFileSync(path.join(root, oversizedName), "X".repeat(64));
+
+  const outside = path.join(os.tmpdir(), `pgid-secret-path-outside-${process.pid}.txt`);
+  writeFileSync(outside, "safe outside content");
+  context.after(() => rmSync(outside, { force: true }));
+  const symlinkName = `linked-${token}.txt`;
+  symlinkSync(outside, path.join(root, symlinkName));
+
+  const sensitiveName = `.env.${process.pid}`;
+  writeFileSync(path.join(root, sensitiveName), "Y".repeat(64));
+  const controlName = "control\nname.txt";
+  writeFileSync(path.join(root, controlName), assigned("SERVICE_SECRET", "R".repeat(32)));
+
+  const findings = scanWorkingTree(root, { maxFileBytes: 32 });
+  const output = `${redactedFindings(findings)}\n${redactedFindings([
+    { path: `../outside/${token}.txt`, rule: "file-read-error" },
+  ])}`;
+  for (const unsafePath of [oversizedName, symlinkName, sensitiveName, controlName, token]) {
+    assert.ok(!output.includes(unsafePath), unsafePath);
+  }
+  assert.match(output, /\[redacted-path:sha256:[a-f0-9]{16}]/);
+  assert.ok(findings.some(({ rule }) => rule === "file-too-large-to-scan"));
+  assert.ok(findings.some(({ rule }) => rule === "symbolic-link"));
 });

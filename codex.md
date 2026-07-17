@@ -339,8 +339,8 @@ access:                  standard <-> restricted
 - [ ] DAST 覆蓋 auth、OIDC、admin、gateway 與 logout endpoints。
 - [ ] SAST、secret scan、IaC/config scan 自動化 gate。
 - [ ] 負載測試、備份還原演練、key rotation 與 Queue retry/DLQ 演練。
-- [x] Source-local fail-closed continuity/load tooling：固定 literal-loopback target、fresh D1 migration/export/restore、synthetic Passkey/session/consent/JWK overlap-retirement、bounded request profile、mode-`0600` redacted report 與 cleanup regression；命令與報告格式見 [`docs/runbooks/continuity.md`](./docs/runbooks/continuity.md) 與 [`docs/runbooks/load-failure-drills.md`](./docs/runbooks/load-failure-drills.md)。這只代表工具已進 source，不代表 dependency 或演練已通過。
-- [ ] 整合並獨立 review recovery `0019`、observability `0020`、encrypted R2 archive 與 release automation；兩個 local report 對任何缺件都必須維持 `dependency_missing` + nonzero，全部到位後才記錄 synthetic local pass。
+- [x] Source-local fail-closed continuity/load tooling：固定 literal-loopback target、clean Git commit attribution、fresh D1 migration/export/restore、完整 ordered migration ledger、synthetic Passkey/session/consent/JWK overlap-retirement、固定六 scenario／每項 16 request 的 bounded profile、mode-`0600` redacted schema-v2 report 與 cleanup regression；命令與報告格式見 [`docs/runbooks/continuity.md`](./docs/runbooks/continuity.md) 與 [`docs/runbooks/load-failure-drills.md`](./docs/runbooks/load-failure-drills.md)。這只代表工具已進 source，不代表 dependency 或演練已通過。
+- [ ] 整合並獨立 review recovery `0019`、observability `0020`、encrypted R2 archive 與 release automation；dependency 必須先通過 exact content contract，再由同一次命令的對應 execution proof 從 `source_present_unverified` 升為 `verified`。兩個 local report 對任何非 `verified` 項目都必須維持 blocked + nonzero，全部到位後才記錄 synthetic local pass。
 - [ ] 在隔離 Preview 另行執行核准 budget 的 D1 restore、signing-key rotation、recovery、Queue retry/DLQ、R2 archive/restore、外部 alert delivery、failure rollback 與 RP smoke；local synthetic report 不可勾除此項。
 - [x] Local source 的 persistent restricted-account state、request guards、D1 race guards、admin controls 與 workerd regression。
 - [ ] 套用 `0017`、部署 restricted-account Worker 至隔離 Preview，完成獨立 review、race/rollback/ordinary-OIDC smoke，再納入 production rollout；不得因 local gate 通過而宣稱已部署。
@@ -834,19 +834,23 @@ Webmail 仍須分成兩個問題：
 
 ### 19.5 Local continuity and bounded drills
 
-- `pnpm public-readiness:continuity:local` 只在 policy-owned
-  `http://127.0.0.1:5183` 建立 fresh source/restore D1，驗證 migration head、
+- `pnpm public-readiness:continuity:local` 只從 exact clean Git commit、只在
+  policy-owned `http://127.0.0.1:5183` 建立 fresh source/restore D1，驗證完整
+  ordered migration ledger（逐筆 source/D1 比對及 count/head/digest）、
   schema/row-count/D1 `quick_check`/FK 等價、synthetic consent/session/Passkey、
   discovery issuer、JWK decrypt/overlap/retirement，並刪除所有 ephemeral
   SQL、secret 與 state。
 - `pnpm public-readiness:drills:local` 只在 policy-owned
   `http://127.0.0.1:5185` 以固定 96 requests、concurrency 4、12 rps、10 秒
-  hard deadline 跑 workerd/global-logout regression 與 live negative-request
-  profile；不可接受 caller target/budget。
+  hard deadline 跑 workerd/global-logout regression；live profile 固定為六個
+  ordered scenario、每項 16 requests，report 必須精確符合 ID、count、status、
+  latency ordering 與 throughput contract；不可接受 caller target/budget。
 - 兩者都必須拒絕 Cloudflare credentials、remote/Preview/production target，
-  只寫 mode-`0600` allowlisted aggregate report；cleanup failure、local
+  也必須拒絕 dirty/untracked/unavailable Git source，只寫 mode-`0600`
+  allowlisted schema-v2 aggregate report。Dependency 的 exact source content
+  與同輪 execution proof 必須同時成立才是 `verified`；cleanup failure、local
   invariant failure或 recovery `0019`／observability `0020`／encrypted R2／
-  release automation 缺件皆 nonzero。
+  release automation 未 verified 皆 nonzero。
 - Synthetic local pass 只證明 source-local contract；不取代 Preview D1
   restore、live Queue/DLQ/R2、external alert、production smoke、獨立 review
   或 owner GO。

@@ -8,11 +8,12 @@
   },
   "scripts": {
     "build": "pnpm -r --if-present build",
-    "check": "pnpm test:clean-dist && pnpm --filter @pg72/id check && pnpm --filter @pg72/test-rp check && pnpm --filter @pg72/wiki check",
+    "check": "pnpm test:clean-dist && pnpm test:public-readiness && pnpm --filter @pg72/id check && pnpm --filter @pg72/test-rp check && pnpm --filter @pg72/wiki check",
     "dev": "pnpm --filter @pg72/id dev",
     "dev:rp": "pnpm --filter @pg72/test-rp dev",
     "dev:wiki": "pnpm --filter @pg72/wiki dev",
     "public-readiness:continuity:local": "node scripts/public-readiness/continuity-local.mjs",
+    "public-readiness:drills:local": "node scripts/public-readiness/drills-local.mjs",
     "test": "pnpm -r --if-present test",
     "test:clean-dist": "node --test scripts/clean-package-dist.test.mjs",
     "test:public-readiness": "node --test scripts/public-readiness/*.test.mjs",

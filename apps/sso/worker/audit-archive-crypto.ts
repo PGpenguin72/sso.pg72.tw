@@ -19,6 +19,9 @@ const EVENT_TYPE_PATTERN = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
 const HASH_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
 const CANONICAL_KEK_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+// A 32-byte digest has four data bits in its final unpadded base64url character.
+const CANONICAL_SHA256_REFERENCE_PATTERN =
+  /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/;
 const FORBIDDEN_CREDENTIAL_MARKERS = [
   `pg72_${"at"}_`,
   `pg72_${"rt"}_`,
@@ -28,6 +31,8 @@ const FORBIDDEN_CREDENTIAL_MARKERS = [
 const ISO_TIMESTAMP_PATTERN =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const RECORD_KEYS = [
+  "actorRef",
+  "actorRefHashVersion",
   "actorUserId",
   "clientId",
   "eventId",
@@ -43,6 +48,7 @@ const RECORD_KEYS = [
 ] as const;
 const SEAL_INPUT_KEYS = [
   "batchGeneration",
+  "checkpointFromSequence",
   "createdAt",
   "kek",
   "keyVersion",
@@ -50,6 +56,7 @@ const SEAL_INPUT_KEYS = [
 ] as const;
 const HEADER_KEYS = [
   "batchGeneration",
+  "checkpointFromSequence",
   "contract",
   "createdAt",
   "encryption",
@@ -64,6 +71,7 @@ const HEADER_KEYS = [
 const ENVELOPE_KEYS = ["ciphertext", "header", "nonce", "wrappedDek"] as const;
 const MANIFEST_KEYS = [
   "batchGeneration",
+  "checkpointFromSequence",
   "contentType",
   "contract",
   "createdAt",
@@ -83,6 +91,8 @@ const PLAINTEXT_KEYS = ["contract", "records", "schemaVersion"] as const;
 export type AuditArchiveOutcome = "success" | "denied" | "failure";
 
 export interface AuditArchiveRecordV1 {
+  actorRef: string | null;
+  actorRefHashVersion: 1 | null;
   actorUserId: string | null;
   clientId: string | null;
   eventId: string;
@@ -99,6 +109,7 @@ export interface AuditArchiveRecordV1 {
 
 export interface AuditArchiveSealInputV1 {
   batchGeneration: number;
+  checkpointFromSequence: number;
   createdAt: string;
   kek: string;
   keyVersion: string;
@@ -107,6 +118,7 @@ export interface AuditArchiveSealInputV1 {
 
 export interface AuditArchiveManifestV1 {
   batchGeneration: number;
+  checkpointFromSequence: number;
   contentType: typeof AUDIT_ARCHIVE_CONTENT_TYPE;
   contract: typeof AUDIT_ARCHIVE_ENVELOPE_CONTRACT;
   createdAt: string;
@@ -152,6 +164,7 @@ export class AuditArchiveCryptoError extends Error {
 
 interface ArchiveHeaderV1 {
   batchGeneration: number;
+  checkpointFromSequence: number;
   contract: typeof AUDIT_ARCHIVE_ENVELOPE_CONTRACT;
   createdAt: string;
   encryption: "A256GCM";
@@ -308,6 +321,23 @@ function safeHash(value: unknown): string | null {
   return value;
 }
 
+function safeActorRef(value: unknown): string | null {
+  if (value === null) return null;
+  if (
+    typeof value !== "string" ||
+    !CANONICAL_SHA256_REFERENCE_PATTERN.test(value)
+  ) {
+    fail("invalid_input");
+  }
+  return value;
+}
+
+function safeActorRefHashVersion(value: unknown): 1 | null {
+  if (value === null) return null;
+  if (value !== 1) fail("invalid_input");
+  return 1;
+}
+
 function safeRedactedText(value: string): boolean {
   return (
     value.length <= 256 &&
@@ -393,7 +423,14 @@ function validatedRecord(value: unknown): AuditArchiveRecordV1 {
   if (outcome !== "success" && outcome !== "denied" && outcome !== "failure") {
     fail("invalid_input");
   }
+  const actorRef = safeActorRef(record.actorRef);
+  const actorRefHashVersion = safeActorRefHashVersion(record.actorRefHashVersion);
+  if ((actorRef === null) !== (actorRefHashVersion === null)) {
+    fail("invalid_input");
+  }
   return {
+    actorRef,
+    actorRefHashVersion,
     actorUserId: safeIdentifier(record.actorUserId, true),
     clientId: safeIdentifier(record.clientId, true),
     eventId: safeIdentifier(record.eventId),
@@ -530,6 +567,7 @@ async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
 
 function canonicalHeader(value: {
   batchGeneration: number;
+  checkpointFromSequence: number;
   createdAt: string;
   eventCount: number;
   firstSequence: number;
@@ -539,6 +577,7 @@ function canonicalHeader(value: {
 }): ArchiveHeaderV1 {
   return {
     batchGeneration: value.batchGeneration,
+    checkpointFromSequence: value.checkpointFromSequence,
     contract: AUDIT_ARCHIVE_ENVELOPE_CONTRACT,
     createdAt: value.createdAt,
     encryption: "A256GCM",
@@ -609,11 +648,17 @@ function validatedHeader(value: unknown): ArchiveHeaderV1 {
   const firstSequence = safeInteger(header.firstSequence, 1);
   const lastSequence = safeInteger(header.lastSequence, 1);
   const eventCount = safeInteger(header.eventCount, 1);
-  if (lastSequence < firstSequence || eventCount > AUDIT_ARCHIVE_MAX_RECORDS) {
+  const checkpointFromSequence = safeInteger(header.checkpointFromSequence);
+  if (
+    checkpointFromSequence >= firstSequence ||
+    lastSequence < firstSequence ||
+    eventCount > AUDIT_ARCHIVE_MAX_RECORDS
+  ) {
     fail("invalid_input");
   }
   return canonicalHeader({
     batchGeneration: safeInteger(header.batchGeneration, 1),
+    checkpointFromSequence,
     createdAt: canonicalTimestamp(header.createdAt),
     eventCount,
     firstSequence,
@@ -641,7 +686,9 @@ function validatedManifest(value: unknown): AuditArchiveManifestV1 {
   const lastSequence = safeInteger(manifest.lastSequence, 1);
   const eventCount = safeInteger(manifest.eventCount, 1);
   const objectBytes = safeInteger(manifest.objectBytes, 1);
+  const checkpointFromSequence = safeInteger(manifest.checkpointFromSequence);
   if (
+    checkpointFromSequence >= firstSequence ||
     lastSequence < firstSequence ||
     eventCount > AUDIT_ARCHIVE_MAX_RECORDS ||
     objectBytes > AUDIT_ARCHIVE_MAX_OBJECT_BYTES
@@ -650,6 +697,7 @@ function validatedManifest(value: unknown): AuditArchiveManifestV1 {
   }
   return {
     batchGeneration: safeInteger(manifest.batchGeneration, 1),
+    checkpointFromSequence,
     contentType: AUDIT_ARCHIVE_CONTENT_TYPE,
     contract: AUDIT_ARCHIVE_ENVELOPE_CONTRACT,
     createdAt: canonicalTimestamp(manifest.createdAt),
@@ -691,6 +739,7 @@ export async function sealAuditArchiveV1(
   try {
     const input = exactObject(value, SEAL_INPUT_KEYS);
     const batchGeneration = safeInteger(input.batchGeneration, 1);
+    const checkpointFromSequence = safeInteger(input.checkpointFromSequence);
     const createdAt = canonicalTimestamp(input.createdAt);
     const keyVersion = validatedKeyVersion(input.keyVersion);
 
@@ -701,12 +750,14 @@ export async function sealAuditArchiveV1(
     if (firstSequence === undefined || lastSequence === undefined) {
       fail("invalid_input");
     }
+    if (checkpointFromSequence >= firstSequence) fail("invalid_input");
 
     dekBytes = randomBytes(AES_256_BYTES);
     nonceBytes = randomBytes(AES_GCM_NONCE_BYTES);
     const plaintextSha256 = await sha256Hex(canonical.bytes);
     const header = canonicalHeader({
       batchGeneration,
+      checkpointFromSequence,
       createdAt,
       eventCount: canonical.records.length,
       firstSequence,
@@ -759,6 +810,7 @@ export async function sealAuditArchiveV1(
     const objectSha256 = await sha256Hex(objectBytes);
     const manifest: AuditArchiveManifestV1 = {
       batchGeneration,
+      checkpointFromSequence,
       contentType: AUDIT_ARCHIVE_CONTENT_TYPE,
       contract: AUDIT_ARCHIVE_ENVELOPE_CONTRACT,
       createdAt,
@@ -847,6 +899,7 @@ function manifestMatchesHeader(
 ): boolean {
   return (
     manifest.batchGeneration === header.batchGeneration &&
+    manifest.checkpointFromSequence === header.checkpointFromSequence &&
     manifest.contract === header.contract &&
     manifest.createdAt === header.createdAt &&
     manifest.eventCount === header.eventCount &&

@@ -1,12 +1,13 @@
 # Alert observability source boundary
 
-> Status: local schema, pure evaluator/parser and archive-crypto source, plus an
-> evaluator runtime-status/lease/bootstrap repository. That repository is not
-> imported by the Worker entry point or a scheduler. Full audit and other
-> metric-source aggregation, `alert_state`/`security_alert`/`alert_outbox` CAS,
-> Cron, Queue/Email/admin delivery,
-> same-run proof, the `0021` R2 archive implementation, and deployment remain
-> absent. Production records remain through migration `0012`.
+> Status: local schema, pure evaluator/parser and archive-crypto contracts, an
+> evaluator runtime-status/lease/bootstrap repository, and a bounded audit
+> source repository. Neither repository is imported by the Worker entry point
+> or a scheduler. Remaining metric sources,
+> `alert_state`/`security_alert`/`alert_outbox` CAS, Cron,
+> Queue/Email/admin delivery, same-run proof, the `0021` R2 archive
+> implementation, and deployment remain absent. Production records remain
+> through migration `0012`.
 
 ## What `0020` provides
 
@@ -37,6 +38,15 @@ provenance, and defines one key-continuity sentinel:
   null;
 - `alert_hash_key_sentinel`: one immutable, domain-separated fingerprint of the
   v1 alert subject HMAC key. It stores no secret and must match before evaluation.
+
+The source contract derives that fingerprint as HMAC-SHA-256 over the exact
+UTF-8 bytes `pgid-alert-v1\0key_sentinel\0pgid.alert_subject_hash_key.v1`, using
+the decoded 32-byte alert HMAC key, and stores the canonical unpadded base64url
+result with hash version `1`. This key-sentinel domain is not an alert dimension
+and is not interchangeable with subject, actor, client, reporter or archive-KEK
+references. The local audit source slice verifies the singleton before deriving
+hashed observations; this does not mean an evaluator or production writer is
+deployed.
 
 Rule IDs are restricted to reviewed PGID registration, restricted-account,
 recovery, Passkey step-up, OAuth-report, admin, audit-fanout, logout, alert
@@ -279,14 +289,14 @@ D1, R2 or Queue I/O.
 
 ## Remaining gates
 
-Schema, pure evaluator/parser, and the unwired evaluator runtime-status
-repository must still report observability as `source_present_unverified`,
-leaving continuity and drills blocked. A later reviewed slice must add the full
-D1 audit/other metric-source aggregation and
-`alert_state`/`security_alert`/`alert_outbox` CAS repositories,
-wire the runtime repository into evaluator Cron with same-run proof, and add the
-dedicated alert Queue/DLQ, Email Service adapter, admin
-acknowledge/resolve/replay operations, and redaction/race/failure tests. Pure
+Schema, pure evaluator/parser, the unwired evaluator runtime-status repository,
+and the bounded local `audit_event` source repository must still report
+observability as `source_present_unverified`, leaving continuity and drills
+blocked. Later reviewed slices must add the remaining OAuth-report, fan-out,
+logout and Queue sources; D1 state/incident CAS; wire the runtime repository
+into evaluator Cron with repository-controlled successful-run and same-run
+proof; dedicated alert Queue/DLQ; Email Service adapter; admin
+acknowledge/resolve/replay operations; and redaction/race/failure tests. Pure
 archive crypto does not satisfy the separate encrypted archive dependency;
 `encrypted_r2_archive` remains `dependency_missing` until the `0021` repository,
 R2 writer/restore, Queue/DLQ and external-backup exercise exist.

@@ -33,6 +33,8 @@ const packageContracts = Object.freeze({
   }),
 });
 
+const codeOwnedProjectRoots = Object.freeze(Object.keys(packageContracts));
+
 const pnpmWorkspaceContract = Object.freeze({
   file: "pnpm-workspace.yaml",
   digest: "df1b9fbd1c6221aa62320fd090c5cadcbc335b27876fde1a05ab26932eb4dc59",
@@ -55,10 +57,26 @@ const prohibitedWorkspacePnpmfiles = Object.freeze([
 ]);
 
 const prohibitedProjectNpmrcFiles = Object.freeze(
-  Object.keys(packageContracts).map((projectRoot) =>
-    projectRoot === "." ? ".npmrc" : `${projectRoot}/.npmrc`,
+  codeOwnedProjectRoots.map((projectRoot) =>
+    projectRelativePath(projectRoot, ".npmrc"),
   ),
 );
+
+const prohibitedProjectBindingGypFiles = Object.freeze(
+  codeOwnedProjectRoots.map((projectRoot) =>
+    projectRelativePath(projectRoot, "binding.gyp"),
+  ),
+);
+
+const prohibitedProjectNodeModules = Object.freeze(
+  codeOwnedProjectRoots.map((projectRoot) =>
+    projectRelativePath(projectRoot, "node_modules"),
+  ),
+);
+
+function projectRelativePath(projectRoot, relative) {
+  return projectRoot === "." ? relative : `${projectRoot}/${relative}`;
+}
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -198,6 +216,12 @@ export function validateReleaseIdentity(root = repoRoot) {
   for (const relative of prohibitedProjectNpmrcFiles) {
     rejectPresentPath(root, relative, "project pnpm configuration", errors);
   }
+  for (const relative of prohibitedProjectBindingGypFiles) {
+    rejectPresentPath(root, relative, "implicit native install input", errors);
+  }
+  for (const relative of prohibitedProjectNodeModules) {
+    rejectPresentPath(root, relative, "pre-existing install state", errors);
+  }
   return [...new Set(errors)];
 }
 
@@ -209,7 +233,7 @@ function main() {
     return;
   }
   console.log(
-    "Early release identity check passed (2 workflows, 4 manifests, pnpm policy, lockfile, patch set, no project hooks/config).",
+    "Early release identity check passed (2 workflows, 4 manifests, pnpm policy, lockfile, patch set, no project hooks/config/implicit builds/install state).",
   );
 }
 

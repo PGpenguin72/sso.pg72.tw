@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdtempSync,
@@ -19,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { validateReleaseIdentity } from "./release-identity.mjs";
 
 const sourceRoot = fileURLToPath(new URL("../../", import.meta.url));
+const codeOwnedProjectRoots = [".", "apps/sso", "apps/test-rp", "wiki"];
 const identityFiles = [
   ".github/workflows/ci.yml",
   ".github/workflows/dast-preview.yml",
@@ -54,7 +56,13 @@ function mutateManifest(root, relative, mutate) {
 test("accepts the exact checkout before dependencies exist", (context) => {
   const root = fixture(context);
   assert.deepEqual(validateReleaseIdentity(root), []);
-  assert.equal(existsSync(path.join(root, "node_modules")), false);
+  for (const projectRoot of codeOwnedProjectRoots) {
+    assert.equal(
+      existsSync(path.join(root, projectRoot, "node_modules")),
+      false,
+      projectRoot,
+    );
+  }
 });
 
 test("rejects implicit pre/post hooks at root and filtered workspaces", (context) => {
@@ -224,6 +232,48 @@ test("rejects project npmrc files at every code-owned package root", (context) =
   ]) {
     const root = fixture(context);
     writeFileSync(path.join(root, relative), "registry=https://example.invalid/\n");
+    assert.ok(
+      validateReleaseIdentity(root).some((error) => error.includes(relative)),
+      relative,
+    );
+  }
+});
+
+test("rejects every binding.gyp node type at every code-owned package root", (context) => {
+  const mutations = [
+    ["file", (filename) => writeFileSync(filename, "{}\n")],
+    ["directory", (filename) => mkdirSync(filename)],
+    ["symlink", (filename) => symlinkSync("missing-binding-target", filename)],
+    [
+      "unreadable",
+      (filename) => {
+        writeFileSync(filename, "{}\n");
+        chmodSync(filename, 0o000);
+      },
+    ],
+  ];
+  for (const projectRoot of codeOwnedProjectRoots) {
+    for (const [nodeType, mutate] of mutations) {
+      const root = fixture(context);
+      const relative =
+        projectRoot === "." ? "binding.gyp" : `${projectRoot}/binding.gyp`;
+      mutate(path.join(root, relative));
+      assert.ok(
+        validateReleaseIdentity(root).some((error) => error.includes(relative)),
+        `${relative}:${nodeType}`,
+      );
+    }
+  }
+});
+
+test("rejects pre-existing node_modules and lifecycle hooks at every package root", (context) => {
+  for (const projectRoot of codeOwnedProjectRoots) {
+    const root = fixture(context);
+    const relative =
+      projectRoot === "." ? "node_modules" : `${projectRoot}/node_modules`;
+    const hooks = path.join(root, relative, ".hooks");
+    mkdirSync(hooks, { recursive: true });
+    writeFileSync(path.join(hooks, "install"), "#!/bin/sh\nexit 1\n");
     assert.ok(
       validateReleaseIdentity(root).some((error) => error.includes(relative)),
       relative,

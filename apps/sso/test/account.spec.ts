@@ -2,6 +2,7 @@ import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 
 import { normalizeDisplayName } from "../worker/account";
+import { sha256Base64Url } from "../worker/recovery-codes";
 import { createAuthenticatedUser } from "./helpers";
 
 const BASE_URL = "http://localhost:5173";
@@ -29,6 +30,27 @@ async function createPasskey(userId: string, name: string): Promise<string> {
     )
     .run();
   return id;
+}
+
+async function createUnusedRecoveryCode(userId: string): Promise<void> {
+  const setId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await env.PG72_ID_DB.batch([
+    env.PG72_ID_DB.prepare(
+      `INSERT INTO recovery_code_set
+        (id, user_id, generation, format_version, created_at, expires_at)
+       VALUES (?, ?, 1, 1, ?, NULL)`,
+    ).bind(setId, userId, now),
+    env.PG72_ID_DB.prepare(
+      `INSERT INTO recovery_code
+        (id, set_id, ordinal, code_hash, consumed_at)
+       VALUES (?, ?, 1, ?, NULL)`,
+    ).bind(
+      crypto.randomUUID(),
+      setId,
+      await sha256Base64Url(`account-test-${crypto.randomUUID()}`),
+    ),
+  ]);
 }
 
 async function latestAuditEvent(
@@ -342,7 +364,8 @@ describe("login methods", () => {
         expect.objectContaining({
           id: googleAccountId,
           provider: "google",
-          canUnlink: true,
+          canUnlink: false,
+          recoveryCodeRequired: true,
         }),
       ],
       passkeyCount: 2,
@@ -362,6 +385,7 @@ describe("login methods", () => {
       `${crypto.randomUUID()}@example.com`,
     );
     await createPasskey(userId, "Remaining key");
+    await createUnusedRecoveryCode(userId);
 
     const response = await exports.default.fetch(
       new Request(
@@ -383,6 +407,27 @@ describe("login methods", () => {
       event_type: "account.unlinked",
       outcome: "success",
     });
+  });
+
+  it("blocks unlinking the final social provider without an unused recovery code", async () => {
+    const { googleAccountId, headers, userId } = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+    );
+    await createPasskey(userId, "Passkey-only transition");
+
+    const response = await exports.default.fetch(
+      new Request(
+        `${BASE_URL}/api/account/login-methods/${googleAccountId}`,
+        { method: "DELETE", headers },
+      ),
+    );
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "recovery_code_required" });
+    expect(
+      await env.PG72_ID_DB.prepare("SELECT id FROM account WHERE id = ?")
+        .bind(googleAccountId)
+        .first(),
+    ).not.toBeNull();
   });
 
   it("refuses to unlink the last remaining sign-in method", async () => {

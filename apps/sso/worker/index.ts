@@ -54,6 +54,8 @@ import {
   oauthReportRoutes,
 } from "./oauth-reports";
 import { passkeyStepUpRoutes } from "./passkey-step-up";
+import { recoveryCodeManagementRoutes } from "./recovery-codes";
+import { recoveryRoutes } from "./recovery";
 import {
   bindPublicRegistrationOAuthState,
   preparePublicRegistrationOAuthStart,
@@ -636,11 +638,75 @@ app.use("/api/account/passkey-step-up/*", async (c, next) => {
   await next();
 });
 
+for (const path of [
+  "/api/account/recovery-codes",
+  "/api/account/recovery-codes/*",
+]) {
+  app.use(
+    path,
+    bodyLimit({
+      maxSize: 1024,
+      onError: (c) => c.json({ error: "request_too_large" }, 413),
+    }),
+  );
+  app.use(path, async (c, next) => {
+    const config = readRuntimeConfig(c.env);
+    if (!config.recoveryEnabled) {
+      await next();
+      return;
+    }
+    const origin = c.req.header("origin");
+    const readOnly = c.req.method === "GET" || c.req.method === "HEAD";
+    if (
+      readOnly
+        ? origin !== undefined && origin !== config.authBaseUrl
+        : origin !== config.authBaseUrl
+    ) {
+      return c.json({ error: "invalid_origin" }, 403);
+    }
+    await next();
+  });
+}
+
+app.use(
+  "/api/recovery/start",
+  bodyLimit({
+    maxSize: 1024,
+    onError: (c) => c.json({ error: "request_too_large" }, 413),
+  }),
+);
+app.use(
+  "/api/recovery/*",
+  bodyLimit({
+    maxSize: 64 * 1024,
+    onError: (c) => c.json({ error: "request_too_large" }, 413),
+  }),
+);
+app.use("/api/recovery/*", async (c, next) => {
+  const config = readRuntimeConfig(c.env);
+  if (!config.recoveryEnabled) {
+    await next();
+    return;
+  }
+  const origin = c.req.header("origin");
+  const readOnly = c.req.method === "GET" || c.req.method === "HEAD";
+  if (
+    readOnly
+      ? origin !== undefined && origin !== config.authBaseUrl
+      : origin !== config.authBaseUrl
+  ) {
+    return c.json({ error: "invalid_origin" }, 403);
+  }
+  await next();
+});
+
 app.route("/api/admin/clients", adminClientRoutes);
 app.route("/api/admin/logout-deliveries", adminLogoutDeliveryRoutes);
 app.route("/api/admin/oauth-reports", adminOauthReportRoutes);
 app.route("/api/admin/users", adminUserRoutes);
 app.route("/", passkeyStepUpRoutes);
+app.route("/", recoveryCodeManagementRoutes);
+app.route("/", recoveryRoutes);
 app.route("/", accountRoutes);
 app.route("/", oauthReportRoutes);
 app.route("/", telegramRoutes);

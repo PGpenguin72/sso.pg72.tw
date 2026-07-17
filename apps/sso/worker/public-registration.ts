@@ -459,6 +459,7 @@ publicRegistrationRoutes.get("/api/registration/config", (c) => {
   const config = readRuntimeConfig(c.env);
   return c.json({
     mode: config.registrationMode,
+    recoveryEnabled: config.recoveryEnabled,
     publicRegistration: config.publicRegistration
       ? {
           privacyVersion: config.publicRegistration.privacyVersion,

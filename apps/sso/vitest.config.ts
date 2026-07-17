@@ -13,6 +13,7 @@ const TEST_BINDINGS = {
   PASSKEY_RP_ID: "localhost",
   PASSKEY_STEP_UP_MAX_AGE_SECONDS: "600",
   PRIVACY_VERSION: "2026-07-17.test",
+  RECOVERY_MODE: "enabled",
   REGISTRATION_MODE: "invite",
   TERMS_VERSION: "2026-07-17.test",
   TURNSTILE_SECRET_KEY: "test-only-turnstile-secret",

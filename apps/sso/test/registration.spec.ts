@@ -202,6 +202,7 @@ describe("registration policy", () => {
     );
     expect(await inviteResponse.json()).toEqual({
       mode: "invite",
+      recoveryEnabled: true,
       publicRegistration: null,
     });
 
@@ -213,6 +214,7 @@ describe("registration policy", () => {
     const body = (await publicResponse.json()) as Record<string, unknown>;
     expect(body).toEqual({
       mode: "public",
+      recoveryEnabled: true,
       publicRegistration: {
         privacyVersion: "2026-07-17.test",
         siteKey: "test-only-turnstile-site-key",

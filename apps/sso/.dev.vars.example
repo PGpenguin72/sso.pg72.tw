@@ -2,6 +2,8 @@
 AUTH_BASE_URL="http://localhost:5173"
 PASSKEY_RP_ID="localhost"
 PASSKEY_ORIGIN="http://localhost:5173"
+PASSKEY_STEP_UP_MAX_AGE_SECONDS="600"
+RECOVERY_MODE="disabled"
 REGISTRATION_MODE="public"
 ENVIRONMENT="development"
 BETTER_AUTH_SECRET="generate-with-openssl-rand-base64-32"

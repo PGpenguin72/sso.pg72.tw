@@ -14,6 +14,7 @@ import {
 import { recordAudit } from "./audit";
 import { createAuth } from "./auth";
 import { readRuntimeConfig } from "./config";
+import { activeRecoveryCodeSet } from "./recovery-codes";
 import {
   decodeActivityCursor,
   encodeActivityCursor,
@@ -432,6 +433,11 @@ accountRoutes.get("/api/account/login-methods", async (c) => {
     .all<AccountRow>();
   const counts = await loginMethodCounts(c.env, gate.userId);
   const totalMethods = counts.accounts + counts.passkeys;
+  const recoveryEnabled = readRuntimeConfig(c.env).recoveryEnabled;
+  const recoveryCodes =
+    recoveryEnabled && counts.accounts === 1
+      ? await activeRecoveryCodeSet(c.env, gate.userId)
+      : null;
   const linkedProviders = new Set(
     accounts.results.map((account) => account.providerId),
   );
@@ -442,7 +448,16 @@ accountRoutes.get("/api/account/login-methods", async (c) => {
       id: account.id,
       provider: account.providerId,
       createdAt: account.createdAt,
-      canUnlink: totalMethods > 1,
+      canUnlink:
+        totalMethods > 1 &&
+        (counts.accounts > 1 || (recoveryCodes?.remaining ?? 0) > 0),
+      recoveryCodeRequired:
+        counts.accounts === 1 &&
+        counts.passkeys > 0 &&
+        recoveryEnabled &&
+        (recoveryCodes?.remaining ?? 0) === 0,
+      recoveryUnavailable:
+        counts.accounts === 1 && counts.passkeys > 0 && !recoveryEnabled,
     })),
     passkeyCount: counts.passkeys,
     linkable:
@@ -472,21 +487,84 @@ accountRoutes.delete("/api/account/login-methods/:accountId", async (c) => {
     return c.json({ error: "account_not_found" }, 404);
   }
 
-  // Policy: a user must always keep at least one sign-in method. Passkeys
-  // count as methods, so the last social account may only be unlinked while
-  // at least one passkey remains (and vice versa in the passkey routes).
+  // The final social account requires both another sign-in method and an
+  // active, unused recovery code. The committing DELETE repeats these guards.
   const counts = await loginMethodCounts(c.env, gate.userId);
   if (counts.accounts + counts.passkeys <= 1) {
     await auditAccountEvent(c, "account.unlink_blocked", "denied", gate.userId);
     return c.json({ error: "last_login_method" }, 409);
   }
 
+  const recoveryEnabled = readRuntimeConfig(c.env).recoveryEnabled;
+  const now = new Date().toISOString();
+  if (
+    counts.accounts === 1 &&
+    (!recoveryEnabled ||
+      !(await activeRecoveryCodeSet(c.env, gate.userId, now)))
+  ) {
+    await auditAccountEvent(c, "account.unlink_blocked", "denied", gate.userId);
+    return c.json({ error: "recovery_code_required" }, 409);
+  }
+
   const deletion = await c.env.PG72_ID_DB.prepare(
-    "DELETE FROM account WHERE id = ? AND userId = ?",
+    `DELETE FROM account
+      WHERE id = ? AND userId = ?
+        AND (
+          (SELECT COUNT(*) FROM account WHERE userId = ?) > 1
+          OR (? = 1 AND EXISTS (
+            SELECT 1
+              FROM recovery_code_set
+              JOIN recovery_code
+                ON recovery_code.set_id = recovery_code_set.id
+             WHERE recovery_code_set.user_id = ?
+               AND recovery_code_set.revoked_at IS NULL
+               AND (
+                 recovery_code_set.expires_at IS NULL
+                 OR recovery_code_set.expires_at > ?
+               )
+               AND recovery_code.consumed_at IS NULL
+          ))
+        )
+        AND (
+          (SELECT COUNT(*) FROM account WHERE userId = ?)
+          + (SELECT COUNT(*) FROM passkey WHERE userId = ?)
+        ) > 1`,
   )
-    .bind(accountId, gate.userId)
+    .bind(
+      accountId,
+      gate.userId,
+      gate.userId,
+      recoveryEnabled ? 1 : 0,
+      gate.userId,
+      now,
+      gate.userId,
+      gate.userId,
+    )
     .run();
   if (deletion.meta.changes !== 1) {
+    const stillOwned = await c.env.PG72_ID_DB.prepare(
+      "SELECT 1 AS present FROM account WHERE id = ? AND userId = ?",
+    )
+      .bind(accountId, gate.userId)
+      .first();
+    if (stillOwned) {
+      const refreshedCounts = await loginMethodCounts(c.env, gate.userId);
+      await auditAccountEvent(
+        c,
+        "account.unlink_blocked",
+        "denied",
+        gate.userId,
+      );
+      return c.json(
+        {
+          error:
+            refreshedCounts.accounts + refreshedCounts.passkeys <= 1
+              ? "last_login_method"
+              : "recovery_code_required",
+        },
+        409,
+      );
+    }
     return c.json({ error: "account_not_found" }, 404);
   }
 

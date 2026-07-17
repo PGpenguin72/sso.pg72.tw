@@ -53,6 +53,13 @@
       "name": "INTROSPECTION_CLIENT_RATE_LIMITER",
       "namespace_id": "1005",
       "simple": { "limit": 600, "period": 60 }
+    },
+    {
+      // Recovery codes have 160 bits of entropy. This binding is a bounded
+      // resource-abuse control, not an account lock or exact global counter.
+      "name": "RECOVERY_RATE_LIMITER",
+      "namespace_id": "1006",
+      "simple": { "limit": 10, "period": 60 }
     }
   ],
   "queues": {
@@ -82,6 +89,7 @@
     "PASSKEY_RP_ID": "sso.pg72.tw",
     "PASSKEY_ORIGIN": "https://sso.pg72.tw",
     "PASSKEY_STEP_UP_MAX_AGE_SECONDS": "600",
+    "RECOVERY_MODE": "disabled",
     "REGISTRATION_MODE": "invite",
     "ENVIRONMENT": "production"
   },

@@ -1,4 +1,5 @@
 export type RegistrationMode = "invite" | "public";
+export type RecoveryMode = "disabled" | "enabled";
 
 /**
  * Plaintext client secrets are issued as `pg72_cs_<suffix>`; the provider
@@ -8,6 +9,10 @@ export type RegistrationMode = "invite" | "public";
 export const CLIENT_SECRET_PREFIX = "pg72_cs_";
 export const FRESH_SESSION_MAX_AGE_MS = 10 * 60 * 1000;
 export const PASSKEY_STEP_UP_CHALLENGE_TTL_MS = 2 * 60 * 1000;
+export const RECOVERY_CODE_COUNT = 10;
+export const RECOVERY_FORMAT_VERSION = 1;
+export const RECOVERY_PASSKEY_CHALLENGE_TTL_MS = 2 * 60 * 1000;
+export const RECOVERY_SESSION_TTL_MS = 10 * 60 * 1000;
 
 const PASSKEY_STEP_UP_MIN_AGE_SECONDS = 60;
 const PASSKEY_STEP_UP_MAX_AGE_SECONDS = 10 * 60;
@@ -36,6 +41,7 @@ export interface RuntimeConfig {
   passkeyRpId: string;
   passkeyStepUpMaxAgeMs: number;
   publicRegistration: PublicRegistrationConfig | null;
+  recoveryEnabled: boolean;
   registrationMode: RegistrationMode;
 }
 
@@ -92,6 +98,10 @@ export function readRuntimeConfig(env: Env): RuntimeConfig {
   );
   if (registrationMode !== "invite" && registrationMode !== "public") {
     throw new Error("REGISTRATION_MODE must be invite or public");
+  }
+  const recoveryMode = required(env.RECOVERY_MODE, "RECOVERY_MODE");
+  if (recoveryMode !== "disabled" && recoveryMode !== "enabled") {
+    throw new Error("RECOVERY_MODE must be disabled or enabled");
   }
 
   const environment = required(env.ENVIRONMENT, "ENVIRONMENT");
@@ -158,6 +168,7 @@ export function readRuntimeConfig(env: Env): RuntimeConfig {
     passkeyRpId,
     passkeyStepUpMaxAgeMs: passkeyStepUpMaxAgeSeconds * 1000,
     publicRegistration,
+    recoveryEnabled: recoveryMode === "enabled",
     registrationMode,
   };
 }

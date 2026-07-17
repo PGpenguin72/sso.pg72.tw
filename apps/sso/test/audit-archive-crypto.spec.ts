@@ -28,6 +28,10 @@ function generatedKek(): string {
   return base64Url(crypto.getRandomValues(new Uint8Array(new ArrayBuffer(32))));
 }
 
+function actorRef(seed: number): string {
+  return base64Url(new Uint8Array(new ArrayBuffer(32)).fill(seed % 256));
+}
+
 function credentialMarker(kind: "at" | "cs" | "rt"): string {
   return `pg72_${kind}_`;
 }
@@ -38,6 +42,8 @@ function record(
 ): AuditArchiveRecordV1 {
   return {
     actorUserId: crypto.randomUUID(),
+    actorRef: actorRef(sequence),
+    actorRefHashVersion: 1,
     clientId: "pg72-test-rp",
     eventId: crypto.randomUUID(),
     eventType: "passkey.step_up_succeeded",
@@ -133,6 +139,17 @@ function fullBoundaryMetadata(): string {
   );
 }
 
+function boundaryPayloadMetadata(characters: number): string {
+  const fields: Record<string, string> = {};
+  let remaining = characters;
+  for (let index = 0; remaining > 0; index += 1) {
+    const length = Math.min(remaining, 256);
+    fields[`f${index}`] = "x".repeat(length);
+    remaining -= length;
+  }
+  return JSON.stringify(fields);
+}
+
 describe("audit archive crypto v1", () => {
   it("exposes one-argument entry points backed only by global Web Crypto", () => {
     expectTypeOf<
@@ -150,6 +167,7 @@ describe("audit archive crypto v1", () => {
     const kek = generatedKek();
     const input = {
       batchGeneration: 3,
+      checkpointFromSequence: 2,
       createdAt: CREATED_AT,
       kek,
       keyVersion: "v1",
@@ -160,6 +178,7 @@ describe("audit archive crypto v1", () => {
     const second = await sealAuditArchiveV1(input);
 
     expect(first.manifest.contentType).toBe(AUDIT_ARCHIVE_CONTENT_TYPE);
+    expect(first.manifest.checkpointFromSequence).toBe(2);
     expect(first.manifest.firstSequence).toBe(5);
     expect(first.manifest.lastSequence).toBe(9);
     expect(first.manifest.eventCount).toBe(2);
@@ -197,10 +216,250 @@ describe("audit archive crypto v1", () => {
     ).toThrow(AuditArchiveCryptoError);
   });
 
+  it("round-trips finalized nullable actor references without restoring raw identity", async () => {
+    const deletedActorRef = actorRef(6);
+    expect(deletedActorRef.endsWith("Y")).toBe(true);
+    const records = [
+      record(5, {
+        actorUserId: null,
+        actorRef: deletedActorRef,
+        actorRefHashVersion: 1,
+      }),
+      record(9, {
+        actorUserId: null,
+        actorRef: null,
+        actorRefHashVersion: null,
+      }),
+    ];
+    const kek = generatedKek();
+    const sealed = await sealAuditArchiveV1({
+      batchGeneration: 1,
+      checkpointFromSequence: 3,
+      createdAt: CREATED_AT,
+      kek,
+      keyVersion: "v1",
+      records,
+    });
+
+    const opened = await openAuditArchiveV1({
+      expected: sealed.manifest,
+      kek,
+      objectBytes: sealed.objectBytes,
+    });
+    expect(opened).toEqual(records);
+    expect(opened[0]).toMatchObject({
+      actorUserId: null,
+      actorRef: deletedActorRef,
+      actorRefHashVersion: 1,
+    });
+    expect(opened[1]).toMatchObject({
+      actorUserId: null,
+      actorRef: null,
+      actorRefHashVersion: null,
+    });
+  });
+
+  it("enforces the finalized actor reference pair and canonical hash domain", () => {
+    expect(() =>
+      encodeCanonicalAuditRecordsV1([
+        record(1, { actorRef: null, actorRefHashVersion: null }),
+        record(2, { actorUserId: null, actorRef: actorRef(6) }),
+      ]),
+    ).not.toThrow();
+
+    for (const overrides of [
+      { actorRef: actorRef(1), actorRefHashVersion: null },
+      { actorRef: null, actorRefHashVersion: 1 },
+      { actorRef: `${actorRef(1).slice(0, -1)}B`, actorRefHashVersion: 1 },
+      { actorRef: actorRef(1).slice(1), actorRefHashVersion: 1 },
+      { actorRef: actorRef(1), actorRefHashVersion: 2 },
+    ]) {
+      expect(() =>
+        encodeCanonicalAuditRecordsV1([
+          record(1, overrides as Partial<AuditArchiveRecordV1>),
+        ]),
+      ).toThrow(AuditArchiveCryptoError);
+    }
+  });
+
+  it("requires and authenticates the predecessor checkpoint across gaps", async () => {
+    const records = [record(5), record(9)];
+    const kek = generatedKek();
+    const sealed = await sealAuditArchiveV1({
+      batchGeneration: 1,
+      checkpointFromSequence: 3,
+      createdAt: CREATED_AT,
+      kek,
+      keyVersion: "v1",
+      records,
+    });
+    expect(sealed.manifest.checkpointFromSequence).toBe(3);
+
+    for (const checkpointFromSequence of [-1, 1.5, 5, 9]) {
+      await expectArchiveError(
+        () =>
+          sealAuditArchiveV1({
+            batchGeneration: 1,
+            checkpointFromSequence,
+            createdAt: CREATED_AT,
+            kek,
+            keyVersion: "v1",
+            records,
+          }),
+        "invalid_input",
+      );
+    }
+
+    const legacyInput = {
+      batchGeneration: 1,
+      createdAt: CREATED_AT,
+      kek,
+      keyVersion: "v1",
+      records,
+    };
+    await expectArchiveError(
+      () =>
+        sealAuditArchiveV1(
+          legacyInput as unknown as Parameters<typeof sealAuditArchiveV1>[0],
+        ),
+      "invalid_input",
+    );
+
+    await expectArchiveError(
+      () =>
+        openAuditArchiveV1({
+          expected: { ...sealed.manifest, checkpointFromSequence: 2 },
+          kek,
+          objectBytes: sealed.objectBytes,
+        }),
+      "integrity_mismatch",
+    );
+
+    const legacyManifest = { ...sealed.manifest } as Record<string, unknown>;
+    delete legacyManifest.checkpointFromSequence;
+    await expectArchiveError(
+      () =>
+        openAuditArchiveV1({
+          expected: legacyManifest as unknown as AuditArchiveManifestV1,
+          kek,
+          objectBytes: sealed.objectBytes,
+        }),
+      "invalid_input",
+    );
+  });
+
+  it("rejects legacy records and checkpoint/header or record swaps", async () => {
+    const current = record(5, { actorUserId: null, actorRef: actorRef(6) });
+    const legacyRecord = { ...current } as Record<string, unknown>;
+    delete legacyRecord.actorRef;
+    delete legacyRecord.actorRefHashVersion;
+    expect(() =>
+      encodeCanonicalAuditRecordsV1([
+        legacyRecord as unknown as AuditArchiveRecordV1,
+      ]),
+    ).toThrow(AuditArchiveCryptoError);
+
+    const kek = generatedKek();
+    const first = await sealAuditArchiveV1({
+      batchGeneration: 1,
+      checkpointFromSequence: 1,
+      createdAt: CREATED_AT,
+      kek,
+      keyVersion: "v1",
+      records: [current],
+    });
+    const second = await sealAuditArchiveV1({
+      batchGeneration: 1,
+      checkpointFromSequence: 3,
+      createdAt: CREATED_AT,
+      kek,
+      keyVersion: "v1",
+      records: [record(5, { actorUserId: null, actorRef: actorRef(7) })],
+    });
+
+    await expectArchiveError(
+      async () =>
+        openAuditArchiveV1({
+          expected: await manifestForBytes(first.manifest, second.objectBytes),
+          kek,
+          objectBytes: second.objectBytes,
+        }),
+      "integrity_mismatch",
+    );
+
+    const tamperedEnvelope = decodedEnvelope(first.objectBytes);
+    const tamperedHeader = tamperedEnvelope.header as Record<string, unknown>;
+    tamperedHeader.checkpointFromSequence = 2;
+    const tamperedBytes = encodedEnvelope(tamperedEnvelope);
+    await expectArchiveError(
+      async () =>
+        openAuditArchiveV1({
+          expected: await manifestForBytes(first.manifest, tamperedBytes, {
+            checkpointFromSequence: 2,
+          }),
+          kek,
+          objectBytes: tamperedBytes,
+        }),
+      "decryption_failed",
+    );
+
+    const legacyEnvelope = decodedEnvelope(first.objectBytes);
+    delete (legacyEnvelope.header as Record<string, unknown>).checkpointFromSequence;
+    const legacyBytes = encodedEnvelope(legacyEnvelope);
+    await expectArchiveError(
+      async () =>
+        openAuditArchiveV1({
+          expected: await manifestForBytes(first.manifest, legacyBytes),
+          kek,
+          objectBytes: legacyBytes,
+        }),
+      "invalid_input",
+    );
+  });
+
+  it("redacts invalid actor references and checkpoint accessor failures", async () => {
+    const invalidActorRef = `${actorRef(1).slice(0, -1)}B`;
+    const rawActor = crypto.randomUUID();
+    const invalidActorFailure = await archiveError(() =>
+      sealAuditArchiveV1({
+        batchGeneration: 1,
+        checkpointFromSequence: 0,
+        createdAt: CREATED_AT,
+        kek: generatedKek(),
+        keyVersion: "v1",
+        records: [record(1, { actorUserId: rawActor, actorRef: invalidActorRef })],
+      }),
+    );
+    expect(invalidActorFailure.code).toBe("invalid_input");
+    expect(invalidActorFailure.message).not.toContain(invalidActorRef);
+    expect(invalidActorFailure.message).not.toContain(rawActor);
+    expect(invalidActorFailure.stack ?? "").not.toContain(invalidActorRef);
+    expect(invalidActorFailure.stack ?? "").not.toContain(rawActor);
+
+    const sentinel = `checkpoint-accessor-${crypto.randomUUID()}`;
+    const failure = await archiveError(() =>
+      sealAuditArchiveV1({
+        batchGeneration: 1,
+        get checkpointFromSequence(): number {
+          throw new Error(sentinel);
+        },
+        createdAt: CREATED_AT,
+        kek: generatedKek(),
+        keyVersion: "v1",
+        records: [record(1)],
+      }),
+    );
+    expect(failure.code).toBe("encryption_failed");
+    expect(failure.message).not.toContain(sentinel);
+    expect(failure.stack ?? "").not.toContain(sentinel);
+  });
+
   it("accepts the current audit source's nullable shape and masked IP metadata", async () => {
     const records = [
       record(1, {
         actorUserId: null,
+        actorRef: null,
+        actorRefHashVersion: null,
         clientId: null,
         ipHash: null,
         metadataJson: null,
@@ -239,6 +498,7 @@ describe("audit archive crypto v1", () => {
     const kek = generatedKek();
     const sealed = await sealAuditArchiveV1({
       batchGeneration: 1,
+      checkpointFromSequence: 0,
       createdAt: CREATED_AT,
       kek,
       keyVersion: "v1",
@@ -258,6 +518,7 @@ describe("audit archive crypto v1", () => {
     const validKek = generatedKek();
     const input = {
       batchGeneration: 1,
+      checkpointFromSequence: 0,
       createdAt: CREATED_AT,
       kek: validKek,
       keyVersion: "v1",
@@ -392,35 +653,31 @@ describe("audit archive crypto v1", () => {
   });
 
   it("enforces the exact plaintext cap and the derived object cap", async () => {
-    const nearObjectLimit = Array.from({ length: 43 }, (_, index) =>
+    const fullRecords = Array.from({ length: 42 }, (_, index) =>
       record(index + 1, { metadataJson: fullBoundaryMetadata() }),
     );
     const exactPlaintextLimit = [
-      ...nearObjectLimit,
-      record(44, {
-        metadataJson: JSON.stringify({
-          field: "x".repeat(55),
-          other: "x".repeat(256),
-        }),
-      }),
+      ...fullRecords,
+      record(43, { metadataJson: boundaryPayloadMetadata(5_695) }),
     ];
     expect(encodeCanonicalAuditRecordsV1(exactPlaintextLimit).byteLength).toBe(
       AUDIT_ARCHIVE_MAX_PLAINTEXT_BYTES,
     );
     expect(() =>
       encodeCanonicalAuditRecordsV1([
-        ...nearObjectLimit,
-        record(44, {
-          metadataJson: JSON.stringify({
-            field: "x".repeat(56),
-            other: "x".repeat(256),
-          }),
-        }),
+        ...fullRecords,
+        record(43, { metadataJson: boundaryPayloadMetadata(5_696) }),
       ]),
     ).toThrow(AuditArchiveCryptoError);
 
+    const nearObjectLimit = [
+      ...fullRecords,
+      record(43, { metadataJson: boundaryPayloadMetadata(5_000) }),
+    ];
+
     const input = {
       batchGeneration: 1,
+      checkpointFromSequence: 0,
       createdAt: CREATED_AT,
       kek: generatedKek(),
       keyVersion: "v1",
@@ -447,6 +704,7 @@ describe("audit archive crypto v1", () => {
     const kek = generatedKek();
     const sealed = await sealAuditArchiveV1({
       batchGeneration: 7,
+      checkpointFromSequence: 2,
       createdAt: CREATED_AT,
       kek,
       keyVersion: "v2",
@@ -495,6 +753,7 @@ describe("audit archive crypto v1", () => {
     const kek = generatedKek();
     const sealed = await sealAuditArchiveV1({
       batchGeneration: 1,
+      checkpointFromSequence: 0,
       createdAt: CREATED_AT,
       kek,
       keyVersion: "v1",
@@ -585,6 +844,7 @@ describe("audit archive crypto v1", () => {
     const failure = await archiveError(() =>
       sealAuditArchiveV1({
         batchGeneration: 1,
+        checkpointFromSequence: 0,
         createdAt: CREATED_AT,
         kek: generatedKek(),
         keyVersion: "v1",
@@ -606,6 +866,7 @@ describe("audit archive crypto v1", () => {
     const fallback = await archiveError(() =>
       sealAuditArchiveV1({
         batchGeneration: 1,
+        checkpointFromSequence: 0,
         createdAt: CREATED_AT,
         kek: generatedKek(),
         keyVersion: "v1",
@@ -626,6 +887,7 @@ describe("audit archive crypto v1", () => {
     const kek = generatedKek();
     const sealed = await sealAuditArchiveV1({
       batchGeneration: 1,
+      checkpointFromSequence: 0,
       createdAt: CREATED_AT,
       kek,
       keyVersion: "v1",
@@ -719,6 +981,7 @@ describe("audit archive crypto v1", () => {
     const kek = generatedKek();
     const sealed = await sealAuditArchiveV1({
       batchGeneration: 1,
+      checkpointFromSequence: 0,
       createdAt: CREATED_AT,
       kek,
       keyVersion: "v1",
@@ -755,6 +1018,7 @@ describe("audit archive crypto v1", () => {
     const invalidKekError = await archiveError(() =>
       sealAuditArchiveV1({
         batchGeneration: 1,
+        checkpointFromSequence: 0,
         createdAt: CREATED_AT,
         kek: invalidKek,
         keyVersion: "v1",
@@ -778,6 +1042,7 @@ describe("audit archive crypto v1", () => {
     const invalidRecordError = await archiveError(() =>
       sealAuditArchiveV1({
         batchGeneration: 1,
+        checkpointFromSequence: 0,
         createdAt: CREATED_AT,
         kek,
         keyVersion: "v1",

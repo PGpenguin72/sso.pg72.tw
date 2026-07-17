@@ -25,6 +25,7 @@ import {
   collectD1Manifest,
   executeD1,
   executeD1File,
+  expectedMigrationHead,
   exportD1,
   queryRows,
   readContinuityRecords,
@@ -51,7 +52,11 @@ import {
   authorizeOwnedLocalOrigin,
   loadClosedProfile,
 } from "./policy.mjs";
-import { readinessFromDependencies, writeClosedReport } from "./report.mjs";
+import {
+  readinessFromDependencies,
+  writeClosedReport,
+  writeMinimalFailureReport,
+} from "./report.mjs";
 
 const USER_ID = "10000000-0000-4000-8000-000000000001";
 const LIVE_SESSION_ID = "30000000-0000-4000-8000-000000000001";
@@ -75,25 +80,161 @@ function randomSecret() {
     .replaceAll("=", "");
 }
 
-export function dependencyStatus() {
-  const wranglerSource = readFileSync(path.join(ssoRoot, "wrangler.jsonc"), "utf8");
+function emptyChecks() {
+  return {
+    centralSidPreserved: false,
+    clientMetadataPreserved: false,
+    clientSecretHashOnly: false,
+    configuredIssuerMatchesDiscovery: false,
+    consentRevokedAndRestored: false,
+    consentUnique: false,
+    counterAdvanced: false,
+    currentKeyAccepted: false,
+    expiredSessionRejected: false,
+    globalLogoutStatePresent: false,
+    immutableSubjectPreserved: false,
+    jwksPrivateKeysDecryptable: false,
+    jwksRestored: false,
+    liveSessionAccepted: false,
+    oldAndNewSignaturesVerified: false,
+    passkeyAssertionVerified: false,
+    passkeyPublicKeyPreserved: false,
+    retiredKeyRejected: false,
+  };
+}
+
+function failureClassOf(error) {
+  return error instanceof Error && /^(?:[A-Za-z][A-Za-z0-9]*)?Error$/.test(error.name)
+    ? error.name
+    : "UnknownError";
+}
+
+const CLASSIFIED_STAGE_ERRORS = new Set([
+  "ContinuityInvariantError",
+  "D1ForeignKeyError",
+  "D1IntegrityError",
+  "D1ManifestError",
+  "D1MigrationLedgerError",
+  "D1RecordsError",
+  "D1RowCountCardinalityError",
+  "D1RowCountColumnsError",
+  "D1RowCountError",
+  "D1RowCountQueryError",
+  "D1RowCountValueError",
+  "D1SchemaHashError",
+  "D1SchemaQueryError",
+  "D1TablePolicyError",
+]);
+const ROW_COUNT_TABLE_ERROR_PATTERN = /^D1RowCountTable\d{2}Error$/;
+
+function isClassifiedStageError(error) {
+  return (
+    error instanceof Error &&
+    (CLASSIFIED_STAGE_ERRORS.has(error.name) ||
+      ROW_COUNT_TABLE_ERROR_PATTERN.test(error.name))
+  );
+}
+
+export function classifiedStage(errorName, operation) {
+  assert.ok(CLASSIFIED_STAGE_ERRORS.has(errorName));
+  assert.equal(typeof operation, "function");
+  try {
+    return operation();
+  } catch (cause) {
+    if (isClassifiedStageError(cause)) {
+      throw cause;
+    }
+    const error = new Error("closed stage failure");
+    error.name = errorName;
+    throw error;
+  }
+}
+
+function sourceMetadata(homeDirectory) {
+  let sourceCommit = "0".repeat(40);
+  try {
+    const candidate = runLocalCommand("git", ["rev-parse", "HEAD"], {
+      cwd: repoRoot,
+      environment: closedChildEnvironment(homeDirectory),
+      label: "source commit lookup",
+      suppressDiagnostic: true,
+    }).trim();
+    if (/^[a-f0-9]{40}$/.test(candidate)) sourceCommit = candidate;
+  } catch {
+    // A zero digest is the closed, non-sensitive failure sentinel.
+  }
+  const packageManager = JSON.parse(
+    readFileSync(path.join(repoRoot, "package.json"), "utf8"),
+  ).packageManager;
+  return {
+    sourceCommit,
+    toolVersions: {
+      node: process.versions.node,
+      pnpm: packageManager.replace(/^pnpm@/, ""),
+      wrangler: readPackageVersion(
+        path.join(ssoRoot, "node_modules", "wrangler"),
+      ),
+    },
+  };
+}
+
+export function earlyFailureReport(stage, error, cleanup, homeDirectory) {
+  const metadata = sourceMetadata(homeDirectory);
+  return {
+    checks: emptyChecks(),
+    cleanup,
+    dependencies: dependencyStatus(),
+    export: { bytes: 0, sha256: "0".repeat(64) },
+    failure: { class: failureClassOf(error), stage },
+    kind: "continuity",
+    migrationHead: "not_run",
+    mode: "local",
+    ready: false,
+    rowCounts: {},
+    schema: {
+      foreignKeys: "not_run",
+      integrity: "not_run",
+      sha256: "0".repeat(64),
+    },
+    schemaVersion: 1,
+    sourceCommit: metadata.sourceCommit,
+    status: "blocked",
+    syntheticOnly: true,
+    toolVersions: metadata.toolVersions,
+  };
+}
+
+export function dependencyStatus(
+  {
+    identityRoot = ssoRoot,
+    repositoryRoot = repoRoot,
+  } = {},
+) {
+  const wranglerSource = readFileSync(
+    path.join(identityRoot, "wrangler.jsonc"),
+    "utf8",
+  );
   return [
     {
       name: "global_logout_0018",
-      status: existsSync(path.join(ssoRoot, "migrations", "0018_global_logout.sql"))
+      status: existsSync(
+        path.join(identityRoot, "migrations", "0018_global_logout.sql"),
+      )
         ? "present"
         : "dependency_missing",
     },
     {
       name: "recovery_0019",
-      status: existsSync(path.join(ssoRoot, "migrations", "0019_recovery_codes.sql"))
+      status: existsSync(
+        path.join(identityRoot, "migrations", "0019_recovery_codes.sql"),
+      )
         ? "present"
         : "dependency_missing",
     },
     {
       name: "observability_0020",
       status: existsSync(
-        path.join(ssoRoot, "migrations", "0020_alert_observability.sql"),
+        path.join(identityRoot, "migrations", "0020_alert_observability.sql"),
       )
         ? "present"
         : "dependency_missing",
@@ -101,7 +242,7 @@ export function dependencyStatus() {
     {
       name: "encrypted_r2_archive",
       status:
-        existsSync(path.join(ssoRoot, "worker", "audit-archive.ts")) &&
+        existsSync(path.join(identityRoot, "worker", "audit-archive.ts")) &&
         /"r2_buckets"\s*:/.test(wranglerSource)
           ? "present"
           : "dependency_missing",
@@ -109,8 +250,8 @@ export function dependencyStatus() {
     {
       name: "release_automation",
       status:
-        existsSync(path.join(repoRoot, "security", "release-policy.json")) &&
-        existsSync(path.join(repoRoot, "scripts", "security", "dast.mjs"))
+        existsSync(path.join(repositoryRoot, "security", "release-policy.json")) &&
+        existsSync(path.join(repositoryRoot, "scripts", "security", "dast.mjs"))
           ? "present"
           : "dependency_missing",
     },
@@ -190,6 +331,30 @@ function exactFixtureChecks(sourceRecords, fixture) {
   ]);
 }
 
+const RUNTIME_FAILURE_CLASSES = Object.freeze({
+  counter: "RuntimeCounterError",
+  discovery: "RuntimeDiscoveryError",
+  first_stop: "RuntimeFirstStopError",
+  key_decrypt: "RuntimeKeyDecryptError",
+  overlap_jwks: "RuntimeOverlapJwksError",
+  overlap_signatures: "RuntimeOverlapSignaturesError",
+  passkey_challenge: "RuntimePasskeyChallengeError",
+  passkey_verify: "RuntimePasskeyVerifyError",
+  retirement_jwks: "RuntimeRetirementJwksError",
+  retirement_restart: "RuntimeRetirementRestartError",
+  retirement_update: "RuntimeRetirementUpdateError",
+  sessions: "RuntimeSessionsError",
+  worker_ready: "RuntimeWorkerReadyError",
+  worker_start: "RuntimeWorkerStartError",
+});
+
+export function closedRuntimeError(step) {
+  assert.ok(Object.hasOwn(RUNTIME_FAILURE_CLASSES, step));
+  const error = new Error("closed runtime failure");
+  error.name = RUNTIME_FAILURE_CLASSES[step];
+  return error;
+}
+
 function verifyConsentContract(projectDirectory) {
   const unique = queryRows(
     projectDirectory,
@@ -232,13 +397,25 @@ async function exerciseRestoredRuntime(
   runtime,
   fixture,
   restoredRecords,
+  recordListenerState,
 ) {
-  await assertPortAvailable(runtime.origin);
-  const processState = startLocalWorker(restoreProject, runtime);
+  let processState;
   let checks;
-  let listenerStopped = false;
+  let listenerStopped = true;
+  let runtimeStep = "worker_start";
+  const stopCurrentWorker = async () => {
+    if (!processState) return;
+    const stopped = await stopLocalWorker(processState);
+    listenerStopped = listenerStopped && stopped;
+    processState = undefined;
+    recordListenerState(listenerStopped);
+  };
   try {
+    await assertPortAvailable(runtime.origin);
+    processState = startLocalWorker(restoreProject, runtime);
+    runtimeStep = "worker_ready";
     await waitForLocalWorker(runtime.origin, processState);
+    runtimeStep = "discovery";
     const discoveryResponse = await fetchLocal(
       runtime.origin,
       "/.well-known/openid-configuration",
@@ -247,6 +424,7 @@ async function exerciseRestoredRuntime(
     const discovery = await boundedJson(discoveryResponse, "OIDC discovery");
     assert.equal(discovery.issuer, runtime.origin);
 
+    runtimeStep = "sessions";
     const liveCookie = await sessionCookie(
       fixture.liveSessionToken,
       fixture.betterAuthSecret,
@@ -264,6 +442,7 @@ async function exerciseRestoredRuntime(
     });
     assert.equal(expiredProfile.status, 401);
 
+    runtimeStep = "passkey_challenge";
     const challengeResponse = await fetchLocal(
       runtime.origin,
       "/api/account/passkey-step-up/challenge",
@@ -281,6 +460,7 @@ async function exerciseRestoredRuntime(
       challenge.options.challenge,
       runtime.origin,
     );
+    runtimeStep = "passkey_verify";
     const verification = await fetchLocal(
       runtime.origin,
       "/api/account/passkey-step-up/verify",
@@ -294,12 +474,7 @@ async function exerciseRestoredRuntime(
       },
     );
     assert.equal(verification.status, 200);
-    const counter = queryRows(
-      restoreProject,
-      `SELECT counter FROM passkey WHERE id = '${PASSKEY_ID}'`,
-    );
-    assert.equal(Number(counter[0]?.counter), 1);
-
+    runtimeStep = "overlap_jwks";
     const overlapResponse = await fetchLocal(
       runtime.origin,
       "/.well-known/jwks.json",
@@ -317,6 +492,16 @@ async function exerciseRestoredRuntime(
       }
     }
 
+    runtimeStep = "first_stop";
+    await stopCurrentWorker();
+    runtimeStep = "counter";
+    const counter = queryRows(
+      restoreProject,
+      `SELECT counter FROM passkey WHERE id = '${PASSKEY_ID}'`,
+    );
+    assert.equal(Number(counter[0]?.counter), 1);
+
+    runtimeStep = "key_decrypt";
     const restoredKeys = new Map(
       restoredRecords.jwks_records.map((record) => [record.id, record]),
     );
@@ -336,6 +521,7 @@ async function exerciseRestoredRuntime(
       sub: USER_ID,
     };
     const payload = { ...expectedClaims, exp: now + 300, iat: now };
+    runtimeStep = "overlap_signatures";
     const oldToken = await signCompactJwt(
       privateA,
       fixture.keyA.id,
@@ -355,11 +541,17 @@ async function exerciseRestoredRuntime(
       true,
     );
 
+    runtimeStep = "retirement_update";
     executeD1(
       restoreProject,
       `UPDATE jwks SET expiresAt = datetime('now', '-61 days')
         WHERE id = 'continuity-signing-key-a'`,
     );
+    runtimeStep = "retirement_restart";
+    await assertPortAvailable(runtime.origin);
+    processState = startLocalWorker(restoreProject, runtime);
+    await waitForLocalWorker(runtime.origin, processState);
+    runtimeStep = "retirement_jwks";
     const retiredResponse = await fetchLocal(
       runtime.origin,
       "/.well-known/jwks.json",
@@ -385,28 +577,39 @@ async function exerciseRestoredRuntime(
       passkeyAssertionVerified: true,
       retiredKeyRejected: true,
     };
+  } catch {
+    throw closedRuntimeError(runtimeStep);
   } finally {
-    listenerStopped = await stopLocalWorker(processState);
+    await stopCurrentWorker();
   }
   return { checks, listenerStopped };
 }
 
 export async function runContinuityLocal() {
-  assertClosedInvocation();
-  assertRemoteOperationsDenied();
-  loadClosedProfile("continuity");
-  const origin = authorizeOwnedLocalOrigin("continuity");
-  const temporaryRoot = mkdtempSync(
-    path.join(os.tmpdir(), "pgid-public-readiness-continuity-"),
-  );
-  const sourceProject = path.join(temporaryRoot, "source");
-  const restoreProject = path.join(temporaryRoot, "restore");
-  const renderedSeed = path.join(temporaryRoot, "continuity-seed.sql");
-  const exportFilename = path.join(temporaryRoot, "continuity-export.sql");
+  let stage = "invocation";
+  let caughtError;
+  let temporaryRoot;
+  let sourceProject;
+  let restoreProject;
+  let renderedSeed;
+  let exportFilename;
   let listenerStopped = true;
-  let temporarySqlRemoved = false;
+  let temporarySqlRemoved = true;
+  let temporaryStateRemoved = true;
   let report;
   try {
+    assertClosedInvocation();
+    assertRemoteOperationsDenied();
+    loadClosedProfile("continuity");
+    const origin = authorizeOwnedLocalOrigin("continuity");
+    stage = "setup";
+    temporaryRoot = mkdtempSync(
+      path.join(os.tmpdir(), "pgid-public-readiness-continuity-"),
+    );
+    sourceProject = path.join(temporaryRoot, "source");
+    restoreProject = path.join(temporaryRoot, "restore");
+    renderedSeed = path.join(temporaryRoot, "continuity-seed.sql");
+    exportFilename = path.join(temporaryRoot, "continuity-export.sql");
     const betterAuthSecret = randomSecret();
     const fixture = await createContinuityCryptoFixtures(betterAuthSecret);
     const runtime = createLocalProject(restoreProject, "continuity", {
@@ -414,23 +617,41 @@ export async function runContinuityLocal() {
     });
     createLocalProject(sourceProject, "continuity", { betterAuthSecret });
     assert.equal(runtime.origin, origin);
+    stage = "workerd_suites";
     runFocusedContinuityTests(temporaryRoot);
+    stage = "migrations";
     applyAllMigrations(sourceProject);
+    stage = "seed";
     renderContinuitySeed(SEED_TEMPLATE, renderedSeed, fixture);
     chmodSync(renderedSeed, 0o600);
     executeD1File(sourceProject, renderedSeed, "synthetic continuity seed");
-    const sourceManifest = collectD1Manifest(sourceProject);
-    const sourceRecords = readContinuityRecords(sourceProject);
-    exactFixtureChecks(sourceRecords, fixture);
-    assert.equal(sourceManifest.migrationHead, "0018_global_logout.sql");
-    assert.equal(sourceManifest.integrityOk, true);
-    assert.equal(sourceManifest.foreignKeysOk, true);
+    stage = "source_schema";
+    const sourceManifest = classifiedStage("D1ManifestError", () =>
+      collectD1Manifest(sourceProject),
+    );
+    stage = "source_records";
+    const sourceRecords = classifiedStage("D1RecordsError", () =>
+      readContinuityRecords(sourceProject),
+    );
+    stage = "source_invariants";
+    classifiedStage("ContinuityInvariantError", () => {
+      exactFixtureChecks(sourceRecords, fixture);
+      assert.equal(
+        sourceManifest.migrationHead,
+        expectedMigrationHead(path.join(ssoRoot, "migrations")),
+      );
+      assert.equal(sourceManifest.integrityOk, true);
+      assert.equal(sourceManifest.foreignKeysOk, true);
+    });
 
+    stage = "export";
     const exported = exportD1(sourceProject, exportFilename);
     assert.ok(exported.bytes > 0 && exported.bytes <= 10 * 1024 * 1024);
+    stage = "restore";
     executeD1File(restoreProject, exportFilename, "fresh isolated D1 restore");
     rmSync(exportFilename, { force: true });
     temporarySqlRemoved = !existsSync(exportFilename);
+    stage = "restore_manifest";
     const restoredManifest = collectD1Manifest(restoreProject);
     const restoredRecords = readContinuityRecords(restoreProject);
     assertEquivalentD1(
@@ -439,27 +660,26 @@ export async function runContinuityLocal() {
       sourceRecords,
       restoredRecords,
     );
+    stage = "consent";
     verifyConsentContract(restoreProject);
 
+    stage = "runtime";
     const runtimeResult = await exerciseRestoredRuntime(
       restoreProject,
       runtime,
       fixture,
       restoredRecords,
+      (stopped) => {
+        listenerStopped = stopped;
+      },
     );
     listenerStopped = runtimeResult.listenerStopped;
     const runtimeChecks = runtimeResult.checks;
     assert.ok(runtimeChecks, "restored runtime did not return checks");
     const dependencies = dependencyStatus();
     const readiness = readinessFromDependencies(dependencies);
-    const sourceCommit = runLocalCommand("git", ["rev-parse", "HEAD"], {
-      cwd: repoRoot,
-      environment: closedChildEnvironment(temporaryRoot),
-      label: "source commit lookup",
-    }).trim();
-    const packageManager = JSON.parse(
-      readFileSync(path.join(repoRoot, "package.json"), "utf8"),
-    ).packageManager;
+    stage = "report";
+    const metadata = sourceMetadata(temporaryRoot);
     report = {
       checks: {
         centralSidPreserved: sourceRecords.session_records.some(
@@ -493,6 +713,7 @@ export async function runContinuityLocal() {
       },
       dependencies,
       export: exported,
+      failure: { class: "none", stage: "none" },
       kind: "continuity",
       migrationHead: sourceManifest.migrationHead,
       mode: "local",
@@ -504,32 +725,69 @@ export async function runContinuityLocal() {
         sha256: sourceManifest.schemaSha256,
       },
       schemaVersion: 1,
-      sourceCommit,
+      sourceCommit: metadata.sourceCommit,
       status: readiness.status,
       syntheticOnly: true,
-      toolVersions: {
-        node: process.versions.node,
-        pnpm: packageManager.replace(/^pnpm@/, ""),
-        wrangler: readPackageVersion(
-          path.join(ssoRoot, "node_modules", "wrangler"),
-        ),
-      },
+      toolVersions: metadata.toolVersions,
     };
+  } catch (error) {
+    caughtError = error;
   } finally {
-    rmSync(exportFilename, { force: true });
-    rmSync(renderedSeed, { force: true });
-    temporarySqlRemoved =
-      !existsSync(exportFilename) && !existsSync(renderedSeed);
-    removeTemporaryTree(temporaryRoot);
+    try {
+      if (exportFilename) rmSync(exportFilename, { force: true });
+      if (renderedSeed) rmSync(renderedSeed, { force: true });
+      temporarySqlRemoved =
+        (!exportFilename || !existsSync(exportFilename)) &&
+        (!renderedSeed || !existsSync(renderedSeed));
+    } catch {
+      temporarySqlRemoved = false;
+    }
+    try {
+      if (temporaryRoot) removeTemporaryTree(temporaryRoot);
+      temporaryStateRemoved = !temporaryRoot || !existsSync(temporaryRoot);
+    } catch {
+      temporaryStateRemoved = false;
+    }
   }
 
-  assert.ok(report, "continuity report was not produced");
-  report.cleanup.listenerStopped = listenerStopped;
-  report.cleanup.temporarySqlRemoved = temporarySqlRemoved;
-  report.cleanup.temporaryStateRemoved = !existsSync(temporaryRoot);
-  assert.ok(Object.values(report.cleanup).every(Boolean), "continuity cleanup failed");
-  writeClosedReport(REPORT_FILENAME, report);
-  if (!report.ready) {
+  const cleanup = {
+    listenerStopped,
+    temporarySqlRemoved,
+    temporaryStateRemoved,
+  };
+  if (!Object.values(cleanup).every(Boolean) && !caughtError) {
+    caughtError = new Error("closed cleanup failed");
+    stage = "report";
+  }
+  if (!report || caughtError) {
+    report = earlyFailureReport(
+      stage,
+      caughtError ?? new Error("continuity report was not produced"),
+      cleanup,
+      temporaryRoot ?? repoRoot,
+    );
+  } else {
+    report.cleanup = cleanup;
+  }
+  try {
+    writeClosedReport(REPORT_FILENAME, report);
+  } catch (error) {
+    const emergency = writeMinimalFailureReport(REPORT_FILENAME, {
+      class: failureClassOf(error),
+      stage: "report",
+    });
+    console.error(
+      `Public readiness failed: stage=${emergency.failure.stage}, class=${emergency.failure.class}.`,
+    );
+    process.exitCode = 1;
+    return emergency;
+  }
+  if (caughtError) {
+    console.error(
+      `Public readiness failed: stage=${report.failure.stage}, class=${report.failure.class}.`,
+    );
+    process.exitCode = 1;
+  } else if (!report.ready) {
     const missing = report.dependencies
       .filter(({ status }) => status === "dependency_missing")
       .map(({ name }) => name)
@@ -539,6 +797,7 @@ export async function runContinuityLocal() {
   } else {
     console.log("Synthetic local continuity checks passed; owner Preview and production gates remain external.");
   }
+  return report;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -547,6 +806,14 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       error instanceof Error && /^[A-Za-z][A-Za-z0-9]*$/.test(error.name)
         ? error.name
         : "UnknownError";
+    try {
+      writeMinimalFailureReport(REPORT_FILENAME, {
+        class: failureClass,
+        stage: "report",
+      });
+    } catch {
+      // A filesystem failure may prevent even the mode-0600 emergency artifact.
+    }
     console.error(
       `Local continuity command failed before a closed report (${failureClass}).`,
     );

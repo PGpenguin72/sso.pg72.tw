@@ -888,7 +888,10 @@ Webmail 仍須分成兩個問題：
 - 兩者都必須拒絕 Cloudflare credentials、remote/Preview/production target，
   也必須拒絕 dirty/untracked/unavailable Git source，只寫 mode-`0600`
   allowlisted schema-v2 aggregate report。Dependency 的 exact source content
-  與同輪 execution proof 必須同時成立才是 `verified`；cleanup failure、local
+  與同輪 execution proof 必須同時成立才是 `verified`；Global Logout 與
+  Recovery proof 另在執行前、執行後及 promotion 時重算完整 tracked
+  `apps/sso` path/bytes 加 root manifest/lock/workspace/patch inputs，任何
+  runtime、test、config 或 dependency input 漂移都使 opaque proof 失效；cleanup failure、local
   invariant failure或 recovery `0019`／observability `0020`／encrypted R2／
   release automation 未 verified 皆 nonzero。
 - Synthetic local pass 只證明 source-local contract；不取代 Preview D1

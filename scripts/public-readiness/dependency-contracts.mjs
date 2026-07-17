@@ -109,6 +109,13 @@ const RELEASE_AUTOMATION_FINGERPRINT_FILES = Object.freeze([
   "security/workflow-policy.json",
   "wiki/package.json",
 ]);
+const SSO_EXECUTION_PATHS = Object.freeze([
+  "apps/sso",
+  "package.json",
+  "patches",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+]);
 
 export const REQUIRED_DEPENDENCY_NAMES = Object.freeze([
   "global_logout_0018",
@@ -261,7 +268,14 @@ function sqlContractFingerprint(identityRoot, contract) {
 
 function exactFileSetFingerprint(root, filenames) {
   const hash = createHash("sha256");
+  hash.update(`files\0${filenames.length}\0`);
   for (const relative of filenames) {
+    assert.equal(path.isAbsolute(relative), false, "fingerprint path must be relative");
+    assert.equal(
+      relative.split("/").includes(".."),
+      false,
+      "fingerprint path escaped its repository root",
+    );
     const filename = path.join(root, relative);
     const stat = lstatSync(filename);
     assert.ok(stat.isFile() && !stat.isSymbolicLink(), `${relative} is not an exact regular file`);
@@ -272,7 +286,59 @@ function exactFileSetFingerprint(root, filenames) {
   return hash.digest("hex");
 }
 
+function trackedSsoExecutionFiles(repositoryRoot) {
+  const source = runLocalCommand(
+    "git",
+    ["ls-files", "-z", "--", ...SSO_EXECUTION_PATHS],
+    {
+      cwd: repositoryRoot,
+      environment: closedChildEnvironment(repositoryRoot),
+      label: "SSO execution source lookup",
+      suppressDiagnostic: true,
+    },
+  );
+  const files = source.split("\0").filter((filename) => filename.length > 0);
+  assert.deepEqual(
+    files,
+    [...new Set(files)].sort(),
+    "SSO execution source path set is not exact and ordered",
+  );
+  for (const required of [
+    "apps/sso/package.json",
+    "apps/sso/test/global-logout.spec.ts",
+    "apps/sso/test/recovery.spec.ts",
+    "apps/sso/worker/global-logout.ts",
+    "apps/sso/worker/recovery.ts",
+    "apps/sso/wrangler.jsonc",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+  ]) {
+    assert.ok(files.includes(required), `SSO execution source lacks ${required}`);
+  }
+  assert.ok(
+    files.some((filename) => filename.startsWith("patches/")),
+    "SSO execution source lacks its package patch inputs",
+  );
+  return files;
+}
+
+function ssoExecutionFingerprint(identityRoot, repositoryRoot) {
+  assert.equal(
+    realpathSync(identityRoot),
+    realpathSync(path.join(repositoryRoot, "apps", "sso")),
+    "SSO execution source root differs from the repository-owned path",
+  );
+  return exactFileSetFingerprint(
+    repositoryRoot,
+    trackedSsoExecutionFiles(repositoryRoot),
+  );
+}
+
 function dependencyFingerprint(name, identityRoot, repositoryRoot) {
+  if (name === "global_logout_0018" || name === "recovery_0019") {
+    return ssoExecutionFingerprint(identityRoot, repositoryRoot);
+  }
   const sqlContract = SQL_CONTRACTS[name];
   if (sqlContract) return sqlContractFingerprint(identityRoot, sqlContract);
   if (name === "release_automation") {
@@ -325,7 +391,11 @@ export function runGlobalLogoutDependencyProof(homeDirectory) {
     "source_present_unverified",
     "global-logout source contract is invalid",
   );
-  const sourceFingerprint = sqlContractFingerprint(ssoRoot, contract);
+  const sourceFingerprint = dependencyFingerprint(
+    "global_logout_0018",
+    ssoRoot,
+    repoRoot,
+  );
   const reportFilename = path.join(
     homeDirectory,
     `global-logout-proof-${crypto.randomUUID()}.json`,
@@ -352,9 +422,9 @@ export function runGlobalLogoutDependencyProof(homeDirectory) {
     rmSync(reportFilename, { force: true });
   }
   assert.equal(
-    sqlContractFingerprint(ssoRoot, contract),
+    dependencyFingerprint("global_logout_0018", ssoRoot, repoRoot),
     sourceFingerprint,
-    "global-logout source changed while its proof was running",
+    "global-logout execution source changed while its proof was running",
   );
   const proof = Object.freeze({});
   dependencyProofs.set(proof, {
@@ -410,7 +480,11 @@ export function runRecoveryDependencyProof(homeDirectory) {
     "source_present_unverified",
     "recovery source contract is invalid",
   );
-  const sourceFingerprint = sqlContractFingerprint(ssoRoot, contract);
+  const sourceFingerprint = dependencyFingerprint(
+    "recovery_0019",
+    ssoRoot,
+    repoRoot,
+  );
   const reportFilename = path.join(
     homeDirectory,
     `recovery-proof-${crypto.randomUUID()}.json`,
@@ -437,9 +511,9 @@ export function runRecoveryDependencyProof(homeDirectory) {
     rmSync(reportFilename, { force: true });
   }
   assert.equal(
-    sqlContractFingerprint(ssoRoot, contract),
+    dependencyFingerprint("recovery_0019", ssoRoot, repoRoot),
     sourceFingerprint,
-    "recovery source changed while its proof was running",
+    "recovery execution source changed while its proof was running",
   );
   const proof = Object.freeze({});
   dependencyProofs.set(proof, {

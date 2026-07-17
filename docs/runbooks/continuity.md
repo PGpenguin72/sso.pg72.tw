@@ -71,7 +71,10 @@ promote it to `verified`; caller-provided dependency names are rejected. Empty,
 truncated, lookalike, malformed, or comment-only configuration cannot be
 promoted. The integrated global-logout proof requires the exact Vitest file and
 suite to report 25 passed assertions with zero failed, skipped, pending, or todo
-tests; exit status alone is insufficient. Recovery uses the exact recovery
+tests; exit status alone is insufficient. Both SSO execution proofs bind the
+exact tracked `apps/sso` path set and regular-file bytes, together with root
+manifest, lockfile, workspace policy, and package patches, before execution,
+after execution, and again at proof promotion. Recovery uses the exact recovery
 Vitest file and requires 4 suites and 20 passed assertions across the three
 fixed recovery groups. Release automation uses an exact Node test event stream
 and requires all 89 tests from the nine fixed security test files to pass with

@@ -103,6 +103,23 @@ function statusOf(entries, name) {
   return entries.find((entry) => entry.name === name)?.status;
 }
 
+function assertTrackedExecutionMutationRejected(proof, relative) {
+  const filename = path.join(repoRoot, relative);
+  const original = readFileSync(filename);
+  try {
+    writeFileSync(
+      filename,
+      Buffer.concat([original, Buffer.from("\n// proof-drift-regression\n")]),
+    );
+    assert.throws(
+      () => dependencyStatus({ proofs: [proof] }),
+      /source no longer matches its executed proof/,
+    );
+  } finally {
+    writeFileSync(filename, original);
+  }
+}
+
 function globalLogoutProofReport(overrides = {}) {
   return {
     numFailedTestSuites: 0,
@@ -260,6 +277,14 @@ test("only the executed repo-bound global-logout check produces its proof", () =
       statusOf(dependencies, "global_logout_0018"),
       "verified",
     );
+    assertTrackedExecutionMutationRejected(
+      proof,
+      "apps/sso/worker/global-logout.ts",
+    );
+    assert.equal(
+      statusOf(dependencyStatus({ proofs: [proof] }), "global_logout_0018"),
+      "verified",
+    );
     assert.ok(
       dependencies
         .filter(({ name }) => name !== "global_logout_0018")
@@ -280,6 +305,10 @@ test("only same-run recovery and release checks produce their opaque proofs", ()
   );
   try {
     const recoveryProof = runRecoveryDependencyProof(homeDirectory);
+    assertTrackedExecutionMutationRejected(
+      recoveryProof,
+      "apps/sso/worker/recovery.ts",
+    );
     const releaseProof = runReleaseAutomationDependencyProof(homeDirectory);
     const dependencies = dependencyStatus({
       proofs: [recoveryProof, releaseProof],

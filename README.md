@@ -172,7 +172,8 @@ package-manager setup/install, or any other repository script. It pins the
 exact workflow file set/raw LF bytes, all four manifest/script-map identities,
 the complete `pnpm-workspace.yaml` lifecycle/build policy, the frozen lockfile,
 and the exact `patches/` file set and raw digests. It also requires both pnpm
-workspace hook filenames and project `.npmrc` files to be absent. The later
+workspace hook filenames, project `.npmrc`, `binding.gyp`, and pre-existing
+`node_modules` paths to be absent at every code-owned package root. The later
 gate rechecks those workflow bytes before YAML/structural validation and
 separately pins both every complete workspace `scripts` object and the
 recursively reachable graph. It models implicit `pre*`/`post*` hooks plus

@@ -26,7 +26,7 @@ pnpm dast:local
 | --- | --- |
 | Worker static analysis | Oxlint type-aware `no-floating-promises` and `no-misused-promises` over both Worker implementations |
 | Secret scan | required checksum-pinned Gitleaks over complete Git history; explicit bounded/redacted tracked, ordinary-untracked, and ignored-sensitive-filename traversal; TypeScript compiler AST plus bounded line/binary decoding with exact audited allowances; captured Secretlint output |
-| Workflow/config | pre-install stdlib identity for exact workflow/manifests/pnpm policy/lockfile/patches and absent repo pnpm hooks/config; later raw-byte workflow identity, actionlint, immutable Action SHAs, least permissions, exact run maps, complete and reachable package-script digests with lifecycle expansion, exact environment scopes, fixed artifact upload, and exact source/generated Wrangler targets |
+| Workflow/config | pre-install stdlib identity for exact workflow/manifests/pnpm policy/lockfile/patches and absent repo pnpm hooks/config/implicit native builds/install state; later raw-byte workflow identity, actionlint, immutable Action SHAs, least permissions, exact run maps, complete and reachable package-script digests with lifecycle expansion, exact environment scopes, fixed artifact upload, and exact source/generated Wrangler targets |
 | Dependency policy | live `pnpm audit --json` reconciled field-for-field with `security/accepted-advisories.json` |
 | Production artifact | code-owned whole-entry SHA-256 followed by `wrangler deploy --dry-run --outdir` module/Static Asset policy and bounded text/binary secret-family scans |
 | Inventory | path-free package/version/license inventory generated from the frozen pnpm install |
@@ -42,8 +42,10 @@ the raw pnpm workspace lifecycle/build policy. It additionally requires
 to be a regular non-symlink directory containing exactly `README.md` and the
 reviewed `@better-auth__oauth-provider@1.6.23.patch` at their code-owned raw
 digests, and rejects `.pnpmfile.mjs`, `.pnpmfile.cjs`, or a project `.npmrc`
-at the root or any code-owned package root. CI then runs `pnpm check`, installs
-actionlint and Gitleaks from the exact
+at the root or any code-owned package root. It also rejects `binding.gyp` and
+pre-existing `node_modules` at all four roots, regardless of whether the path
+is a file, directory, symlink, or unreadable. CI then runs `pnpm check`,
+installs actionlint and Gitleaks from the exact
 versions and SHA-256 checksums in `security/tool-versions.json`, then runs the
 security and local DAST gates. Every third-party Action is pinned to the
 immutable commit recorded in the same file. The checked-in upload step selects
@@ -55,12 +57,21 @@ This boundary follows pnpm's documented
 [`--frozen-lockfile`](https://pnpm.io/11.x/cli/install#--frozen-lockfile),
 [pnpmfile](https://pnpm.io/11.x/pnpmfile),
 [project `.npmrc`](https://pnpm.io/11.x/npmrc), and
-[patch](https://pnpm.io/11.x/cli/patch-commit) behavior. Inspection of the
-pinned pnpm 11.5.0 bundle confirms that the default workspace hook lookup tries
-`.pnpmfile.mjs` and then the legacy `.pnpmfile.cjs`; it does not recognize a
-default `.pnpmfile.js`. The same source reads the workspace-root `.npmrc`, not
-per-package `.npmrc` files, but all four package roots are denied to preserve a
-single reviewed absent-config rule.
+[patch](https://pnpm.io/11.x/cli/patch-commit) behavior, plus npm's documented
+[`binding.gyp` default install lifecycle](https://docs.npmjs.com/cli/using-npm/scripts#life-cycle-operation-order).
+Inspection of the pinned pnpm 11.5.0 bundle confirms that the default workspace
+hook lookup tries `.pnpmfile.mjs` and then the legacy `.pnpmfile.cjs`; it does
+not recognize a default `.pnpmfile.js`. The same source reads the workspace-root
+`.npmrc`, not per-package `.npmrc` files, but all four package roots are denied
+to preserve a single reviewed absent-config rule.
+
+The pinned lifecycle runner synthesizes `node-gyp rebuild` for the `install`
+stage when a package root contains `binding.gyp` and its exact manifest has no
+explicit `preinstall` or `install`. Its adjacent `server.js` default applies
+only to an explicitly requested `start`, which neither release workflow invokes.
+It also probes `<project node_modules>/.hooks/<stage>`; requiring every
+code-owned `node_modules` path to be absent at checkout closes that implicit
+install path before pnpm runs.
 
 Pnpm can also install
 [`configDependencies`](https://pnpm.io/11.x/config-dependencies) before regular
@@ -68,11 +79,12 @@ dependencies and automatically load plugin `pnpmfile.mjs`/`pnpmfile.cjs`
 files. The exact `pnpm-workspace.yaml` contract contains no such dependency, so
 that path is closed. Pnpm supports `package.json5` and `package.yaml` fallback
 manifests, but each code-owned package has a required exact `package.json`,
-which pnpm 11.5.0 selects first. Generated `node_modules/.pnpm/lock.yaml` and
-workspace state, user/global pnpm configuration or global pnpmfiles, command
-line/runner environment, the pnpm store, registry metadata/tarballs, and the
-Node/pnpm binaries are outside this repository-byte identity. Release evidence
-therefore requires a fresh checkout with no `node_modules` and a trusted,
+which pnpm 11.5.0 selects first. The checker now proves the initial checkout has
+no package-root `node_modules`; generated current lock/workspace state exists
+only after this boundary runs. User/global pnpm configuration or global
+pnpmfiles, command line/runner environment, the pnpm store, registry
+metadata/tarballs, and the Node/pnpm binaries remain outside this
+repository-byte identity. Release evidence therefore still requires a trusted,
 isolated runner; this checker does not prove those external inputs uncompromised.
 
 The npm tools are exact-pinned in `package.json` and the lockfile. Type-aware

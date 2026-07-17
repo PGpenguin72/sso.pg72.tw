@@ -63,9 +63,11 @@ package installation, or any other repository script. It pins exact workflow
 raw bytes/file set, all manifest and complete script-map identities, and the
 pnpm workspace lifecycle/build policy. It also pins the frozen lockfile and
 exact `patches/` file set/digests, and rejects workspace pnpm hooks or project
-`.npmrc` files before pnpm starts. The later validator independently pins every
-complete workspace `scripts` object and the reachable graph while expanding
-implicit `pre*`/`post*` and
+`.npmrc` files before pnpm starts. Every code-owned package root must also lack
+`binding.gyp` and pre-existing `node_modules`, preventing implicit native builds
+and dependency-tree lifecycle hooks. The later validator independently pins
+every complete workspace `scripts` object and the reachable graph while
+expanding implicit `pre*`/`post*` and
 `preinstall`/`install`/`postinstall`/`prepare` execution. Policy cannot extend
 these contracts. The release upload is exactly `.artifacts/release` with fixed
 missing-file, hidden-file, and retention behavior. Workflow environment

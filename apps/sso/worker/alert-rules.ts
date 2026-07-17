@@ -156,14 +156,50 @@ export interface AlertRuntimeSourceEligibility {
   successfulRunAt: string;
 }
 
-// Repository code uses this once to enable runtime thresholds. The timestamped
-// proof is never accepted as observation evidence.
+const ALERT_RUNTIME_ELIGIBLE_STATUSES = new Set([
+  "healthy",
+  "degraded",
+  "failing",
+  "unavailable",
+]);
+
+function parseAlertRuntimeEligibilityProof(
+  value: unknown,
+  evaluationTime: number,
+): AlertRuntimeSourceEligibility | null {
+  if (value === null) return null;
+  const record = exactRecord(
+    value,
+    ["component", "successfulRunAt"],
+    "alert runtime eligibility proof",
+  );
+  if (record.component !== "evaluator") return null;
+  let successfulRunAt: string;
+  try {
+    successfulRunAt = canonicalTimestamp(
+      record.successfulRunAt,
+      "runtime successfulRunAt",
+    );
+  } catch {
+    return null;
+  }
+  if (new Date(successfulRunAt).getTime() > evaluationTime) return null;
+  return { component: "evaluator", successfulRunAt };
+}
+
+// Repository code retains the timestamped proof across later source failures.
+// Neither this proof nor a bootstrap boolean is accepted as observation evidence.
 export function parseAlertRuntimeSourceCompleteness(
   value: unknown,
   asOf: string,
+  previousEligibility: unknown = null,
 ): AlertRuntimeSourceEligibility | null {
   const evaluationTime = new Date(canonicalTimestamp(asOf, "asOf")).getTime();
-  if (value === null) return null;
+  const previous = parseAlertRuntimeEligibilityProof(
+    previousEligibility,
+    evaluationTime,
+  );
+  if (value === null) return previous;
   const record = exactRecord(
     value,
     ["component", "lastSuccessAt", "status"],
@@ -171,10 +207,11 @@ export function parseAlertRuntimeSourceCompleteness(
   );
   if (
     record.component !== "evaluator" ||
-    record.status !== "healthy" ||
+    typeof record.status !== "string" ||
+    !ALERT_RUNTIME_ELIGIBLE_STATUSES.has(record.status) ||
     record.lastSuccessAt === null
   ) {
-    return null;
+    return previous;
   }
   let successfulRunAt: string;
   try {
@@ -183,9 +220,16 @@ export function parseAlertRuntimeSourceCompleteness(
       "runtime lastSuccessAt",
     );
   } catch {
-    return null;
+    return previous;
   }
-  if (new Date(successfulRunAt).getTime() > evaluationTime) return null;
+  if (new Date(successfulRunAt).getTime() > evaluationTime) return previous;
+  if (
+    previous !== null &&
+    new Date(successfulRunAt).getTime() <
+      new Date(previous.successfulRunAt).getTime()
+  ) {
+    return previous;
+  }
   return { component: "evaluator", successfulRunAt };
 }
 
@@ -475,7 +519,16 @@ export type AlertSourceDescriptor =
           evidenceColumn: "last_success_at";
           evidenceWrite: "repository_controlled_successful_run_only";
           eligibilityProof: "canonical_successful_run_timestamp";
+          eligibilityRetention: "monotonic_across_status_or_row_failure";
+          postBootstrapMissingDisposition: "retain_and_emit_missing_threshold_input";
+          postBootstrapStatuses: readonly [
+            "healthy",
+            "degraded",
+            "failing",
+            "unavailable",
+          ];
           preBootstrapDisposition: "exclude_without_threshold_input";
+          previousEligibilityInput: "optional_canonical_timestamp_proof";
           sourceProjection: Readonly<{
             component: "component";
             lastSuccessAt: "last_success_at";
@@ -1119,7 +1172,11 @@ export const ALERT_RULE_DEFINITIONS = {
           evidenceColumn: "last_success_at",
           evidenceWrite: "repository_controlled_successful_run_only",
           eligibilityProof: "canonical_successful_run_timestamp",
+          eligibilityRetention: "monotonic_across_status_or_row_failure",
+          postBootstrapMissingDisposition: "retain_and_emit_missing_threshold_input",
+          postBootstrapStatuses: ["healthy", "degraded", "failing", "unavailable"],
           preBootstrapDisposition: "exclude_without_threshold_input",
+          previousEligibilityInput: "optional_canonical_timestamp_proof",
           sourceProjection: {
             component: "component",
             lastSuccessAt: "last_success_at",

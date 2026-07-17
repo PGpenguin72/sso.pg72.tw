@@ -511,7 +511,11 @@ const EXPECTED_SOURCES = {
         evidenceColumn: "last_success_at",
         evidenceWrite: "repository_controlled_successful_run_only",
         eligibilityProof: "canonical_successful_run_timestamp",
+        eligibilityRetention: "monotonic_across_status_or_row_failure",
+        postBootstrapMissingDisposition: "retain_and_emit_missing_threshold_input",
+        postBootstrapStatuses: ["healthy", "degraded", "failing", "unavailable"],
         preBootstrapDisposition: "exclude_without_threshold_input",
+        previousEligibilityInput: "optional_canonical_timestamp_proof",
         sourceProjection: {
           component: "component",
           lastSuccessAt: "last_success_at",
@@ -846,7 +850,7 @@ describe("redacted observation parsing", () => {
     expect(parseAlertRuntimeSourceCompleteness({
       component: "evaluator",
       lastSuccessAt: "2026-07-17T11:59:00.000Z",
-      status: "degraded",
+      status: "disabled",
     }, AS_OF)).toBeNull();
     expect(parseAlertRuntimeSourceCompleteness({
       component: "delivery",
@@ -864,14 +868,51 @@ describe("redacted observation parsing", () => {
       status: "healthy",
     }, AS_OF)).toBeNull();
 
-    expect(parseAlertRuntimeSourceCompleteness({
+    const successfulProjection = {
       component: "evaluator",
       lastSuccessAt: "2026-07-17T11:59:00.000Z",
       status: "healthy",
-    }, AS_OF)).toEqual({
+    };
+    const eligibility = parseAlertRuntimeSourceCompleteness(
+      successfulProjection,
+      AS_OF,
+    );
+    expect(eligibility).toEqual({
       component: "evaluator",
       successfulRunAt: "2026-07-17T11:59:00.000Z",
     });
+    for (const status of enabledStatuses) {
+      const postBootstrapProjection = {
+        ...successfulProjection,
+        status,
+      };
+      expect(parseAlertRuntimeSourceCompleteness(
+        postBootstrapProjection,
+        AS_OF,
+      )).toEqual(eligibility);
+      const retained = parseAlertRuntimeSourceCompleteness(
+        postBootstrapProjection,
+        AS_OF,
+        eligibility,
+      );
+      expect(retained).toEqual(eligibility);
+      expect(evaluateAlertRule(runtimeObservation(301, null))).toMatchObject({
+        immediateCritical: false,
+        selectedEvidence: { metricName: "evaluator_age_seconds" },
+        severity: "critical",
+      });
+    }
+    expect(parseAlertRuntimeSourceCompleteness(null, AS_OF, eligibility))
+      .toEqual(eligibility);
+    expect(parseAlertRuntimeSourceCompleteness({
+      component: "evaluator",
+      lastSuccessAt: null,
+      status: "failing",
+    }, AS_OF, eligibility)).toEqual(eligibility);
+    expect(parseAlertRuntimeSourceCompleteness(null, AS_OF, {
+      component: "evaluator",
+      successfulRunAt: "2026-07-17T12:00:01.000Z",
+    })).toBeNull();
     expect(() => parseAlertRuntimeSourceCompleteness({
       bootstrapComplete: true,
       component: "evaluator",
@@ -883,11 +924,6 @@ describe("redacted observation parsing", () => {
     expect(evaluateAlertRule(postBootstrapMissing)).toMatchObject({
       immediateCritical: true,
       selectedEvidence: { metricName: "evaluator_missing" },
-      severity: "critical",
-    });
-    expect(evaluateAlertRule(runtimeObservation(301, null))).toMatchObject({
-      immediateCritical: false,
-      selectedEvidence: { metricName: "evaluator_age_seconds" },
       severity: "critical",
     });
     expect(() => parseAlertObservation({

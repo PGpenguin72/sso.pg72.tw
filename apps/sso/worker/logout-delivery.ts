@@ -1,6 +1,13 @@
 import { createAuth } from "./auth";
 import { readRuntimeConfig } from "./config";
 import {
+  addIsoSeconds,
+  allChangedExactlyOnce,
+  selectDeliveryDisposition,
+  selectExpiredLeaseDisposition,
+  type DurableDeliveryPolicy,
+} from "./durable-delivery";
+import {
   BACKCHANNEL_LOGOUT_EVENT,
   LOGOUT_DELIVERY_LEASE_SECONDS,
   LOGOUT_DELIVERY_MAX_ATTEMPTS,
@@ -32,11 +39,10 @@ interface PersistedAttemptResult {
   status: "dead" | "delivered" | "retry";
 }
 
-const BACKOFF_SECONDS = [10, 30, 120, 300, 900] as const;
-
-function addSeconds(iso: string, seconds: number): string {
-  return new Date(new Date(iso).getTime() + seconds * 1000).toISOString();
-}
+const LOGOUT_DELIVERY_POLICY = {
+  backoffSeconds: [10, 30, 120, 300, 900],
+  maxAttempts: LOGOUT_DELIVERY_MAX_ATTEMPTS,
+} as const satisfies DurableDeliveryPolicy;
 
 async function recoverExpiredLogoutDelivery(
   env: Env,
@@ -60,9 +66,10 @@ async function recoverExpiredLogoutDelivery(
     }>();
   if (!expired) return;
 
-  const resultingStatus = expired.attempts >= LOGOUT_DELIVERY_MAX_ATTEMPTS
-    ? "dead"
-    : "retry";
+  const resultingStatus = selectExpiredLeaseDisposition(
+    expired.attempts,
+    LOGOUT_DELIVERY_POLICY,
+  );
   const results = await env.PG72_ID_DB.batch([
     env.PG72_ID_DB.prepare(
       `UPDATE logout_delivery_attempt
@@ -130,7 +137,7 @@ async function recoverExpiredLogoutDelivery(
       now,
     ),
   ]);
-  if (results[0]?.meta.changes === 1 && results[1]?.meta.changes === 1) {
+  if (allChangedExactlyOnce(results[0], results[1])) {
     return;
   }
 
@@ -161,7 +168,7 @@ async function claimLogoutDelivery(
   const leaseId = crypto.randomUUID();
   const jti = crypto.randomUUID();
   const attemptId = crypto.randomUUID();
-  const leaseExpiresAt = addSeconds(now, LOGOUT_DELIVERY_LEASE_SECONDS);
+  const leaseExpiresAt = addIsoSeconds(now, LOGOUT_DELIVERY_LEASE_SECONDS);
   const claimed = await env.PG72_ID_DB.batch([
     env.PG72_ID_DB.prepare(
       `UPDATE logout_delivery
@@ -199,10 +206,7 @@ async function claimLogoutDelivery(
           AND updated_at = ?`,
     ).bind(attemptId, leaseId, now, deliveryKey, leaseId, now),
   ]);
-  if (
-    claimed[0]?.meta.changes !== 1 ||
-    claimed[1]?.meta.changes !== 1
-  ) {
+  if (!allChangedExactlyOnce(claimed[0], claimed[1])) {
     return null;
   }
 
@@ -312,18 +316,18 @@ async function persistAttemptResult(
   result: DeliveryAttemptResult,
 ): Promise<PersistedAttemptResult> {
   const now = new Date().toISOString();
-  const exhausted = delivery.attempts >= LOGOUT_DELIVERY_MAX_ATTEMPTS;
-  const status: PersistedAttemptResult["status"] = result.delivered
-    ? "delivered"
-    : result.transient && !exhausted
-      ? "retry"
-      : "dead";
+  const disposition = selectDeliveryDisposition(
+    delivery.attempts,
+    result,
+    LOGOUT_DELIVERY_POLICY,
+  );
+  const { status } = disposition;
   const delaySeconds = status === "retry"
-    ? BACKOFF_SECONDS[Math.min(delivery.attempts - 1, BACKOFF_SECONDS.length - 1)]
+    ? disposition.delaySeconds
     : undefined;
   const nextAttemptAt = delaySeconds === undefined
     ? null
-    : addSeconds(now, delaySeconds);
+    : addIsoSeconds(now, delaySeconds);
   const outcome = status === "delivered" ? "delivered" : status;
   const results = await env.PG72_ID_DB.batch([
     env.PG72_ID_DB.prepare(
@@ -406,7 +410,7 @@ async function persistAttemptResult(
       now,
     ),
   ]);
-  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+  if (!allChangedExactlyOnce(results[0], results[1])) {
     throw new Error("logout delivery lease changed before result commit");
   }
   return { status, ...(delaySeconds === undefined ? {} : { delaySeconds }) };

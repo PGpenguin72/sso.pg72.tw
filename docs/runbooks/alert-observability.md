@@ -1,13 +1,13 @@
 # Alert observability source boundary
 
-> Status: local schema, pure evaluator/parser, evaluator runtime-status/lease/
-> bootstrap repository, archive crypto, and `0021` archive-ledger source. The
-> repository is not imported by the Worker entry point or a scheduler. Full D1
-> audit/other metric-source aggregation, `alert_state`/`security_alert`/
-> `alert_outbox` CAS repositories, Cron, alert/archive Queue/DLQ, Email/admin
-> delivery, same-run proof, R2 archive runtime, bounded restore, external
-> backup, and deployment remain absent. Production records remain through
-> migration `0012`.
+> Status: local schema, pure evaluator/parser and archive-crypto contracts, an
+> evaluator runtime-status/lease/bootstrap repository, a bounded audit source
+> repository, and `0021` archive-ledger source. Neither repository is imported
+> by the Worker entry point or a scheduler. Remaining metric sources,
+> `alert_state`/`security_alert`/`alert_outbox` CAS repositories, Cron,
+> alert/archive Queue/DLQ, Email/admin delivery, same-run proof, R2 archive
+> runtime, bounded restore, external backup, and deployment remain absent.
+> Production records remain through migration `0012`.
 
 ## What `0020` provides
 
@@ -35,9 +35,18 @@ provenance, and defines one key-continuity sentinel:
 - `audit_event.actor_ref`/`actor_ref_hash_version` and
   `oauth_client_report.reporter_ref`/`reporter_ref_hash_version`: nullable
   persistent provenance for rows whose raw actor/reporter FK may later become
-  null;
+  null. A row cannot introduce the reference without the corresponding raw FK;
 - `alert_hash_key_sentinel`: one immutable, domain-separated fingerprint of the
   v1 alert subject HMAC key. It stores no secret and must match before evaluation.
+
+The source contract derives that fingerprint as HMAC-SHA-256 over the exact
+UTF-8 bytes `pgid-alert-v1\0key_sentinel\0pgid.alert_subject_hash_key.v1`, using
+the decoded 32-byte alert HMAC key, and stores the canonical unpadded base64url
+result with hash version `1`. This key-sentinel domain is not an alert dimension
+and is not interchangeable with subject, actor, client, reporter or archive-KEK
+references. The local audit source slice verifies the singleton before deriving
+hashed observations; this does not mean an evaluator or production writer is
+deployed.
 
 Rule IDs are restricted to reviewed PGID registration, restricted-account,
 recovery, Passkey step-up, OAuth-report, admin, audit-fanout, logout, alert
@@ -97,6 +106,20 @@ returns no lease.
 The repository also owns the exact projection read below. It is local source
 only: the Worker entry point and scheduler do not import or invoke it, and no
 full audit/other metric-source evaluation or same-run execution proof exists.
+
+The bounded audit repository executes its fourteen closed projections in one
+awaited D1 batch. Canonical ratio numerator/denominator fields and recovery
+denied/started fields stop at `1,000,000`; ordinary count fields retain the
+`1,000,000,000` evidence bound. A well-shaped cohort above its applicable bound
+makes only that rule/dimension incomplete. It cannot invalidate or manufacture
+zeroes for otherwise usable cohorts.
+
+Per-identity zero fill reads only state whose lifecycle can still affect a
+future evaluation: active severity, a pending breach/clear, or a cooldown. Five
+code-owned rule branches each use `alert_state_tracked_evaluation_idx` and apply
+`LIMIT 1001` before the compound result is materialized. The 1001st row marks
+only that rule/dimension incomplete. A fully inactive row with no pending
+counter or cooldown is historical and is the only lifecycle shape omitted.
 
 The pure parser fixes this exact repository-owned projection and column order:
 
@@ -169,13 +192,15 @@ enablement requires a reviewed recent backfill and zero such rows. Future audit
 writers populate the ref in the same mutation batch, but this schema slice does
 not change current writers or perform a remote backfill.
 
-Raw actor/reporter FKs cannot be reassigned after insert. The only identity
-change allowed is their existing non-null-to-null `ON DELETE SET NULL` action;
-the paired HMAC reference survives that deletion and, once populated, is
-immutable. If a raw ID is already null and no reference exists, a later writer
-cannot invent one; that row remains explicitly incomplete. This preserves
-account deletion semantics without permitting a row to be attributed to a
-different identity.
+Raw actor/reporter FKs cannot be reassigned after insert. A first reference,
+whether supplied on insert or added later, requires that exact row's raw FK to
+remain non-null while the writer derives and verifies the domain-separated
+value. The only later identity change allowed is the existing non-null-to-null
+`ON DELETE SET NULL` action; the paired HMAC reference survives that deletion
+and, once populated, is immutable. If a raw ID is already null and no reference
+exists, a later writer cannot invent one; that row remains explicitly
+incomplete. This preserves account deletion semantics without permitting an
+unproved stored-only reference or attribution to a different identity.
 
 Lifecycle state is restart-safe and compare-and-swap shaped. No pristine
 none/unknown row is stored: the first positive evaluation creates an inactive
@@ -256,8 +281,12 @@ type/time index remains available. Additional covering indexes close the exact
 global/type/actor audit, OAuth reporter, logout delivery, and logout-attempt
 cohort paths described by the pure evaluator's source contracts. The local
 runtime repository owns only evaluator lease/status/bootstrap state; it does not
-execute these metric-source queries or persist alert state, incidents, or
-outbox work.
+execute metric-source queries or persist alert state, incidents, or outbox work.
+The bounded local audit repository executes only the reviewed audit paths;
+later D1 repositories must execute and prove the remaining source paths.
+`alert_state_tracked_evaluation_idx(environment, rule_id, subject_ref,
+hash_version)` is a partial index over only ongoing exact-D1 lifecycle state;
+the local audit repository uses it for bounded tracked-identity zero fill.
 
 The local archive-crypto module separately seals and opens bounded canonical v1
 records. It preserves the nullable `actorRef`/`actorRefHashVersion` pair and
@@ -280,6 +309,7 @@ pnpm --filter @pg72/id exec vitest run \
   test/observability-schema.spec.ts test/alert-runtime-repository.spec.ts \
   test/audit-archive-schema.spec.ts
 pnpm --filter @pg72/id exec vitest run \
+  test/alert-audit-source-repository.spec.ts \
   test/alert-evaluator.spec.ts test/alert-rules.spec.ts \
   test/audit-archive-crypto.spec.ts
 node --test scripts/public-readiness/audit-archive-migration.test.mjs \
@@ -311,18 +341,18 @@ verifies the record/envelope and checkpoint binding without R2 or Queue I/O.
 
 ## Remaining gates
 
-Schema, pure evaluator/parser, and the unwired evaluator runtime-status
-repository must still report observability as `source_present_unverified`,
-leaving continuity and drills blocked. A later reviewed slice must add full D1
-audit/other metric-source aggregation and
-`alert_state`/`security_alert`/`alert_outbox` CAS repositories, wire the runtime
-repository into evaluator Cron with same-run proof, and add dedicated alert
-Queue/DLQ, an Email Service adapter, admin acknowledge/resolve/replay operations, and
-redaction/race/failure tests. Archive crypto plus the `0021` ledger does not
-satisfy the separate encrypted archive dependency; `encrypted_r2_archive`
-remains `dependency_missing` until the disabled repository, R2 writer/bounded
-restore, Queue/DLQ, Cron redrive, retention proof, and external-backup exercise
-exist.
+Schema, pure evaluator/parser, the unwired evaluator runtime-status repository,
+and the bounded local `audit_event` source repository must still report
+observability as `source_present_unverified`, leaving continuity and drills
+blocked. Later reviewed slices must add the remaining OAuth-report, fan-out,
+logout, and Queue sources; D1 state/incident CAS; wire the runtime repository
+into evaluator Cron with repository-controlled successful-run and same-run
+proof; dedicated alert Queue/DLQ; Email Service adapter; admin
+acknowledge/resolve/replay operations; and redaction/race/failure tests. Archive
+crypto plus the `0021` ledger does not satisfy the separate encrypted archive
+dependency; `encrypted_r2_archive` remains `dependency_missing` until the
+disabled repository, R2 writer/bounded restore, Queue/DLQ, Cron redrive,
+retention proof, and external-backup exercise exist.
 
 Isolated Preview must then apply the ordered migration ledger, tune thresholds,
 exercise exact D1 and approximate Queue evidence, prove real Email receipt and

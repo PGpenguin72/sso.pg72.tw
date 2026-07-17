@@ -1,6 +1,8 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { deriveAlertReferenceV1 } from "../worker/alert-rules";
+
 const NOW = "2026-07-17T10:00:00.000Z";
 let evaluationTick = 0;
 
@@ -659,6 +661,7 @@ describe("alert observability migration", () => {
           'alert_delivery_attempt', 'alert_evaluator_bootstrap',
           'alert_runtime_status',
           'alert_hash_key_sentinel', 'alert_state_semantic_identity_idx',
+          'alert_state_tracked_evaluation_idx',
           'alert_outbox_due_idx', 'security_alert_unresolved_state_idx',
           'audit_event_time_bounded_idx',
           'audit_event_type_actor_time_bounded_idx',
@@ -680,6 +683,7 @@ describe("alert observability migration", () => {
       "alert_runtime_status",
       "alert_state",
       "alert_state_semantic_identity_idx",
+      "alert_state_tracked_evaluation_idx",
       "audit_event_time_bounded_idx",
       "audit_event_type_actor_time_bounded_idx",
       "audit_event_type_subject_time_bounded_idx",
@@ -751,6 +755,15 @@ describe("alert observability migration", () => {
         ({ name }) => name === "security_alert_unresolved_state_idx",
       )?.sql,
     ).toContain("WHERE \"status\" IN ('open', 'acknowledged')");
+    const trackedStateIndex = schema.results.find(
+      ({ name }) => name === "alert_state_tracked_evaluation_idx",
+    )?.sql;
+    expect(trackedStateIndex).toMatch(
+      /\(\s*"environment", "rule_id", "subject_ref", "hash_version"\s*\)/,
+    );
+    expect(trackedStateIndex).toContain('WHERE "source_kind" = \'d1_exact\'');
+    expect(trackedStateIndex).toContain('"subject_ref" IS NOT NULL');
+    expect(trackedStateIndex).toContain('"consecutive_clears" > 0');
     const actorPlan = await env.PG72_ID_DB.prepare(
       `EXPLAIN QUERY PLAN
        SELECT actor_ref, actor_user_id, occurred_at, id
@@ -825,6 +838,44 @@ describe("alert observability migration", () => {
       insertUser(sourceUserId, "schema-actor-a@example.invalid"),
       insertUser(otherUserId, "schema-actor-b@example.invalid"),
     ]);
+    const provenanceKey = encodeBase64url32(
+      Uint8Array.from({ length: 32 }, (_, index) => index + 11),
+    );
+    const subjectReference = await deriveAlertReferenceV1(
+      provenanceKey,
+      "subject_hmac",
+      sourceUserId,
+    );
+    const reporterReference = await deriveAlertReferenceV1(
+      provenanceKey,
+      "reporter_hmac",
+      sourceUserId,
+    );
+    const actorReference = await deriveAlertReferenceV1(
+      provenanceKey,
+      "actor_hmac",
+      sourceUserId,
+    );
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO oauth_client_report
+          (id, reporter_user_id, client_id, reason, created_at, reporter_ref,
+           reporter_ref_hash_version)
+         VALUES (?, NULL, 'schema-stored-only-report', 'phishing', ?, ?, 1)`,
+      )
+        .bind(crypto.randomUUID(), NOW, reporterReference.value)
+        .run(),
+    ).rejects.toThrow();
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO audit_event
+          (id, event_type, actor_user_id, outcome, occurred_at, actor_ref,
+           actor_ref_hash_version)
+         VALUES (?, 'admin.schema_stored_only', NULL, 'success', ?, ?, 1)`,
+      )
+        .bind(crypto.randomUUID(), NOW, subjectReference.value)
+        .run(),
+    ).rejects.toThrow();
     const reportId = crypto.randomUUID();
     const insertReport = (reporterRef: string | null, hashVersion: number | null) =>
       env.PG72_ID_DB.prepare(
@@ -837,8 +888,7 @@ describe("alert observability migration", () => {
         .run();
     await expect(insertReport(opaque43(), null)).rejects.toThrow();
     await expect(insertReport(nonCanonical43(), 1)).rejects.toThrow();
-    await insertReport(null, null);
-    const reporterRef = opaque43();
+    await insertReport(reporterReference.value, 1);
     await expect(
       env.PG72_ID_DB.prepare(
         `UPDATE oauth_client_report
@@ -846,7 +896,7 @@ describe("alert observability migration", () => {
                 reporter_ref_hash_version = 1
           WHERE id = ?`,
       )
-        .bind(reporterRef, reportId)
+        .bind(opaque43(), reportId)
         .run(),
     ).rejects.toThrow();
     expect(
@@ -856,14 +906,10 @@ describe("alert observability migration", () => {
       )
         .bind(reportId)
         .first<{ reporter_ref: string | null; reporter_user_id: string }>(),
-    ).toEqual({ reporter_ref: null, reporter_user_id: sourceUserId });
-    await env.PG72_ID_DB.prepare(
-      `UPDATE oauth_client_report
-          SET reporter_ref = ?, reporter_ref_hash_version = 1
-        WHERE id = ?`,
-    )
-      .bind(reporterRef, reportId)
-      .run();
+    ).toEqual({
+      reporter_ref: reporterReference.value,
+      reporter_user_id: sourceUserId,
+    });
     await expect(
       env.PG72_ID_DB.prepare(
         `UPDATE oauth_client_report SET reporter_ref_hash_version = NULL
@@ -907,15 +953,14 @@ describe("alert observability migration", () => {
         .run();
     await expect(insertActorEvent(opaque43(), null)).rejects.toThrow();
     await expect(insertActorEvent(nonCanonical43(), 1)).rejects.toThrow();
-    await insertActorEvent(null, null);
-    const actorRef = opaque43();
+    await insertActorEvent(actorReference.value, 1);
     await expect(
       env.PG72_ID_DB.prepare(
         `UPDATE audit_event
             SET actor_user_id = NULL, actor_ref = ?, actor_ref_hash_version = 1
           WHERE id = ?`,
       )
-        .bind(actorRef, actorEventId)
+        .bind(opaque43(), actorEventId)
         .run(),
     ).rejects.toThrow();
     expect(
@@ -924,14 +969,10 @@ describe("alert observability migration", () => {
       )
         .bind(actorEventId)
         .first<{ actor_ref: string | null; actor_user_id: string }>(),
-    ).toEqual({ actor_ref: null, actor_user_id: sourceUserId });
-    await env.PG72_ID_DB.prepare(
-      `UPDATE audit_event
-          SET actor_ref = ?, actor_ref_hash_version = 1
-        WHERE id = ?`,
-    )
-      .bind(actorRef, actorEventId)
-      .run();
+    ).toEqual({
+      actor_ref: actorReference.value,
+      actor_user_id: sourceUserId,
+    });
     const noRefReportId = crypto.randomUUID();
     const noRefActorEventId = crypto.randomUUID();
     await env.PG72_ID_DB.batch([
@@ -978,14 +1019,14 @@ describe("alert observability migration", () => {
       .bind(reportId)
       .first<{ reporter_ref: string; reporter_user_id: string | null }>();
     expect(reportAfterDelete?.reporter_user_id).toBeNull();
-    expect(reportAfterDelete?.reporter_ref).toHaveLength(43);
+    expect(reportAfterDelete?.reporter_ref).toBe(reporterReference.value);
     const actorAfterDelete = await env.PG72_ID_DB.prepare(
       "SELECT actor_user_id, actor_ref FROM audit_event WHERE id = ?",
     )
       .bind(actorEventId)
       .first<{ actor_ref: string; actor_user_id: string | null }>();
     expect(actorAfterDelete?.actor_user_id).toBeNull();
-    expect(actorAfterDelete?.actor_ref).toHaveLength(43);
+    expect(actorAfterDelete?.actor_ref).toBe(actorReference.value);
     await expect(
       env.PG72_ID_DB.prepare(
         `UPDATE oauth_client_report

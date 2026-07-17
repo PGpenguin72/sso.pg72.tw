@@ -1,9 +1,9 @@
-# Alert observability schema boundary
+# Alert observability source boundary
 
-> Status: local schema source only. Migration `0020_alert_observability.sql`
-> does not run an evaluator, send a Queue message or Email, expose operator
-> endpoints, or satisfy the observability execution proof. Production records
-> remain through migration `0012`.
+> Status: local schema plus pure evaluator/parser and archive-crypto source.
+> None is wired into the Worker runtime. There is no alert repository/Cron,
+> Queue/Email/admin delivery, same-run proof, `0021` R2 archive implementation,
+> or deployment. Production records remain through migration `0012`.
 
 ## What `0020` provides
 
@@ -38,9 +38,10 @@ provenance, and defines one key-continuity sentinel:
 Rule IDs are restricted to reviewed PGID registration, restricted-account,
 recovery, Passkey step-up, OAuth-report, admin, audit-fanout, logout, alert
 runtime, and approximate Queue-DLQ sources. D1 evidence is marked `d1_exact`;
-the Queue metrics rule is explicitly `queue_approximate`. Threshold values
-belong to versioned rule definitions and tests in the future evaluator slice,
-not this migration.
+the Queue metrics rule is explicitly `queue_approximate`. Threshold values live
+in the reviewed versioned definitions and pure evaluator/parser tests, not in
+this migration. Those modules are not imported by the Worker entry point and do
+not collect, persist, schedule, or deliver an alert.
 
 Each primary component records a closed metric name plus its exact kind/unit,
 value, threshold, ratio numerator/denominator, minimum sample count, and positive
@@ -68,15 +69,17 @@ sample increments only at an exact 60-second interval, a late/missing sample
 restarts at one, and zero resets both continuity fields. Schema presence does
 not prove that the sampling loop exists. In particular, D1 cannot prove that an
 inserted `healthy`/`last_success_at` pair came from executed evaluator work. The
-evaluator therefore starts as `disabled` with null history. On its first
-repository-controlled success, one ordered D1 batch updates the runtime row to
-`healthy` with non-null success evidence, then inserts
+future repository runtime must start the evaluator component as `disabled` with
+null history. On its first repository-controlled success, one ordered D1 batch
+must update the runtime row to `healthy` with non-null success evidence, then
+insert
 `alert_evaluator_bootstrap` with `INSERT ... SELECT` from that exact runtime row.
 The anchor is immutable and its parent runtime row cannot be deleted or
 replaced. This proves the persisted repository transition, not the external
 work itself; status, generation, or revision alone is never bootstrap evidence.
+No such repository writer exists in the current source.
 
-Repository readers use this exact anchored projection and column order:
+The pure parser fixes this exact future repository projection and column order:
 
 ```sql
 SELECT
@@ -221,8 +224,19 @@ Instead, `0020` adds
 occurred_at DESC, id)` for deterministic bounded per-subject scans. The existing
 type/time index remains available. Additional covering indexes close the exact
 global/type/actor audit, OAuth reporter, logout delivery, and logout-attempt
-cohort paths used by the future evaluator. The separate encrypted archive slice
-owns its monotonic source ledger and backfill in future migration `0021`.
+cohort paths described by the pure evaluator's source contracts. A future D1
+repository must execute those queries and prove their completeness.
+
+The local archive-crypto module separately seals and opens bounded canonical v1
+records. It preserves the nullable `actorRef`/`actorRefHashVersion` pair and
+authenticates `checkpointFromSequence` across the header, manifest, and AES-GCM
+AAD. This is a record/envelope primitive, not an archive service. Migration
+`0021` must still define the monotonic source ledger, immutable batch membership,
+KEK custody/sentinel, trigger-coupled finalization/checkpoint/BLOB cleanup, and
+the repository contract. The R2 writer/restore path, Queue/DLQ, retention and
+external backup are also absent. There is no `audit-archive.ts` runtime module or
+`AUDIT_ARCHIVE` R2 binding, so `encrypted_r2_archive` remains
+`dependency_missing`.
 
 ## Local verification
 
@@ -230,7 +244,11 @@ From a clean worktree with the frozen dependency set:
 
 ```bash
 pnpm --filter @pg72/id exec vitest run test/observability-schema.spec.ts
+pnpm --filter @pg72/id exec vitest run \
+  test/alert-evaluator.spec.ts test/alert-rules.spec.ts \
+  test/audit-archive-crypto.spec.ts
 node --test scripts/public-readiness/d1-manifest.test.mjs \
+  scripts/public-readiness/dependency-contracts.test.mjs \
   scripts/public-readiness/report.test.mjs
 pnpm test:public-readiness
 pnpm --filter @pg72/id check
@@ -238,28 +256,35 @@ pnpm --filter @pg72/test-rp test
 git diff --check
 ```
 
-The focused suite applies all migrations through `0020` and rejects invalid
-enums/metrics, provenance mismatch, duplicate unresolved incidents, duplicate
-notification/idempotency/attempt tuples, malformed leases, mutable payloads,
-invalid incident/delivery transitions, unsupported channels, fabricated
-snapshot evidence, and attempt evidence that does not match the exact active
-outbox lease. It also rejects invented primary domains, missing ratio minimum
-numerators, fictitious severity thresholds, partial or below-threshold secondary
-components, and evidence that changes between incident and outbox. The suite
-proves the existing audit insert/delete compensation still works and no sequence
-table was introduced.
+The focused schema suite applies all migrations through `0020` and rejects
+invalid enums/metrics, provenance mismatch, duplicate unresolved incidents,
+duplicate notification/idempotency/attempt tuples, malformed leases, mutable
+payloads, invalid incident/delivery transitions, unsupported channels,
+fabricated snapshot evidence, and attempt evidence that does not match the exact
+active outbox lease. It also rejects invented primary domains, missing ratio
+minimum numerators, fictitious severity thresholds, partial or below-threshold
+secondary components, and evidence that changes between incident and outbox.
+The suite proves the existing audit insert/delete compensation still works and
+no sequence table was introduced. The pure evaluator suites verify the exact
+15-rule matrix, redacted dimensions, source projections, deterministic lifecycle
+and persistence shape without performing D1 writes or scheduling work. The
+archive suite verifies the record/envelope crypto and checkpoint binding without
+D1, R2 or Queue I/O.
 
 ## Remaining gates
 
-Source presence alone must report observability as
+Schema plus pure evaluator/parser presence must report observability as
 `source_present_unverified`, leaving continuity and drills blocked. A later
-reviewed slice must add the deterministic evaluator, versioned rule definitions,
-repository-controlled successful-run writer and same-run proof,
+reviewed slice must add the D1 source repository/CAS runtime,
+repository-controlled successful-run writer and same-run proof, evaluator Cron,
 dedicated alert Queue/DLQ, Email Service adapter, admin
-acknowledge/resolve/replay operations, and redaction/race/failure tests.
+acknowledge/resolve/replay operations, and redaction/race/failure tests. Pure
+archive crypto does not satisfy the separate encrypted archive dependency;
+`encrypted_r2_archive` remains `dependency_missing` until the `0021` repository,
+R2 writer/restore, Queue/DLQ and external-backup exercise exist.
 
 Isolated Preview must then apply the ordered migration ledger, tune thresholds,
 exercise exact D1 and approximate Queue evidence, prove real Email receipt and
-operator acknowledgement, and rehearse rollback. No `0020` source or local test
-authorizes a push, deploy, remote D1 operation, production alert claim, public
-registration, or Production GO.
+operator acknowledgement, and rehearse rollback. No migration, pure module or
+local test authorizes a push, deploy, remote D1/R2 operation, production alert
+claim, public registration, or Production GO.

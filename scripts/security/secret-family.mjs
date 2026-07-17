@@ -137,6 +137,33 @@ const auditedAssignmentAllowances = new Map([
 
 const auditedAssignmentDigestAllowances = new Map([
   [
+    "apps/sso/test/admin-clients.spec.ts",
+    new Map([
+      [
+        "CLIENT_SECRET",
+        new Set(["95713e9cbdd1dfcb2d4080c2537f418d43ca0da25f0d7d6631f4f7c97b89dc47"]),
+      ],
+    ]),
+  ],
+  [
+    "apps/test-rp/test/worker.spec.ts",
+    new Map([
+      [
+        "LOGOUT_TOKEN",
+        new Set(["ce6f21ae951df0ba38d6ce0e0175465bf5e9882edcf2ba677bca63b296f17ce7"]),
+      ],
+    ]),
+  ],
+  [
+    "scripts/public-readiness/local-runtime.test.mjs",
+    new Map([
+      [
+        "BETTER_AUTH_SECRET",
+        new Set(["3982642a9285288cf0ae1942766ee5f453b98f619a89c9188a41b329288cd627"]),
+      ],
+    ]),
+  ],
+  [
     "artifact:static/assets/index-CiCTmOwF.js",
     new Map([
       [

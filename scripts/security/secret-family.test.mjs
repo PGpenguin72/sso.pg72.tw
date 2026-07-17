@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -13,6 +21,7 @@ import {
   scanBufferForSecrets,
   scanWorkingTree,
 } from "./secret-family.mjs";
+import { analyzeTypeScriptStaticValues } from "./typescript-static-values.mjs";
 
 function git(root, args) {
   const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
@@ -145,7 +154,7 @@ test("shared family engine covers artifact token and key families including bina
   }
 });
 
-test("allows only exact audited path, key, and complete value triples", () => {
+test("allows only exact audited path, key, and complete value or digest triples", () => {
   const fixtures = [
     [
       "apps/sso/.dev.vars.example",
@@ -231,6 +240,68 @@ test("allows only exact audited path, key, and complete value triples", () => {
         "assigned-secret",
       ),
       relativePath,
+    );
+  }
+  const digestFixtures = [
+    {
+      digest: "95713e9cbdd1dfcb2d4080c2537f418d43ca0da25f0d7d6631f4f7c97b89dc47",
+      key: "clientSecret",
+      nearbyKey: "clientSecretCopy",
+      relativePath: "apps/sso/test/admin-clients.spec.ts",
+    },
+    {
+      digest: "ce6f21ae951df0ba38d6ce0e0175465bf5e9882edcf2ba677bca63b296f17ce7",
+      key: "logout_token",
+      nearbyKey: "logout_token_copy",
+      relativePath: "apps/test-rp/test/worker.spec.ts",
+    },
+    {
+      digest: "3982642a9285288cf0ae1942766ee5f453b98f619a89c9188a41b329288cd627",
+      key: "betterAuthSecret",
+      nearbyKey: "betterAuthSecretCopy",
+      relativePath: "scripts/public-readiness/local-runtime.test.mjs",
+    },
+  ];
+
+  for (const fixture of digestFixtures) {
+    const content = readFileSync(new URL(`../../${fixture.relativePath}`, import.meta.url), "utf8");
+    const analysis = analyzeTypeScriptStaticValues(content, {
+      relativePath: fixture.relativePath,
+    });
+    const matches = analysis.assignments.filter(
+      ({ evaluation, key }) =>
+        key === fixture.key &&
+        evaluation.status === "static" &&
+        typeof evaluation.value === "string" &&
+        createHash("sha256").update(evaluation.value).digest("hex") === fixture.digest,
+    );
+    assert.equal(matches.length, 1, fixture.relativePath);
+    const value = matches[0].evaluation.value;
+    const assignment = (key, candidate) =>
+      Buffer.from(`const fixture = { ${key}: ${JSON.stringify(candidate)} };`);
+    const scan = (bytes, relativePath = fixture.relativePath) =>
+      scanBufferForSecrets(bytes, { relativePath });
+
+    assert.ok(!scan(assignment(fixture.key, value)).includes("assigned-secret"));
+    assert.ok(
+      scan(assignment(fixture.key, value), `other/${path.basename(fixture.relativePath)}`).includes(
+        "assigned-secret",
+      ),
+      fixture.relativePath,
+    );
+    assert.ok(
+      scan(assignment(fixture.key, value), fixture.relativePath.replaceAll("/", "\\")).includes(
+        "assigned-secret",
+      ),
+      fixture.relativePath,
+    );
+    assert.ok(
+      scan(assignment(fixture.nearbyKey, value)).includes("assigned-secret"),
+      fixture.relativePath,
+    );
+    assert.ok(
+      scan(assignment(fixture.key, `${value}-changed`)).includes("assigned-secret"),
+      fixture.relativePath,
     );
   }
 });

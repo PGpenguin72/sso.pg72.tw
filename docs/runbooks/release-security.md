@@ -26,13 +26,19 @@ pnpm dast:local
 | --- | --- |
 | Worker static analysis | Oxlint type-aware `no-floating-promises` and `no-misused-promises` over both Worker implementations |
 | Secret scan | required checksum-pinned Gitleaks over complete Git history; explicit bounded/redacted tracked, ordinary-untracked, and ignored-sensitive-filename traversal; TypeScript compiler AST plus bounded line/binary decoding with exact audited allowances; captured Secretlint output |
-| Workflow/config | raw-byte SHA-256 identity for the exact workflow file set, actionlint, immutable Action SHAs, least permissions, code-owned exact workflow/job/step run maps, canonical reachable package-script name/value digest, exact environment scopes, fixed artifact upload, and exact source/generated Wrangler binding targets |
+| Workflow/config | pre-install stdlib identity for exact workflow/manifests/pnpm policy; later raw-byte workflow identity, actionlint, immutable Action SHAs, least permissions, exact run maps, complete and reachable package-script digests with lifecycle expansion, exact environment scopes, fixed artifact upload, and exact source/generated Wrangler targets |
 | Dependency policy | live `pnpm audit --json` reconciled field-for-field with `security/accepted-advisories.json` |
 | Production artifact | code-owned whole-entry SHA-256 followed by `wrangler deploy --dry-run --outdir` module/Static Asset policy and bounded text/binary secret-family scans |
 | Inventory | path-free package/version/license inventory generated from the frozen pnpm install |
 | Automation tests | negative advisory, target-allowlist, workflow, config, artifact, and inventory tests |
 
-CI first runs `pnpm check`, installs actionlint and Gitleaks from the exact
+Immediately after checkout, CI and Preview run
+`node scripts/security/release-identity.mjs` using only Node standard-library
+modules. This occurs before Preview authorization, pnpm setup/install,
+`pnpm check`, or any other repository script. It fixes the exact workflow file
+set/bytes, all four package-manifest and complete script-map identities, and
+the raw pnpm workspace lifecycle/build policy. CI then runs `pnpm check`,
+installs actionlint and Gitleaks from the exact
 versions and SHA-256 checksums in `security/tool-versions.json`, then runs the
 security and local DAST gates. Every third-party Action is pinned to the
 immutable commit recorded in the same file. The checked-in upload step selects
@@ -65,13 +71,19 @@ reviewed. Do not derive or update this constant automatically. An intentional
 runtime, dependency, bundler, or build-chain change must receive human review;
 then run two independent clean builds and Wrangler dry-runs, confirm their
 `index.js` bytes are identical, and update the constant in the reviewed change.
+Those measurements currently establish local-toolchain determinism only. Linux
+entry-digest equality has not been measured; this is an open evidence gap, not
+evidence of a mismatch.
 
 `security/workflow-policy.json` default-denies environment keys at workflow,
 job, and step scope. Policy may select only the code-owned `DAST_*` expressions
 and exact `CI=1`/`NO_COLOR=1` values; it cannot add workflow commands, leaf
 commands, local scripts, or package-script approvals. Every workflow job/step
-run string is fixed in code, while every recursively reachable package-script
-name and complete value is bound to a separate canonical SHA-256. The exact
+run string is fixed in code. Every complete workspace `scripts` object is bound
+to one canonical SHA-256 in addition to the recursively reachable graph. The
+command model expands pnpm's implicit `pre*` and `post*` hooks for every invoked
+root/filtered script and scans `preinstall`, `install`, `postinstall`, and
+`prepare` for every code-owned workspace during frozen install. The exact
 `ci.yml` and `dast-preview.yml` raw LF bytes have code-owned SHA-256 identities;
 CRLF conversion and every action/input/job/step/comment change fail before YAML
 and deeper semantic checks. Quote composition, inline env, network tools,

@@ -166,11 +166,16 @@ private-key, assignment, and high-entropy families. Source fixtures and
 generated enum/metadata exceptions require an exact raw path, normalized key,
 and complete value. Better Auth's generated fallback additionally requires all
 three exact literal digests, literal forms, and AST contexts; marker substrings
-do not waive a finding. The two workflow files are pinned by code-owned SHA-256
-over their exact raw LF bytes and are rejected before YAML/structural checks if
-any field, comment, or line ending changes. Recursively reachable package-script
-names and complete values have a separate code-owned canonical digest; neither
-contract can be extended through policy. The upload step is fixed to
+do not waive a finding. Immediately after checkout, both workflows run a
+dependency-free Node standard-library identity check before authorization,
+package-manager setup/install, or any other repository script. It pins the
+exact workflow file set/raw LF bytes, all four manifest/script-map identities,
+and the complete `pnpm-workspace.yaml` lifecycle/build policy. The later gate
+rechecks those workflow bytes before YAML/structural validation and separately
+pins both every complete workspace `scripts` object and the recursively
+reachable graph. It models implicit `pre*`/`post*` hooks plus
+`preinstall`/`install`/`postinstall`/`prepare` across root and filtered
+workspaces; policy cannot extend any contract. The upload step is fixed to
 `.artifacts/release` with error-on-missing, hidden-file
 exclusion, and seven-day retention. Workflow environment policy can select only
 code-owned `DAST_*`, `CI`, and `NO_COLOR` values; `CLOUDFLARE_*`, legacy `CF_*`,
@@ -180,7 +185,9 @@ code-owned whole-file SHA-256 before the structural artifact and AST secret
 scanners run. Runtime, dependency, bundler, or build-chain changes therefore
 require human review and two matching clean build/dry-run outputs before that
 digest is deliberately updated; the gate never learns a new digest from policy
-or its current output. Diagnostics normalize
+or its current output. Current matching evidence is local to the measured
+toolchain; Linux entry-digest equality remains unverified, not disproven.
+Diagnostics normalize
 safe relative paths and replace sensitive, secret-bearing, absolute/outside, or
 terminal-unsafe paths with a short SHA-256 identifier. The audit covers runtime,
 build, and development dependencies so tooling advisories cannot bypass the

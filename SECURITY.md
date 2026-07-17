@@ -57,10 +57,15 @@ bounded static evaluator; the separate line/dotenv parser handles export and
 declaration forms. Source fixture and reviewed generated enum/metadata
 allowances are exact path/key/value contracts. The generated Better Auth
 fallback must retain its three exact digests, literal forms, occurrence counts,
-and AST contexts. Both workflow files are pinned by code-owned SHA-256 over
-their raw LF bytes and fail before YAML/structural validation on any change.
-Reachable package-script names and complete values are independently pinned by
-a code-owned canonical digest; policy cannot extend either contract. The
+and AST contexts. Both workflows run a dependency-free Node standard-library
+identity check immediately after checkout, before Preview authorization,
+package installation, or any other repository script. It pins exact workflow
+raw bytes/file set, all manifest and complete script-map identities, and the
+pnpm workspace lifecycle/build policy. The later validator independently pins
+every complete workspace `scripts` object and the reachable graph while
+expanding implicit `pre*`/`post*` and
+`preinstall`/`install`/`postinstall`/`prepare` execution. Policy cannot extend
+these contracts. The
 release upload is exactly `.artifacts/release` with fixed missing-file,
 hidden-file, and retention behavior. Workflow environment keys/values are restricted by a
 code-owned allowlist; all
@@ -69,7 +74,8 @@ The production Wrangler `index.js` must match its code-owned whole-file SHA-256
 before file, secret-family, and AST checks run. A runtime, dependency, bundler,
 or build-chain change requires human review and two byte-identical clean
 build/dry-run results before deliberately updating that digest; no policy or
-generated artifact can update it automatically.
+generated artifact can update it automatically. Linux equality for the current
+entry digest has not yet been measured; it is neither claimed nor disproven.
 Unsafe diagnostic paths are normalized and represented only by a short SHA-256
 identifier.
 

@@ -49,6 +49,22 @@ const RESULT_KEYS = [
   "missing_older_than_5m_count",
 ] as const;
 
+export const ALERT_FANOUT_TIMESTAMP_INTEGRITY_QUERY = `SELECT EXISTS (
+  SELECT 1
+  FROM audit_event INDEXED BY audit_event_invalid_occurred_at_idx
+  WHERE NOT (
+    typeof(occurred_at) = 'text'
+    AND length(occurred_at) = 24
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', occurred_at, '+0 seconds'
+    ) IS NOT NULL
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', occurred_at, '+0 seconds'
+    ) = occurred_at
+  )
+  LIMIT 1
+) AS invalid_timestamp_exists`;
+
 export const ALERT_FANOUT_GAP_QUERY = `SELECT
   coalesce(sum(CASE
     WHEN marker.event_id IS NULL AND source.occurred_at < ?3 THEN 1
@@ -176,14 +192,22 @@ function sourceCount(value: unknown): ParsedCount {
 
 function resultRow(
   results: readonly D1Result<Record<string, unknown>>[],
+  index: number,
+  keys: readonly string[],
 ): UnknownRecord {
-  if (results.length !== 1) fail("source_invalid");
-  const result = results[0];
+  const result = results[index];
   if (!result || result.success !== true || !Array.isArray(result.results)) {
     fail("source_invalid");
   }
   if (result.results.length !== 1) fail("source_invalid");
-  return exactRecord(result.results[0], RESULT_KEYS);
+  return exactRecord(result.results[0], keys);
+}
+
+function assertCanonicalTimestampSource(
+  results: readonly D1Result<Record<string, unknown>>[],
+): void {
+  const row = resultRow(results, 0, ["invalid_timestamp_exists"]);
+  if (row.invalid_timestamp_exists !== 0) fail("source_invalid");
 }
 
 function incompleteResult(): FanoutGapAlertSourceResult {
@@ -222,6 +246,7 @@ export async function readFanoutGapAlertSource(
   let results: D1Result<Record<string, unknown>>[];
   try {
     results = await database.batch<Record<string, unknown>>([
+      database.prepare(ALERT_FANOUT_TIMESTAMP_INTEGRITY_QUERY),
       database.prepare(ALERT_FANOUT_GAP_QUERY).bind(
         windows[2].startInclusive,
         windows[0].endExclusive,
@@ -234,7 +259,9 @@ export async function readFanoutGapAlertSource(
   }
 
   try {
-    const row = resultRow(results);
+    if (results.length !== 2) fail("source_invalid");
+    assertCanonicalTimestampSource(results);
+    const row = resultRow(results, 1, RESULT_KEYS);
     const invalidTimestampCount = sourceCount(
       row.invalid_source_timestamp_count,
     );

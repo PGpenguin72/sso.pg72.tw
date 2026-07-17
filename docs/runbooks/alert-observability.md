@@ -36,6 +36,12 @@ provenance, and defines one key-continuity sentinel:
   `oauth_client_report.reporter_ref`/`reporter_ref_hash_version`: nullable
   persistent provenance for rows whose raw actor/reporter FK may later become
   null. A row cannot introduce the reference without the corresponding raw FK;
+- `audit_event_invalid_occurred_at_idx` and
+  `oauth_client_report_invalid_created_at_idx`: sparse single-column indexes
+  containing only legacy source rows that are not exact 24-character UTC
+  millisecond text after a `+0 seconds` round trip. Paired insert/update guards
+  reject future non-canonical source timestamps while still allowing an old row
+  to be repaired to canonical text;
 - `alert_hash_key_sentinel`: one immutable, domain-separated fingerprint of the
   v1 alert subject HMAC key. It stores no secret and must match before evaluation.
 
@@ -107,8 +113,12 @@ The repository also owns the exact projection read below. It is local source
 only: the Worker entry point and scheduler do not import or invoke it, and no
 full audit/other metric-source evaluation or same-run execution proof exists.
 
-The bounded audit repository executes its fourteen closed projections in one
-awaited D1 batch. Canonical ratio numerator/denominator fields and recovery
+The bounded audit repository executes one timestamp-integrity projection and
+its fourteen closed rule projections in one awaited D1 batch. The integrity
+statement uses `EXISTS`, `INDEXED BY audit_event_invalid_occurred_at_idx`, and
+`LIMIT 1`; any row or malformed projection fails the entire source closed before
+lexical windows are interpreted. Canonical ratio numerator/denominator fields
+and recovery
 denied/started fields stop at `1,000,000`; ordinary count fields retain the
 `1,000,000,000` evidence bound. A well-shaped cohort above its applicable bound
 makes only that rule/dimension incomplete. It cannot invalidate or manufacture
@@ -183,8 +193,11 @@ does not emit a lower distinct-reporter count as exact. Production must backfill
 the reference under the active key and prove complete coverage; this migration
 does not perform a remote backfill.
 
-The local OAuth source repository executes the key-sentinel, tracked-client, and
-report-group projections in one awaited D1 batch. It reads exact half-open
+The local OAuth source repository executes the sparse timestamp-integrity,
+key-sentinel, tracked-client, and report-group projections in one awaited D1
+batch. The first statement requires the
+`oauth_client_report_invalid_created_at_idx` covering probe to be empty before
+it reads exact half-open
 5/15/60-minute cohorts, counts every report and the closed
 `impersonation`/`phishing` high-risk subset, derives client and reporter identity
 with separate `client_hmac` and `reporter_hmac` domains, and applies `LIMIT 1001`
@@ -195,13 +208,16 @@ overflow, missing key continuity, or query failure cannot manufacture a clear
 or expose a raw client/reporter identifier. This repository is local source
 only: neither the Worker entry point nor a scheduler imports or invokes it.
 
-The local fan-out-gap source repository reads the exact half-open
+The local fan-out-gap source repository first checks the same global
+`audit_event_invalid_occurred_at_idx` projection in the D1 batch, then reads the
+exact half-open
 `[asOf - 60m, asOf)` `audit_event` cohort and left-joins
 `security_event_delivery.event_id`. A missing marker counts only when the source
 timestamp is strictly older than five or fifteen minutes, so an event exactly on
 either grace boundary remains outside that older cohort. The query uses the
 bounded audit time index and marker primary-key index, projects only aggregate
-counters, validates selected timestamps and the exact D1 result shape, and turns
+counters, retains selected-row timestamp validation, validates both exact D1
+result shapes, and turns
 well-shaped evidence above `1,000,000,000` into an incomplete global source
 rather than a false clear. This is an unwired detector source only. It does not
 create a durable security-event outbox, replay a missing event, sample Queue
@@ -298,12 +314,22 @@ at or after expiry, only `lease_expired` may consume the claim.
 local `0021_audit_archive.sql` slice now owns that separate ledger while
 preserving compensation deletion before an event is snapshotted.
 
+Before `0021` assigns a source sequence, its insert guard looks up the parent by
+`audit_event.id` and requires the same canonical UTC millisecond round trip.
+The backfill is one statement, so one uncorrected legacy row aborts all sequence
+allocation instead of fixing a lexical misordering into the ledger. Repair the
+row through the `0020` timestamp update guard, rerun integrity/FK checks, and
+only then retry the unapplied `0021` migration.
+
 Instead, `0020` adds
 `audit_event_type_subject_time_bounded_idx(event_type, subject_id,
 occurred_at DESC, id)` for deterministic bounded per-subject scans. The existing
 type/time index remains available. Additional covering indexes close the exact
 global/type/actor audit, OAuth reporter, logout delivery, and logout-attempt
 cohort paths described by the pure evaluator's source contracts. The local
+two sparse invalid-timestamp indexes are separate from those time-window
+indexes: their healthy path is an empty covering-index `EXISTS ... LIMIT 1`
+probe, never an unindexed base-table validation scan. The local
 runtime repository owns only evaluator lease/status/bootstrap state; it does not
 execute metric-source queries or persist alert state, incidents, or outbox work.
 The bounded local audit repository executes only the reviewed audit paths;
@@ -352,7 +378,8 @@ pnpm --filter @pg72/id exec vitest run \
   test/alert-oauth-source-repository.spec.ts \
   test/alert-evaluator.spec.ts test/alert-rules.spec.ts \
   test/audit-archive-crypto.spec.ts
-node --test scripts/public-readiness/audit-archive-migration.test.mjs \
+node --test scripts/public-readiness/alert-source-time-integrity-migration.test.mjs \
+  scripts/public-readiness/audit-archive-migration.test.mjs \
   scripts/public-readiness/d1-manifest.test.mjs \
   scripts/public-readiness/dependency-contracts.test.mjs \
   scripts/public-readiness/report.test.mjs
@@ -370,6 +397,11 @@ fabricated snapshot evidence, and attempt evidence that does not match the exact
 active outbox lease. It also rejects invented primary domains, missing ratio
 minimum numerators, fictitious severity thresholds, partial or below-threshold
 secondary components, and evidence that changes between incident and outbox.
+It also proves source timestamp insert/update guards and empty covering sparse
+indexes. The migration regression seeds offset, far-low/far-high, bad-calendar,
+and numeric legacy values before `0020`, proves both invalid indexes find them,
+repairs them to canonical text, and proves the indexes become empty without a
+base-table scan.
 It proves the existing audit insert/delete compensation still works before the
 separate source ledger is added. The archive schema/migration suites apply the
 ordered ledger through `0021`, verify its six-table transaction contract, and
@@ -380,14 +412,17 @@ real Workerd D1 to verify stale-revision races, duplicate evaluations, trigger
 rollback, critical/warning/cooldown/manual-only transitions, contiguous
 reminders, canonical payload digests, and HMAC-only dimensions. The runtime
 repository suite verifies only D1 lease/status/bootstrap persistence. The OAuth
-source suite verifies exact half-open cohorts, total/high-risk/distinct counts,
+source suite verifies its global sparse-index preflight, exact half-open
+cohorts, total/high-risk/distinct counts,
 nullable reporter evidence, domain-separated raw/stored provenance, sentinel
 continuity, bounded tracked zero-fill, query plans, and redacted failure behavior
-without wiring an evaluator. The fan-out source suite verifies the one-hour
-half-open lookback, exact grace boundaries, marker matching, canonical
-timestamps, safe caps, cohort nesting, bounded query plans, and redacted
-fail-closed behavior without wiring an evaluator or Queue. The archive schema
-suite verifies the `0021` ledger transaction contract, while the archive-crypto
+without wiring an evaluator. The fan-out source suite verifies its global
+preflight, one-hour half-open lookback, exact grace boundaries, marker matching,
+selected timestamp validation, safe caps, cohort nesting, bounded query plans,
+and redacted fail-closed behavior without wiring an evaluator or Queue. The
+archive schema and migration suites verify that one invalid parent aborts
+backfill and that a repaired canonical parent succeeds, plus the `0021` ledger
+transaction contract, while the archive-crypto
 suite verifies the record/envelope and checkpoint binding without R2 or Queue
 I/O.
 

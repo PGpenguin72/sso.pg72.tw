@@ -67,6 +67,23 @@ const TRACKED_LIFECYCLE_PREDICATE = `source_kind = 'd1_exact'
       OR cooldown_until IS NOT NULL
     )`;
 
+export const ALERT_OAUTH_TIMESTAMP_INTEGRITY_QUERY = `SELECT EXISTS (
+  SELECT 1
+  FROM oauth_client_report
+    INDEXED BY oauth_client_report_invalid_created_at_idx
+  WHERE NOT (
+    typeof(created_at) = 'text'
+    AND length(created_at) = 24
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', created_at, '+0 seconds'
+    ) IS NOT NULL
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', created_at, '+0 seconds'
+    ) = created_at
+  )
+  LIMIT 1
+) AS invalid_timestamp_exists`;
+
 const SENTINEL_QUERY = `SELECT domain, fingerprint_ref, hash_version
 FROM alert_hash_key_sentinel
 WHERE id = 1`;
@@ -219,6 +236,16 @@ function resultRows(
     fail("source_invalid");
   }
   return result.results.map(recordValue);
+}
+
+function assertCanonicalTimestampSource(
+  results: readonly D1Result<Record<string, unknown>>[],
+  index: number,
+): void {
+  const rows = resultRows(results, index);
+  if (rows.length !== 1) fail("source_invalid");
+  const row = exactRecord(rows[0], ["invalid_timestamp_exists"]);
+  if (row.invalid_timestamp_exists !== 0) fail("source_invalid");
 }
 
 async function sentinelKeyAvailable(
@@ -454,6 +481,7 @@ export async function readOAuthAlertSource(
   let results: D1Result<Record<string, unknown>>[];
   try {
     results = await database.batch<Record<string, unknown>>([
+      database.prepare(ALERT_OAUTH_TIMESTAMP_INTEGRITY_QUERY),
       database.prepare(SENTINEL_QUERY),
       database.prepare(ALERT_OAUTH_TRACKED_DIMENSIONS_QUERY).bind(
         input.environment,
@@ -470,9 +498,10 @@ export async function readOAuthAlertSource(
   }
 
   try {
-    if (results.length !== 3) fail("source_invalid");
+    if (results.length !== 4) fail("source_invalid");
+    assertCanonicalTimestampSource(results, 0);
     const keyAvailable = await sentinelKeyAvailable(
-      resultRows(results, 0),
+      resultRows(results, 1),
       input.hmacKeyBase64Url,
     );
     if (!keyAvailable || input.hmacKeyBase64Url === null) {
@@ -483,8 +512,8 @@ export async function readOAuthAlertSource(
     let tracked: Set<string> | null;
     let sourceRows: readonly UnknownRecord[] | null;
     try {
-      tracked = parseTrackedReferences(resultRows(results, 1));
-      sourceRows = resultRows(results, 2);
+      tracked = parseTrackedReferences(resultRows(results, 2));
+      sourceRows = resultRows(results, 3);
     } catch {
       tracked = null;
       sourceRows = null;

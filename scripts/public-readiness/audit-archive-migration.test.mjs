@@ -125,6 +125,59 @@ test("0021 upgrades a seeded 0020 database with deterministic source order", () 
   }
 });
 
+test("0021 aborts legacy invalid audit backfill until its parent time is repaired", () => {
+  const database = openDatabase();
+  const applyArchiveTransaction = () => {
+    database.exec("BEGIN");
+    try {
+      database.exec(migration("0021_audit_archive.sql"));
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  };
+  try {
+    applyThrough(database, "0019_recovery_codes.sql");
+    database.prepare(
+      `INSERT INTO audit_event (id, event_type, outcome, occurred_at)
+       VALUES ('archive:invalid-offset', 'test.archive', 'success',
+               '2032-02-04T12:30:00+01:00')`,
+    ).run();
+    database.exec(migration("0020_alert_observability.sql"));
+
+    assert.throws(
+      applyArchiveTransaction,
+      /audit archive source requires canonical parent time/,
+    );
+    assert.equal(
+      database.prepare(
+        `SELECT count(*) AS count FROM sqlite_schema
+          WHERE type = 'table' AND name = 'audit_archive_source'`,
+      ).get().count,
+      0,
+    );
+
+    database.prepare(
+      `UPDATE audit_event SET occurred_at = '2032-02-04T11:30:00.000Z'
+        WHERE id = 'archive:invalid-offset'`,
+    ).run();
+    applyArchiveTransaction();
+    assert.deepEqual(
+      {
+        ...database.prepare(
+          `SELECT sequence, event_id FROM audit_archive_source
+            WHERE event_id = 'archive:invalid-offset'`,
+        ).get(),
+      },
+      { event_id: "archive:invalid-offset", sequence: 1 },
+    );
+    integrity(database);
+  } finally {
+    database.close();
+  }
+});
+
 test("archive ledger survives a private SQLite backup and isolated restore", async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "pgid-archive-restore-"));
   const sourceFilename = path.join(directory, "source.sqlite");
@@ -186,7 +239,7 @@ test("archive ledger survives a private SQLite backup and isolated restore", asy
 
 test("archive lease predicates retain canonical millisecond boundaries", () => {
   const source = migration("0021_audit_archive.sql");
-  assert.equal(source.match(/'\+0 seconds'/g)?.length, 28);
+  assert.equal(source.match(/'\+0 seconds'/g)?.length, 30);
   assert.doesNotMatch(
     source,
     /strftime\('%Y-%m-%dT%H:%M:%fZ', "[a-z_]+"\)/,

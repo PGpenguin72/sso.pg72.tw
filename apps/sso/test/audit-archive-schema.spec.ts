@@ -430,6 +430,32 @@ describe("audit archive 0021 schema", () => {
     expect("AUDIT_ARCHIVE" in env).toBe(false);
     expect("AUDIT_ARCHIVE_DELIVERIES" in env).toBe(false);
 
+    const parentGuard = await env.PG72_ID_DB.prepare(
+      `SELECT sql FROM sqlite_schema
+        WHERE type = 'trigger'
+          AND name = 'audit_archive_source_parent_time_guard'`,
+    ).first<string>("sql");
+    expect(parentGuard).toContain('event."id" = NEW."event_id"');
+    expect(parentGuard).toContain("%Y-%m-%dT%H:%M:%fZ");
+    expect(parentGuard).toContain("'+0 seconds'");
+    const parentPlan = await env.PG72_ID_DB.prepare(
+      `EXPLAIN QUERY PLAN
+       SELECT 1 FROM audit_event AS event
+        WHERE event.id = ?
+          AND typeof(event.occurred_at) = 'text'
+          AND length(event.occurred_at) = 24
+          AND strftime(
+            '%Y-%m-%dT%H:%M:%fZ', event.occurred_at, '+0 seconds'
+          ) IS NOT NULL
+          AND strftime(
+            '%Y-%m-%dT%H:%M:%fZ', event.occurred_at, '+0 seconds'
+          ) = event.occurred_at`,
+    )
+      .bind("archive-parent-plan")
+      .all<{ detail: string }>();
+    expect(parentPlan.results.map(({ detail }) => detail).join("\n"))
+      .toMatch(/SEARCH event USING INDEX .*audit_event/);
+
     const event = await insertAuditEvent(1);
     expect(event.sequence).toBeGreaterThan(0);
     await env.PG72_ID_DB.prepare("DELETE FROM audit_event WHERE id = ?")

@@ -3,6 +3,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import {
   ALERT_AUDIT_TRACKED_DIMENSIONS_QUERY,
+  ALERT_AUDIT_TIMESTAMP_INTEGRITY_QUERY,
   ALERT_HASH_KEY_SENTINEL_DOMAIN,
   AlertAuditSourceRepositoryError,
   deriveAlertHashKeyFingerprintV1,
@@ -148,6 +149,16 @@ function replaceSentinel(
   });
 }
 
+function replaceResultRows(
+  results: D1Result<Record<string, unknown>>[],
+  index: number,
+  replacement: readonly Record<string, unknown>[],
+): D1Result<Record<string, unknown>>[] {
+  return results.map((result, resultIndex) =>
+    resultIndex === index ? { ...result, results: [...replacement] } : result
+  );
+}
+
 beforeAll(async () => {
   const fingerprint = await deriveAlertHashKeyFingerprintV1(TEST_HMAC_KEY);
   await env.PG72_ID_DB.prepare(
@@ -229,6 +240,42 @@ describe.sequential("audit alert source repository", () => {
     await expect(read(asOf, { database: corruptSentinel })).rejects.toEqual(
       new AlertAuditSourceRepositoryError("source_invalid"),
     );
+  });
+
+  it("fails closed on global timestamp corruption before reading lexical windows", async () => {
+    const asOf = "2030-01-01T02:00:00.000Z";
+    const rawMarker = "raw-offset-time-must-not-leak";
+    const corruptProjections = [
+      [{ invalid_timestamp_exists: 1 }],
+      [],
+      [{ invalid_timestamp_exists: false }],
+      [{ invalid_timestamp_exists: "0" }],
+      [
+        { invalid_timestamp_exists: 0 },
+        { invalid_timestamp_exists: 0 },
+      ],
+      [{ invalid_timestamp_exists: 0, unexpected: rawMarker }],
+    ];
+    for (const projection of corruptProjections) {
+      const database = transformBatchDatabase((results) =>
+        replaceResultRows(results, 0, projection)
+      );
+      const failure = read(asOf, { database });
+      await expect(failure).rejects.toEqual(
+        new AlertAuditSourceRepositoryError("source_invalid"),
+      );
+      await expect(failure).rejects.not.toThrow(rawMarker);
+    }
+
+    const plan = await env.PG72_ID_DB.prepare(
+      `EXPLAIN QUERY PLAN ${ALERT_AUDIT_TIMESTAMP_INTEGRITY_QUERY}`,
+    ).all<{ detail: string }>();
+    const details = plan.results.map(({ detail }) => detail).join("\n");
+    expect(ALERT_AUDIT_TIMESTAMP_INTEGRITY_QUERY).toContain("LIMIT 1");
+    expect(details).toContain(
+      "USING COVERING INDEX audit_event_invalid_occurred_at_idx",
+    );
+    expect(details).not.toMatch(/SCAN audit_event$/m);
   });
 
   it("uses exact half-open windows without summing nested cohorts", async () => {

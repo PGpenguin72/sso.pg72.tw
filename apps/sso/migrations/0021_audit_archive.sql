@@ -18,6 +18,25 @@ CREATE TABLE "audit_archive_source" (
 -- Conflict-aware INSERT guards are required in addition to UPDATE/DELETE
 -- guards: SQLite's INSERT OR REPLACE can implicitly delete a conflicting row
 -- without firing its delete trigger when recursive_triggers is disabled.
+CREATE TRIGGER "audit_archive_source_parent_time_guard"
+BEFORE INSERT ON "audit_archive_source"
+WHEN NOT EXISTS (
+  SELECT 1
+    FROM "audit_event" AS event
+   WHERE event."id" = NEW."event_id"
+     AND typeof(event."occurred_at") = 'text'
+     AND length(event."occurred_at") = 24
+     AND strftime(
+       '%Y-%m-%dT%H:%M:%fZ', event."occurred_at", '+0 seconds'
+     ) IS NOT NULL
+     AND strftime(
+       '%Y-%m-%dT%H:%M:%fZ', event."occurred_at", '+0 seconds'
+     ) = event."occurred_at"
+)
+BEGIN
+  SELECT RAISE(ABORT, 'audit archive source requires canonical parent time');
+END;
+
 CREATE TRIGGER "audit_archive_source_insert_guard"
 BEFORE INSERT ON "audit_archive_source"
 WHEN EXISTS (

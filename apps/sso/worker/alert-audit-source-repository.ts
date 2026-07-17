@@ -124,6 +124,22 @@ const TRACKED_LIFECYCLE_PREDICATE = `source_kind = 'd1_exact'
       OR cooldown_until IS NOT NULL
     )`;
 
+export const ALERT_AUDIT_TIMESTAMP_INTEGRITY_QUERY = `SELECT EXISTS (
+  SELECT 1
+  FROM audit_event INDEXED BY audit_event_invalid_occurred_at_idx
+  WHERE NOT (
+    typeof(occurred_at) = 'text'
+    AND length(occurred_at) = 24
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', occurred_at, '+0 seconds'
+    ) IS NOT NULL
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', occurred_at, '+0 seconds'
+    ) = occurred_at
+  )
+  LIMIT 1
+) AS invalid_timestamp_exists`;
+
 function trackedDimensionSelect(
   ruleId: (typeof TRACKED_AUDIT_RULE_IDS)[number],
 ): string {
@@ -342,20 +358,21 @@ ORDER BY actor_ref, actor_user_id
 LIMIT ${DIMENSION_QUERY_LIMIT}`;
 
 const RESULT_INDEX = {
-  sentinel: 0,
-  tracked: 1,
-  registrationRateLimited: 2,
-  registrationDenied: 3,
-  registrationChallenge: 4,
-  registrationRestrictedCreated: 5,
-  restrictedDenial: 6,
-  recoveryEntry: 7,
-  recoveryPasskeyGlobal: 8,
-  recoveryPasskeyDimension: 9,
-  passkeyStepUpGlobal: 10,
-  passkeyStepUpDimension: 11,
-  adminSensitive: 12,
-  adminDirectory: 13,
+  timestampIntegrity: 0,
+  sentinel: 1,
+  tracked: 2,
+  registrationRateLimited: 3,
+  registrationDenied: 4,
+  registrationChallenge: 5,
+  registrationRestrictedCreated: 6,
+  restrictedDenial: 7,
+  recoveryEntry: 8,
+  recoveryPasskeyGlobal: 9,
+  recoveryPasskeyDimension: 10,
+  passkeyStepUpGlobal: 11,
+  passkeyStepUpDimension: 12,
+  adminSensitive: 13,
+  adminDirectory: 14,
 } as const;
 
 function fail(code: AlertAuditSourceRepositoryErrorCode): never {
@@ -527,6 +544,14 @@ function oneRow(
   const rows = resultRows(results, index);
   if (rows.length !== 1) fail("source_invalid");
   return exactRecord(rows[0], keys);
+}
+
+function assertCanonicalTimestampSource(
+  results: readonly D1Result<Record<string, unknown>>[],
+  index: number,
+): void {
+  const row = oneRow(results, index, ["invalid_timestamp_exists"]);
+  if (row.invalid_timestamp_exists !== 0) fail("source_invalid");
 }
 
 interface ParsedCount {
@@ -1043,6 +1068,7 @@ export async function readAuditAlertSources(
   let results: D1Result<Record<string, unknown>>[];
   try {
     results = await database.batch<Record<string, unknown>>([
+      database.prepare(ALERT_AUDIT_TIMESTAMP_INTEGRITY_QUERY),
       database.prepare(SENTINEL_QUERY),
       database.prepare(ALERT_AUDIT_TRACKED_DIMENSIONS_QUERY).bind(
         input.environment,
@@ -1084,6 +1110,7 @@ export async function readAuditAlertSources(
     if (results.length !== Object.keys(RESULT_INDEX).length) {
       fail("source_invalid");
     }
+    assertCanonicalTimestampSource(results, RESULT_INDEX.timestampIntegrity);
     const incomplete = new Map<string, IncompleteAuditAlertSource>();
     const observations: AuditAlertObservation[] = [];
     const keyAvailable = await sentinelKeyAvailable(

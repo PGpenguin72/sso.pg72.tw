@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ALERT_FANOUT_GAP_QUERY,
+  ALERT_FANOUT_TIMESTAMP_INTEGRITY_QUERY,
   AlertFanoutSourceRepositoryError,
   readFanoutGapAlertSource,
   type FanoutGapAlertSourceResult,
@@ -63,10 +64,27 @@ function transformBatchDatabase(
 }
 
 function withRows(rows: readonly Record<string, unknown>[]): D1Database {
-  return transformBatchDatabase((results) => [{
-    ...results[0],
-    results: [...rows],
-  }]);
+  return transformBatchDatabase((results) =>
+    replaceResultRows(results, 1, rows)
+  );
+}
+
+function withIntegrityRows(
+  rows: readonly Record<string, unknown>[],
+): D1Database {
+  return transformBatchDatabase((results) =>
+    replaceResultRows(results, 0, rows)
+  );
+}
+
+function replaceResultRows(
+  results: D1Result<Record<string, unknown>>[],
+  index: number,
+  rows: readonly Record<string, unknown>[],
+): D1Result<Record<string, unknown>>[] {
+  return results.map((result, resultIndex) =>
+    resultIndex === index ? { ...result, results: [...rows] } : result
+  );
 }
 
 function resultRow(
@@ -168,16 +186,37 @@ describe.sequential("fan-out gap alert source repository", () => {
     });
   });
 
-  it("fails closed when a selected source timestamp is not canonical", async () => {
+  it("preserves selected-row timestamp validation behind the global preflight", async () => {
     const asOf = "2032-02-04T12:00:00.000Z";
     const rawTimestamp = "2032-02-04T11:30:00Z";
-    await insertAudit(rawTimestamp);
-
-    const failure = read(asOf);
+    const failure = read(asOf, withRows([resultRow(0, 0, 1)]));
     await expect(failure).rejects.toEqual(
       new AlertFanoutSourceRepositoryError("source_invalid"),
     );
     await expect(failure).rejects.not.toThrow(rawTimestamp);
+  });
+
+  it("fails closed on global timestamp corruption before the lexical cohort", async () => {
+    const asOf = "2032-02-04T13:00:00.000Z";
+    const rawMarker = "raw-offset-time-must-not-leak";
+    const corruptProjections = [
+      [{ invalid_timestamp_exists: 1 }],
+      [],
+      [{ invalid_timestamp_exists: false }],
+      [{ invalid_timestamp_exists: "0" }],
+      [
+        { invalid_timestamp_exists: 0 },
+        { invalid_timestamp_exists: 0 },
+      ],
+      [{ invalid_timestamp_exists: 0, unexpected: rawMarker }],
+    ];
+    for (const projection of corruptProjections) {
+      const failure = read(asOf, withIntegrityRows(projection));
+      await expect(failure).rejects.toEqual(
+        new AlertFanoutSourceRepositoryError("source_invalid"),
+      );
+      await expect(failure).rejects.not.toThrow(rawMarker);
+    }
   });
 
   it("validates canonical input and the exact call shape", async () => {
@@ -269,14 +308,23 @@ describe.sequential("fan-out gap alert source repository", () => {
         invalid_source_timestamp_count: 0,
         missing_older_than_5m_count: 0,
       }]),
-      transformBatchDatabase((results) => [{
-        ...results[0],
-        success: false,
-      } as unknown as D1Result<Record<string, unknown>>]),
-      transformBatchDatabase((results) => [{
-        ...results[0],
-        results: undefined as never,
-      }]),
+      transformBatchDatabase((results) =>
+        results.map((result, index) =>
+          index === 1
+            ? {
+              ...result,
+              success: false,
+            } as unknown as D1Result<Record<string, unknown>>
+            : result
+        )
+      ),
+      transformBatchDatabase((results) =>
+        results.map((result, index) =>
+          index === 1
+            ? { ...result, results: undefined as never }
+            : result
+        )
+      ),
     ];
     for (const database of corruptDatabases) {
       const failure = read(asOf, database);
@@ -300,6 +348,17 @@ describe.sequential("fan-out gap alert source repository", () => {
 
   it("pins the bounded source and marker query plans without projecting raw evidence", async () => {
     const asOf = "2032-02-10T12:00:00.000Z";
+    const integrityPlan = await env.PG72_ID_DB.prepare(
+      `EXPLAIN QUERY PLAN ${ALERT_FANOUT_TIMESTAMP_INTEGRITY_QUERY}`,
+    ).all<{ detail: string }>();
+    const integrityDetails = integrityPlan.results
+      .map(({ detail }) => detail)
+      .join("\n");
+    expect(ALERT_FANOUT_TIMESTAMP_INTEGRITY_QUERY).toContain("LIMIT 1");
+    expect(integrityDetails).toContain(
+      "USING COVERING INDEX audit_event_invalid_occurred_at_idx",
+    );
+    expect(integrityDetails).not.toMatch(/SCAN audit_event$/m);
     const plan = await env.PG72_ID_DB.prepare(
       `EXPLAIN QUERY PLAN ${ALERT_FANOUT_GAP_QUERY}`,
     )

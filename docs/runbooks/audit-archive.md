@@ -12,7 +12,10 @@ exactly six durable tables:
 
 - `audit_archive_source` assigns a safe monotonic sequence to every committed
   `audit_event`. Existing rows are backfilled deterministically by
-  `(occurred_at, id)` after the insert capture trigger is installed.
+  `(occurred_at, id)` after the insert capture trigger is installed, but only
+  after a parent-primary-key guard proves every captured timestamp is canonical
+  UTC millisecond text. One invalid legacy parent aborts the whole backfill
+  statement before it can allocate a misleading sequence.
 - `audit_archive_key_sentinel` stores only an archive-specific KEK fingerprint
   per explicit key version. The migration creates no row and never reads a key.
 - `audit_archive_checkpoint` is a singleton cursor initialized at revision and
@@ -35,6 +38,10 @@ the FK cascade after the parent audit row is absent, which preserves the
 Passkey step-up compensation transaction. Conflict-aware insert guards protect
 both source and `audit_event` identity when SQLite runs with
 `recursive_triggers=OFF`; an archived event ID cannot be introduced again.
+The parent-time guard is independent of lexical ordering: it reads one parent by
+the `audit_event.id` primary key and applies the exact 24-character `+0 seconds`
+round-trip predicate. A legacy invalid row remains visible through the `0020`
+sparse index and must be repaired there before retrying an unapplied `0021`.
 
 A future repository must insert one bounded canonical record array through one
 `json_each(?)` item statement, then insert its parent batch in the same
@@ -89,7 +96,8 @@ From a clean worktree with the frozen dependency set:
 
 ```bash
 pnpm --filter @pg72/id exec vitest run test/audit-archive-schema.spec.ts
-node --test scripts/public-readiness/audit-archive-migration.test.mjs \
+node --test scripts/public-readiness/alert-source-time-integrity-migration.test.mjs \
+  scripts/public-readiness/audit-archive-migration.test.mjs \
   scripts/public-readiness/d1-manifest.test.mjs \
   scripts/public-readiness/dependency-contracts.test.mjs
 pnpm test:public-readiness
@@ -99,7 +107,8 @@ git diff --check
 ```
 
 The focused suites cover fresh and seeded-`0020` migration, deterministic
-backfill, deferred item-first snapshot rollback, hostile replace/update/delete
+backfill, invalid-parent transactional abort and canonical repair, deferred
+item-first snapshot rollback, hostile replace/update/delete
 with recursive triggers disabled, Passkey-compatible source cascade, exact
 millisecond lease boundaries, attempts one through five, audited manual replay,
 stale-checkpoint all-or-nothing rollback, private backup/isolated restore,

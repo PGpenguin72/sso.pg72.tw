@@ -2,6 +2,8 @@ import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { deriveAlertReferenceV1 } from "../worker/alert-rules";
+import { ALERT_AUDIT_TIMESTAMP_INTEGRITY_QUERY } from "../worker/alert-audit-source-repository";
+import { ALERT_OAUTH_TIMESTAMP_INTEGRITY_QUERY } from "../worker/alert-oauth-source-repository";
 
 const NOW = "2026-07-17T10:00:00.000Z";
 let evaluationTick = 0;
@@ -663,10 +665,16 @@ describe("alert observability migration", () => {
           'alert_hash_key_sentinel', 'alert_state_semantic_identity_idx',
           'alert_state_tracked_evaluation_idx',
           'alert_outbox_due_idx', 'security_alert_unresolved_state_idx',
+          'audit_event_invalid_occurred_at_idx',
+          'audit_event_occurred_at_insert_guard',
+          'audit_event_occurred_at_update_guard',
           'audit_event_time_bounded_idx',
           'audit_event_type_actor_time_bounded_idx',
           'audit_event_type_subject_time_bounded_idx',
           'audit_event_type_time_bounded_idx',
+          'oauth_client_report_created_at_insert_guard',
+          'oauth_client_report_created_at_update_guard',
+          'oauth_client_report_invalid_created_at_idx',
           'oauth_client_report_time_client_reason_reporter_bounded_idx',
           'logout_delivery_time_client_status_bounded_idx',
           'logout_delivery_status_client_time_bounded_idx',
@@ -684,6 +692,9 @@ describe("alert observability migration", () => {
       "alert_state",
       "alert_state_semantic_identity_idx",
       "alert_state_tracked_evaluation_idx",
+      "audit_event_invalid_occurred_at_idx",
+      "audit_event_occurred_at_insert_guard",
+      "audit_event_occurred_at_update_guard",
       "audit_event_time_bounded_idx",
       "audit_event_type_actor_time_bounded_idx",
       "audit_event_type_subject_time_bounded_idx",
@@ -691,6 +702,9 @@ describe("alert observability migration", () => {
       "logout_delivery_attempt_completion_bounded_idx",
       "logout_delivery_status_client_time_bounded_idx",
       "logout_delivery_time_client_status_bounded_idx",
+      "oauth_client_report_created_at_insert_guard",
+      "oauth_client_report_created_at_update_guard",
+      "oauth_client_report_invalid_created_at_idx",
       "oauth_client_report_time_client_reason_reporter_bounded_idx",
       "security_alert",
       "security_alert_unresolved_state_idx",
@@ -1127,6 +1141,107 @@ describe("alert observability migration", () => {
         "SELECT COUNT(*) AS count FROM sqlite_schema WHERE name = 'audit_event_sequence'",
       ).first<number>("count"),
     ).toBe(0);
+  });
+
+  it("guards canonical source times and keeps empty integrity probes covering", async () => {
+    const invalidTimestamps = [
+      "2032-02-04T12:30:00+01:00",
+      "0001-01-01T00:30:00+01:00",
+      "9998-12-31T23:30:00-01:00",
+      "2025-02-29T00:00:00.000Z",
+      "123456789",
+    ];
+    for (const [index, timestamp] of invalidTimestamps.entries()) {
+      await expect(
+        env.PG72_ID_DB.prepare(
+          `INSERT INTO audit_event (id, event_type, outcome, occurred_at)
+           VALUES (?, 'observability.time_guard', 'success', ?)`,
+        )
+          .bind(`time-guard-audit:${index}:${crypto.randomUUID()}`, timestamp)
+          .run(),
+      ).rejects.toThrow(/audit event timestamp must be canonical/);
+      await expect(
+        env.PG72_ID_DB.prepare(
+          `INSERT INTO oauth_client_report
+            (id, client_id, reason, status, created_at)
+           VALUES (?, 'time-guard-client', 'other', 'open', ?)`,
+        )
+          .bind(`time-guard-oauth:${index}:${crypto.randomUUID()}`, timestamp)
+          .run(),
+      ).rejects.toThrow(/OAuth report timestamp must be canonical/);
+    }
+
+    const auditId = `time-guard-audit:${crypto.randomUUID()}`;
+    const reportId = `time-guard-oauth:${crypto.randomUUID()}`;
+    await env.PG72_ID_DB.batch([
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO audit_event (id, event_type, outcome, occurred_at)
+         VALUES (?, 'observability.time_guard', 'success', ?)`,
+      ).bind(auditId, "2032-02-04T11:30:00.000Z"),
+      env.PG72_ID_DB.prepare(
+        `INSERT INTO oauth_client_report
+          (id, client_id, reason, status, created_at)
+         VALUES (?, 'time-guard-client', 'other', 'open', ?)`,
+      ).bind(reportId, "2032-02-04T11:30:00.000Z"),
+    ]);
+    await expect(
+      env.PG72_ID_DB.prepare(
+        "UPDATE audit_event SET occurred_at = ? WHERE id = ?",
+      )
+        .bind(invalidTimestamps[0], auditId)
+        .run(),
+    ).rejects.toThrow(/audit event timestamp must be canonical/);
+    await expect(
+      env.PG72_ID_DB.prepare(
+        "UPDATE oauth_client_report SET created_at = ? WHERE id = ?",
+      )
+        .bind(invalidTimestamps[0], reportId)
+        .run(),
+    ).rejects.toThrow(/OAuth report timestamp must be canonical/);
+    await env.PG72_ID_DB.batch([
+      env.PG72_ID_DB.prepare(
+        "UPDATE audit_event SET occurred_at = ? WHERE id = ?",
+      ).bind("2032-02-04T11:31:00.000Z", auditId),
+      env.PG72_ID_DB.prepare(
+        "UPDATE oauth_client_report SET created_at = ? WHERE id = ?",
+      ).bind("2032-02-04T11:31:00.000Z", reportId),
+    ]);
+
+    for (const { column, index, query, table } of [
+      {
+        column: "occurred_at",
+        index: "audit_event_invalid_occurred_at_idx",
+        query: ALERT_AUDIT_TIMESTAMP_INTEGRITY_QUERY,
+        table: "audit_event",
+      },
+      {
+        column: "created_at",
+        index: "oauth_client_report_invalid_created_at_idx",
+        query: ALERT_OAUTH_TIMESTAMP_INTEGRITY_QUERY,
+        table: "oauth_client_report",
+      },
+    ]) {
+      const columns = await env.PG72_ID_DB.prepare(
+        `PRAGMA index_info("${index}")`,
+      ).all<{ name: string; seqno: number }>();
+      expect(columns.results).toEqual([{ cid: expect.any(Number), name: column, seqno: 0 }]);
+      const projection = await env.PG72_ID_DB.prepare(query)
+        .first<number>("invalid_timestamp_exists");
+      expect(projection).toBe(0);
+      const plan = await env.PG72_ID_DB.prepare(
+        `EXPLAIN QUERY PLAN ${query}`,
+      ).all<{ detail: string }>();
+      const details = plan.results.map(({ detail }) => detail).join("\n");
+      expect(details).toContain(`USING COVERING INDEX ${index}`);
+      expect(details).not.toMatch(new RegExp(`SCAN ${table}$`, "m"));
+    }
+
+    await env.PG72_ID_DB.batch([
+      env.PG72_ID_DB.prepare("DELETE FROM oauth_client_report WHERE id = ?")
+        .bind(reportId),
+      env.PG72_ID_DB.prepare("DELETE FROM audit_event WHERE id = ?")
+        .bind(auditId),
+    ]);
   });
 
   it("accepts every canonical tail produced by a real 32-byte encoding", async () => {

@@ -32,6 +32,54 @@ ALTER TABLE "audit_event" ADD COLUMN "actor_ref_hash_version" integer CHECK (
     AND "actor_ref_hash_version" = 1)
 );
 
+-- Legacy rows are indexed, not rejected by this additive migration. Healthy
+-- source reads can prove the index empty with a bounded covering-index probe;
+-- future writes are kept canonical by the paired guards below.
+CREATE INDEX "audit_event_invalid_occurred_at_idx"
+  ON "audit_event" ("occurred_at")
+  WHERE NOT (
+    typeof("occurred_at") = 'text'
+    AND length("occurred_at") = 24
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', "occurred_at", '+0 seconds'
+    ) IS NOT NULL
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', "occurred_at", '+0 seconds'
+    ) = "occurred_at"
+  );
+
+CREATE TRIGGER "audit_event_occurred_at_insert_guard"
+BEFORE INSERT ON "audit_event"
+WHEN NOT (
+  typeof(NEW."occurred_at") = 'text'
+  AND length(NEW."occurred_at") = 24
+  AND strftime(
+    '%Y-%m-%dT%H:%M:%fZ', NEW."occurred_at", '+0 seconds'
+  ) IS NOT NULL
+  AND strftime(
+    '%Y-%m-%dT%H:%M:%fZ', NEW."occurred_at", '+0 seconds'
+  ) = NEW."occurred_at"
+)
+BEGIN
+  SELECT RAISE(ABORT, 'audit event timestamp must be canonical');
+END;
+
+CREATE TRIGGER "audit_event_occurred_at_update_guard"
+BEFORE UPDATE OF "occurred_at" ON "audit_event"
+WHEN NOT (
+  typeof(NEW."occurred_at") = 'text'
+  AND length(NEW."occurred_at") = 24
+  AND strftime(
+    '%Y-%m-%dT%H:%M:%fZ', NEW."occurred_at", '+0 seconds'
+  ) IS NOT NULL
+  AND strftime(
+    '%Y-%m-%dT%H:%M:%fZ', NEW."occurred_at", '+0 seconds'
+  ) = NEW."occurred_at"
+)
+BEGIN
+  SELECT RAISE(ABORT, 'audit event timestamp must be canonical');
+END;
+
 CREATE TRIGGER "audit_event_actor_ref_insert_guard"
 BEFORE INSERT ON "audit_event"
 WHEN (NEW."actor_ref" IS NULL) <> (NEW."actor_ref_hash_version" IS NULL)
@@ -83,6 +131,51 @@ ALTER TABLE "oauth_client_report"
     OR (typeof("reporter_ref_hash_version") = 'integer'
       AND "reporter_ref_hash_version" = 1)
   );
+
+CREATE INDEX "oauth_client_report_invalid_created_at_idx"
+  ON "oauth_client_report" ("created_at")
+  WHERE NOT (
+    typeof("created_at") = 'text'
+    AND length("created_at") = 24
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds'
+    ) IS NOT NULL
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds'
+    ) = "created_at"
+  );
+
+CREATE TRIGGER "oauth_client_report_created_at_insert_guard"
+BEFORE INSERT ON "oauth_client_report"
+WHEN NOT (
+  typeof(NEW."created_at") = 'text'
+  AND length(NEW."created_at") = 24
+  AND strftime(
+    '%Y-%m-%dT%H:%M:%fZ', NEW."created_at", '+0 seconds'
+  ) IS NOT NULL
+  AND strftime(
+    '%Y-%m-%dT%H:%M:%fZ', NEW."created_at", '+0 seconds'
+  ) = NEW."created_at"
+)
+BEGIN
+  SELECT RAISE(ABORT, 'OAuth report timestamp must be canonical');
+END;
+
+CREATE TRIGGER "oauth_client_report_created_at_update_guard"
+BEFORE UPDATE OF "created_at" ON "oauth_client_report"
+WHEN NOT (
+  typeof(NEW."created_at") = 'text'
+  AND length(NEW."created_at") = 24
+  AND strftime(
+    '%Y-%m-%dT%H:%M:%fZ', NEW."created_at", '+0 seconds'
+  ) IS NOT NULL
+  AND strftime(
+    '%Y-%m-%dT%H:%M:%fZ', NEW."created_at", '+0 seconds'
+  ) = NEW."created_at"
+)
+BEGIN
+  SELECT RAISE(ABORT, 'OAuth report timestamp must be canonical');
+END;
 
 CREATE TRIGGER "oauth_client_report_ref_insert_guard"
 BEFORE INSERT ON "oauth_client_report"

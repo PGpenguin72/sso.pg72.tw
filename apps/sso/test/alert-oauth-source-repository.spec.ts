@@ -7,6 +7,7 @@ import {
 } from "../worker/alert-audit-source-repository";
 import {
   ALERT_OAUTH_REPORT_GROUP_QUERY,
+  ALERT_OAUTH_TIMESTAMP_INTEGRITY_QUERY,
   ALERT_OAUTH_TRACKED_DIMENSIONS_QUERY,
   AlertOAuthSourceRepositoryError,
   readOAuthAlertSource,
@@ -366,14 +367,14 @@ describe.sequential("OAuth report alert source repository", () => {
     ).toHaveLength(1);
 
     const missingSentinel = transformBatchDatabase((results) =>
-      replaceResultRows(results, 0, [])
+      replaceResultRows(results, 1, [])
     );
     expect((await read(asOf, { database: missingSentinel })).incomplete)
       .toHaveLength(1);
 
     const fingerprint = await deriveAlertHashKeyFingerprintV1(TEST_HMAC_KEY);
     const wrongDomain = transformBatchDatabase((results) =>
-      replaceResultRows(results, 0, [{
+      replaceResultRows(results, 1, [{
         domain: "pgid.wrong-alert-key-domain.v1",
         fingerprint_ref: fingerprint.value,
         hash_version: 1,
@@ -382,6 +383,42 @@ describe.sequential("OAuth report alert source repository", () => {
     await expect(read(asOf, { database: wrongDomain })).rejects.toEqual(
       new AlertOAuthSourceRepositoryError("source_invalid"),
     );
+  });
+
+  it("fails closed on global timestamp corruption before lexical report windows", async () => {
+    const asOf = "2031-01-05T13:00:00.000Z";
+    const rawMarker = "raw-oauth-time-must-not-leak";
+    const corruptProjections = [
+      [{ invalid_timestamp_exists: 1 }],
+      [],
+      [{ invalid_timestamp_exists: false }],
+      [{ invalid_timestamp_exists: "0" }],
+      [
+        { invalid_timestamp_exists: 0 },
+        { invalid_timestamp_exists: 0 },
+      ],
+      [{ invalid_timestamp_exists: 0, unexpected: rawMarker }],
+    ];
+    for (const projection of corruptProjections) {
+      const database = transformBatchDatabase((results) =>
+        replaceResultRows(results, 0, projection)
+      );
+      const failure = read(asOf, { database });
+      await expect(failure).rejects.toEqual(
+        new AlertOAuthSourceRepositoryError("source_invalid"),
+      );
+      await expect(failure).rejects.not.toThrow(rawMarker);
+    }
+
+    const plan = await env.PG72_ID_DB.prepare(
+      `EXPLAIN QUERY PLAN ${ALERT_OAUTH_TIMESTAMP_INTEGRITY_QUERY}`,
+    ).all<{ detail: string }>();
+    const details = plan.results.map(({ detail }) => detail).join("\n");
+    expect(ALERT_OAUTH_TIMESTAMP_INTEGRITY_QUERY).toContain("LIMIT 1");
+    expect(details).toContain(
+      "USING COVERING INDEX oauth_client_report_invalid_created_at_idx",
+    );
+    expect(details).not.toMatch(/SCAN oauth_client_report$/m);
   });
 
   it("enforces canonical count caps, nesting, and subset relationships", async () => {
@@ -406,7 +443,7 @@ describe.sequential("OAuth report alert source repository", () => {
       high_risk_60m: highRiskCount,
     });
     const withSourceRows = (rows: readonly Record<string, unknown>[]) =>
-      transformBatchDatabase((results) => replaceResultRows(results, 2, rows));
+      transformBatchDatabase((results) => replaceResultRows(results, 3, rows));
 
     const atCap = await read(asOf, {
       database: withSourceRows([base(1_000_000_000)]),
@@ -436,7 +473,7 @@ describe.sequential("OAuth report alert source repository", () => {
       trackedClient,
     );
     const withTracked = transformBatchDatabase((results) =>
-      replaceResultRows(results, 1, [{
+      replaceResultRows(results, 2, [{
         hash_version: 1,
         subject_ref: trackedReference.value,
       }])
@@ -455,7 +492,7 @@ describe.sequential("OAuth report alert source repository", () => {
       subject_ref: `${String(index).padStart(42, "0")}A`,
     }));
     const trackedOverflow = transformBatchDatabase((results) =>
-      replaceResultRows(results, 1, overflowRows)
+      replaceResultRows(results, 2, overflowRows)
     );
     const overflow = await read(asOf, { database: trackedOverflow });
     expect(overflow.incomplete).toHaveLength(1);
@@ -464,7 +501,7 @@ describe.sequential("OAuth report alert source repository", () => {
     const sourceOverflow = transformBatchDatabase((results) =>
       replaceResultRows(
         results,
-        2,
+        3,
         Array.from({ length: 1_001 }, () => ({})),
       )
     );
@@ -517,7 +554,7 @@ describe.sequential("OAuth report alert source repository", () => {
 
     const rawMarker = "raw-client-must-not-leak";
     const corrupt = transformBatchDatabase((results) =>
-      replaceResultRows(results, 2, [{
+      replaceResultRows(results, 3, [{
         client_id: rawMarker,
         reporter_user_id: "raw-reporter-must-not-leak",
         reporter_ref: null,
@@ -536,7 +573,7 @@ describe.sequential("OAuth report alert source repository", () => {
     expect(JSON.stringify(result)).not.toContain(rawMarker);
 
     const reporterTypeCorruption = transformBatchDatabase((results) =>
-      replaceResultRows(results, 2, [{
+      replaceResultRows(results, 3, [{
         client_id: "corrupt-reporter-type-client",
         reporter_user_id: 42,
         reporter_ref: `${"0".repeat(42)}A`,

@@ -70,6 +70,18 @@ function createDependencyFixture() {
        AFTER UPDATE ON "alert_hash_key_sentinel" BEGIN SELECT 1; END;
      CREATE TRIGGER "oauth_client_report_identity_update_guard"
        AFTER UPDATE ON "alert_hash_key_sentinel" BEGIN SELECT 1; END;
+     CREATE INDEX "audit_event_invalid_occurred_at_idx"
+       ON "alert_hash_key_sentinel" (id);
+     CREATE TRIGGER "audit_event_occurred_at_insert_guard"
+       BEFORE INSERT ON "alert_hash_key_sentinel" BEGIN SELECT 1; END;
+     CREATE TRIGGER "audit_event_occurred_at_update_guard"
+       BEFORE UPDATE ON "alert_hash_key_sentinel" BEGIN SELECT 1; END;
+     CREATE INDEX "oauth_client_report_invalid_created_at_idx"
+       ON "alert_hash_key_sentinel" (id);
+     CREATE TRIGGER "oauth_client_report_created_at_insert_guard"
+       BEFORE INSERT ON "alert_hash_key_sentinel" BEGIN SELECT 1; END;
+     CREATE TRIGGER "oauth_client_report_created_at_update_guard"
+       BEFORE UPDATE ON "alert_hash_key_sentinel" BEGIN SELECT 1; END;
      CREATE TABLE "alert_state" (
        id text,
        "minimum_numerator_count" integer,
@@ -138,6 +150,8 @@ function createDependencyFixture() {
      CREATE TABLE "audit_archive_batch" (id integer);
      CREATE TABLE "audit_archive_batch_item" (id integer);
      CREATE TABLE "audit_archive_attempt" (id integer);
+     CREATE TRIGGER "audit_archive_source_parent_time_guard"
+       BEFORE INSERT ON "audit_archive_source" BEGIN SELECT 1; END;
      CREATE TRIGGER "audit_archive_source_insert_guard"
        BEFORE INSERT ON "audit_archive_source" BEGIN SELECT 1; END;
      CREATE TRIGGER "audit_event_archive_identity_insert_guard"

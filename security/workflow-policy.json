@@ -1,24 +1,6 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "packageRoots": [".", "apps/sso", "apps/test-rp", "wiki"],
-  "workflows": {
-    "ci.yml": {
-      "allowedRunCommands": [
-        "pnpm install --frozen-lockfile",
-        "pnpm check",
-        "pnpm security:tools:install",
-        "pnpm security:check",
-        "pnpm dast:local"
-      ]
-    },
-    "dast-preview.yml": {
-      "allowedRunCommands": [
-        "node scripts/security/dast.mjs --authorize-only --preview",
-        "pnpm install --frozen-lockfile",
-        "pnpm dast:preview"
-      ]
-    }
-  },
   "environmentPolicy": {
     "exactValues": {
       "DAST_TARGET": "${{ vars.PGID_DAST_PREVIEW_ORIGIN }}",
@@ -51,87 +33,5 @@
         "steps": {}
       }
     }
-  },
-  "approvedPackageScripts": {
-    ".": {
-      "check": "pnpm test:clean-dist && pnpm --filter @pg72/id check && pnpm --filter @pg72/test-rp check && pnpm --filter @pg72/wiki check",
-      "dast:local": "node scripts/security/dast-local.mjs",
-      "dast:preview": "node scripts/security/dast.mjs --preview",
-      "security:artifact": "node scripts/security/artifact-gate.mjs",
-      "security:audit": "node scripts/security/accepted-advisories.mjs",
-      "security:check": "pnpm test:security && pnpm security:static && pnpm security:secrets && pnpm security:config && pnpm security:audit && pnpm security:artifact && pnpm security:inventory",
-      "security:config": "node scripts/security/workflow-config.mjs && node scripts/security/wrangler-config.mjs",
-      "security:inventory": "node scripts/security/dependency-inventory.mjs",
-      "security:secrets": "node scripts/security/secret-scan.mjs",
-      "security:static": "oxlint --type-aware apps/sso/worker apps/test-rp/worker",
-      "security:tools:install": "node scripts/security/install-tools.mjs",
-      "test:clean-dist": "node --test scripts/clean-package-dist.test.mjs",
-      "test:security": "node --test scripts/security/*.test.mjs"
-    },
-    "apps/sso": {
-      "build": "node ../../scripts/clean-package-dist.mjs && vite build && node scripts/remove-built-dev-vars.mjs",
-      "cf-typegen": "wrangler types --strict-vars false",
-      "check": "pnpm typecheck && pnpm test && pnpm build",
-      "test": "vitest run",
-      "typecheck": "pnpm cf-typegen && pnpm typecheck:raw",
-      "typecheck:raw": "tsc --build --pretty false"
-    },
-    "apps/test-rp": {
-      "build": "node ../../scripts/clean-package-dist.mjs && wrangler deploy --dry-run --outdir dist",
-      "cf-typegen": "wrangler types --strict-vars false",
-      "check": "pnpm typecheck && pnpm test && pnpm build",
-      "test": "vitest run",
-      "typecheck": "pnpm cf-typegen && pnpm typecheck:raw",
-      "typecheck:raw": "tsc --noEmit --pretty false"
-    },
-    "wiki": {
-      "build": "vitepress build .",
-      "check": "pnpm run test && pnpm run build && node scripts/validate-build.mjs",
-      "test": "node --test scripts/summary.test.mjs"
-    }
-  },
-  "allowedLeafCommands": [
-    "node ../../scripts/clean-package-dist.mjs",
-    "node --test scripts/clean-package-dist.test.mjs",
-    "node --test scripts/security/*.test.mjs",
-    "node --test scripts/summary.test.mjs",
-    "node scripts/remove-built-dev-vars.mjs",
-    "node scripts/security/accepted-advisories.mjs",
-    "node scripts/security/artifact-gate.mjs",
-    "node scripts/security/dast-local.mjs",
-    "node scripts/security/dast.mjs --authorize-only --preview",
-    "node scripts/security/dast.mjs --preview",
-    "node scripts/security/dependency-inventory.mjs",
-    "node scripts/security/install-tools.mjs",
-    "node scripts/security/secret-scan.mjs",
-    "node scripts/security/workflow-config.mjs",
-    "node scripts/security/wrangler-config.mjs",
-    "node scripts/validate-build.mjs",
-    "oxlint --type-aware apps/sso/worker apps/test-rp/worker",
-    "pnpm install --frozen-lockfile",
-    "tsc --build --pretty false",
-    "tsc --noEmit --pretty false",
-    "vite build",
-    "vitepress build .",
-    "vitest run",
-    "wrangler deploy --dry-run --outdir dist",
-    "wrangler types --strict-vars false"
-  ],
-  "allowedLocalScripts": [
-    "apps/sso/scripts/remove-built-dev-vars.mjs",
-    "scripts/clean-package-dist.mjs",
-    "scripts/clean-package-dist.test.mjs",
-    "scripts/security/*.test.mjs",
-    "scripts/security/accepted-advisories.mjs",
-    "scripts/security/artifact-gate.mjs",
-    "scripts/security/dast-local.mjs",
-    "scripts/security/dast.mjs",
-    "scripts/security/dependency-inventory.mjs",
-    "scripts/security/install-tools.mjs",
-    "scripts/security/secret-scan.mjs",
-    "scripts/security/workflow-config.mjs",
-    "scripts/security/wrangler-config.mjs",
-    "wiki/scripts/summary.test.mjs",
-    "wiki/scripts/validate-build.mjs"
-  ]
+  }
 }

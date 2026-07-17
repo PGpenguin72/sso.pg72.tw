@@ -23,6 +23,17 @@ function fixture() {
   return directory;
 }
 
+function reviewedGeneratedFallbacks(body) {
+  const value = ["better", "auth", "secret", "12345678901234567890"].join("-");
+  const literal = JSON.stringify(value);
+  return [
+    body,
+    `var DEFAULT_SECRET = ${literal};`,
+    `function buildSecretConfig(legacySecret) { return { legacySecret: legacySecret && legacySecret !== ${literal} ? legacySecret : void 0 }; }`,
+    `async function createAuthContext(legacySecret) { let secret; secret = legacySecret || ${literal}; }`,
+  ].join("\n");
+}
+
 test("accepts a bounded allowlisted Worker artifact", (context) => {
   const directory = fixture();
   context.after(() => rmSync(directory, { force: true, recursive: true }));
@@ -44,7 +55,7 @@ test("rejects private machine paths and embedded secrets", (context) => {
   assert.throws(() => validateArtifactFiles(directory, basePolicy), /private machine path/);
 
   const secret = "F".repeat(40);
-  writeFileSync(path.join(directory, "index.js"), `BETTER_AUTH_SECRET=${secret}`);
+  writeFileSync(path.join(directory, "index.js"), `const BETTER_AUTH_SECRET="${secret}";`);
   assert.throws(
     () => validateArtifactFiles(directory, basePolicy),
     (error) => {
@@ -76,7 +87,10 @@ test("uses the shared redacted family engine for binary artifact content", (cont
 test("allows only exact reviewed Worker error-enum assignments", (context) => {
   const directory = fixture();
   context.after(() => rmSync(directory, { force: true, recursive: true }));
-  writeFileSync(path.join(directory, "index.js"), 'INVALID_PASSWORD: "Invalid password",');
+  writeFileSync(
+    path.join(directory, "index.js"),
+    reviewedGeneratedFallbacks('const errors = { INVALID_PASSWORD: "Invalid password" };'),
+  );
   assert.doesNotThrow(() =>
     validateArtifactFiles(directory, basePolicy, { scanRoot: "artifact:worker" }),
   );
@@ -87,7 +101,9 @@ test("allows only exact reviewed Worker error-enum assignments", (context) => {
 
   writeFileSync(
     path.join(directory, "index.js"),
-    'INVALID_PASSWORD: "Invalid password with appended material",',
+    reviewedGeneratedFallbacks(
+      'const errors = { INVALID_PASSWORD: "Invalid password with appended material" };',
+    ),
   );
   assert.throws(
     () => validateArtifactFiles(directory, basePolicy, { scanRoot: "artifact:worker" }),

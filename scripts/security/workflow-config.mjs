@@ -50,6 +50,116 @@ const codeOwnedExpressionContexts = Object.freeze([
   "vars.PGID_DAST_PREVIEW_ORIGIN",
   "vars.PGID_DAST_PREVIEW_OPT_IN",
 ]);
+const codeOwnedPackageRoots = Object.freeze([".", "apps/sso", "apps/test-rp", "wiki"]);
+const codeOwnedWorkflowRuns = Object.freeze({
+  "ci.yml": Object.freeze({
+    "verify:3": "pnpm install --frozen-lockfile",
+    "verify:4": "pnpm check",
+    "verify:5": "pnpm security:tools:install",
+    "verify:6": "pnpm security:check",
+    "verify:7": "pnpm dast:local",
+  }),
+  "dast-preview.yml": Object.freeze({
+    "safe-dast:1": "node scripts/security/dast.mjs --authorize-only --preview",
+    "safe-dast:4": "pnpm install --frozen-lockfile",
+    "safe-dast:5": "pnpm dast:preview",
+  }),
+});
+const codeOwnedPackageScripts = Object.freeze({
+  ".": Object.freeze({
+    check: "pnpm test:clean-dist && pnpm --filter @pg72/id check && pnpm --filter @pg72/test-rp check && pnpm --filter @pg72/wiki check",
+    "dast:local": "node scripts/security/dast-local.mjs",
+    "dast:preview": "node scripts/security/dast.mjs --preview",
+    "security:artifact": "node scripts/security/artifact-gate.mjs",
+    "security:audit": "node scripts/security/accepted-advisories.mjs",
+    "security:check": "pnpm test:security && pnpm security:static && pnpm security:secrets && pnpm security:config && pnpm security:audit && pnpm security:artifact && pnpm security:inventory",
+    "security:config": "node scripts/security/workflow-config.mjs && node scripts/security/wrangler-config.mjs",
+    "security:inventory": "node scripts/security/dependency-inventory.mjs",
+    "security:secrets": "node scripts/security/secret-scan.mjs",
+    "security:static": "oxlint --type-aware apps/sso/worker apps/test-rp/worker",
+    "security:tools:install": "node scripts/security/install-tools.mjs",
+    "test:clean-dist": "node --test scripts/clean-package-dist.test.mjs",
+    "test:security": "node --test scripts/security/*.test.mjs",
+  }),
+  "apps/sso": Object.freeze({
+    build: "node ../../scripts/clean-package-dist.mjs && vite build && node scripts/remove-built-dev-vars.mjs",
+    "cf-typegen": "wrangler types --strict-vars false",
+    check: "pnpm typecheck && pnpm test && pnpm build",
+    test: "vitest run",
+    typecheck: "pnpm cf-typegen && pnpm typecheck:raw",
+    "typecheck:raw": "tsc --build --pretty false",
+  }),
+  "apps/test-rp": Object.freeze({
+    build: "node ../../scripts/clean-package-dist.mjs && wrangler deploy --dry-run --outdir dist",
+    "cf-typegen": "wrangler types --strict-vars false",
+    check: "pnpm typecheck && pnpm test && pnpm build",
+    test: "vitest run",
+    typecheck: "pnpm cf-typegen && pnpm typecheck:raw",
+    "typecheck:raw": "tsc --noEmit --pretty false",
+  }),
+  wiki: Object.freeze({
+    build: "vitepress build .",
+    check: "pnpm run test && pnpm run build && node scripts/validate-build.mjs",
+    test: "node --test scripts/summary.test.mjs",
+  }),
+});
+const codeOwnedLeafCommands = Object.freeze([
+  "node ../../scripts/clean-package-dist.mjs",
+  "node --test scripts/clean-package-dist.test.mjs",
+  "node --test scripts/security/*.test.mjs",
+  "node --test scripts/summary.test.mjs",
+  "node scripts/remove-built-dev-vars.mjs",
+  "node scripts/security/accepted-advisories.mjs",
+  "node scripts/security/artifact-gate.mjs",
+  "node scripts/security/dast-local.mjs",
+  "node scripts/security/dast.mjs --authorize-only --preview",
+  "node scripts/security/dast.mjs --preview",
+  "node scripts/security/dependency-inventory.mjs",
+  "node scripts/security/install-tools.mjs",
+  "node scripts/security/secret-scan.mjs",
+  "node scripts/security/workflow-config.mjs",
+  "node scripts/security/wrangler-config.mjs",
+  "node scripts/validate-build.mjs",
+  "oxlint --type-aware apps/sso/worker apps/test-rp/worker",
+  "pnpm install --frozen-lockfile",
+  "tsc --build --pretty false",
+  "tsc --noEmit --pretty false",
+  "vite build",
+  "vitepress build .",
+  "vitest run",
+  "wrangler deploy --dry-run --outdir dist",
+  "wrangler types --strict-vars false",
+]);
+const codeOwnedLocalScripts = Object.freeze([
+  "apps/sso/scripts/remove-built-dev-vars.mjs",
+  "scripts/clean-package-dist.mjs",
+  "scripts/clean-package-dist.test.mjs",
+  "scripts/security/*.test.mjs",
+  "scripts/security/accepted-advisories.mjs",
+  "scripts/security/artifact-gate.mjs",
+  "scripts/security/dast-local.mjs",
+  "scripts/security/dast.mjs",
+  "scripts/security/dependency-inventory.mjs",
+  "scripts/security/install-tools.mjs",
+  "scripts/security/secret-scan.mjs",
+  "scripts/security/workflow-config.mjs",
+  "scripts/security/wrangler-config.mjs",
+  "wiki/scripts/summary.test.mjs",
+  "wiki/scripts/validate-build.mjs",
+]);
+const codeOwnedArtifactUpload = Object.freeze({
+  filename: "ci.yml",
+  step: "verify:8",
+  name: "Upload release assurance inventories",
+  uses: "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
+  with: Object.freeze({
+    name: "release-assurance-${{ github.sha }}",
+    path: ".artifacts/release",
+    "if-no-files-found": "error",
+    "retention-days": 7,
+    "include-hidden-files": false,
+  }),
+});
 
 function forbiddenEnvironmentKey(key) {
   const normalized = key.toUpperCase();
@@ -338,35 +448,45 @@ function exactPattern(value) {
   );
 }
 
-export function dangerousCommandErrors(command) {
+function normalizeCommand(value) {
+  if (typeof value !== "string") return { errors: ["command must be a string"], value: "" };
   const errors = [];
-  if (/GITHUB_(?:ENV|PATH)|::(?:add-path|set-env)::/i.test(command)) {
-    errors.push("contains a forbidden GitHub environment/path mutation");
+  if (/[^\t\n\r\x20-\x7e]/.test(value) || /\r(?!\n)/.test(value)) {
+    errors.push("contains a forbidden control character");
   }
-  if (/\$\{\{\s*(?:github\.token|secrets\.)/i.test(command)) {
-    errors.push("contains a forbidden credential expression context");
+  return { errors, value: value.replaceAll("\r\n", "\n") };
+}
+
+const codeOwnedCommandFragments = new Set([
+  ...Object.values(codeOwnedWorkflowRuns).flatMap((commands) => Object.values(commands)),
+  ...codeOwnedLeafCommands,
+  ...Object.values(codeOwnedPackageScripts).flatMap((scripts) =>
+    Object.values(scripts).flatMap((value) => value.split("&&").map((command) => command.trim())),
+  ),
+]);
+
+export function dangerousCommandErrors(command) {
+  const normalized = normalizeCommand(command);
+  if (!codeOwnedCommandFragments.has(normalized.value)) {
+    normalized.errors.push("is not a code-owned exact command");
   }
-  for (const match of command.matchAll(
-    /(?:^|[\s;&|])(?:export\s+|env\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/g,
-  )) {
-    if (forbiddenEnvironmentKey(match[1])) {
-      errors.push("contains a forbidden execution/credential environment assignment");
+  return normalized.errors;
+}
+
+function validateCommandPolicyDefinition(policy) {
+  const errors = [];
+  if (JSON.stringify(policy.packageRoots) !== JSON.stringify(codeOwnedPackageRoots)) {
+    errors.push("packageRoots differ from the code-owned exact roots");
+  }
+  for (const forbidden of [
+    "workflows",
+    "approvedPackageScripts",
+    "allowedLeafCommands",
+    "allowedLocalScripts",
+  ]) {
+    if (Object.hasOwn(policy, forbidden)) {
+      errors.push(`workflow policy must not define commands through ${forbidden}`);
     }
-  }
-  if (/(?:^|[\s;&|])(?:curl|wget|nc|ncat|ssh|scp|rsync)\b/i.test(command)) {
-    errors.push("contains a forbidden nonlocal network command");
-  }
-  if (/https?:\/\/(?!127\.0\.0\.1(?::\d+)?(?:[/'"\s]|$))/i.test(command)) {
-    errors.push("contains a forbidden nonlocal network target");
-  }
-  if (/\bwrangler\b[^\n]*(?:--remote|--preview)\b/i.test(command)) {
-    errors.push("contains a remote/Preview Wrangler command");
-  }
-  if (/\bwrangler\s+(?:d1|kv|r2|queues?|pages|secret|secrets-store)\b/i.test(command)) {
-    errors.push("contains a forbidden Wrangler resource command");
-  }
-  if (/\bwrangler\s+(?:deploy|versions\s+upload)\b/i.test(command) && !/--dry-run\b/.test(command)) {
-    errors.push("contains a non-dry-run deployment command");
   }
   return errors;
 }
@@ -374,7 +494,7 @@ export function dangerousCommandErrors(command) {
 export function loadWorkflowCommandContext(root = repoRoot, policy = workflowPolicy) {
   const packagesByRoot = {};
   const packageNameToRoot = {};
-  for (const packageRoot of policy.packageRoots) {
+  for (const packageRoot of codeOwnedPackageRoots) {
     const manifest = JSON.parse(
       readFileSync(path.join(root, packageRoot, "package.json"), "utf8"),
     );
@@ -384,14 +504,14 @@ export function loadWorkflowCommandContext(root = repoRoot, policy = workflowPol
   return { policy, packagesByRoot, packageNameToRoot };
 }
 
-function localScriptError(command, packageRoot, policy) {
+function localScriptError(command, packageRoot) {
   if (!command.startsWith("node ")) return null;
   const tokens = command.split(/\s+/);
   const scriptIndex = tokens[1] === "--test" ? 2 : 1;
   const script = tokens[scriptIndex];
   if (!script || script.startsWith("-")) return `does not name an approved local Node script: ${command}`;
   const resolved = path.posix.normalize(path.posix.join(packageRoot, script));
-  const allowed = policy.allowedLocalScripts.some((entry) => exactPattern(entry).test(resolved));
+  const allowed = codeOwnedLocalScripts.some((entry) => exactPattern(entry).test(resolved));
   return allowed ? null : `uses an unapproved local script: ${resolved}`;
 }
 
@@ -403,13 +523,13 @@ function expandPackageScript(packageRoot, scriptName, context, state) {
   }
   const packageData = context.packagesByRoot[packageRoot];
   const actual = packageData?.scripts?.[scriptName];
-  const approved = context.policy.approvedPackageScripts[packageRoot]?.[scriptName];
+  const approved = codeOwnedPackageScripts[packageRoot]?.[scriptName];
   if (typeof actual !== "string") {
     state.errors.push(`missing package script ${key}`);
     return;
   }
   if (approved !== actual) {
-    state.errors.push(`package script ${key} is not the exact approved command`);
+    state.errors.push(`package script ${key} differs from the code-owned exact value`);
     return;
   }
   state.stack.push(key);
@@ -421,8 +541,9 @@ function expandPackageScript(packageRoot, scriptName, context, state) {
 
 function expandCommand(command, packageRoot, context, state) {
   state.errors.push(...dangerousCommandErrors(command));
-  if (context.policy.allowedLeafCommands.includes(command)) {
-    const localError = localScriptError(command, packageRoot, context.policy);
+  if (!codeOwnedCommandFragments.has(normalizeCommand(command).value)) return;
+  if (codeOwnedLeafCommands.includes(command)) {
+    const localError = localScriptError(command, packageRoot);
     if (localError) state.errors.push(localError);
     else state.leaves.push(`${packageRoot}:${command}`);
     return;
@@ -446,28 +567,79 @@ function expandCommand(command, packageRoot, context, state) {
   expandPackageScript(packageRoot, scriptName, context, state);
 }
 
-export function validateWorkflowCommands(document, filename, context) {
-  const errors = [...validateWorkflowEnvironment(document, filename, context.policy)];
-  const allowed = context.policy.workflows[path.basename(filename)]?.allowedRunCommands;
-  if (!allowed) return [`${path.basename(filename)} lacks an explicit command policy`];
-  const actualRunCommands = entries(document.jobs).flatMap(([, job]) =>
-    (job.steps ?? []).flatMap((step) => (typeof step.run === "string" ? [step.run] : [])),
-  );
-  if (JSON.stringify(actualRunCommands) !== JSON.stringify(allowed)) {
-    errors.push(`${path.basename(filename)} run commands/order differ from the exact policy`);
+function stableMapping(value) {
+  return JSON.stringify(Object.entries(value ?? {}).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+export function validateArtifactUploads(document, filename) {
+  const basename = path.basename(filename);
+  const errors = [];
+  const uploads = [];
+  for (const [jobName, job] of entries(document.jobs)) {
+    for (const [index, step] of (job.steps ?? []).entries()) {
+      if (step.uses?.startsWith("actions/upload-artifact@")) {
+        uploads.push({ jobName, index, step });
+      }
+    }
   }
+  if (basename !== codeOwnedArtifactUpload.filename) {
+    if (uploads.length > 0) errors.push(`${basename} must not upload release artifacts`);
+    return errors;
+  }
+  if (uploads.length !== 1) {
+    errors.push(`${basename} must contain exactly one code-owned release artifact upload`);
+    return errors;
+  }
+  const [{ jobName, index, step }] = uploads;
+  if (`${jobName}:${index}` !== codeOwnedArtifactUpload.step) {
+    errors.push(`${basename} release artifact upload moved from its exact job/step`);
+  }
+  if (step.name !== codeOwnedArtifactUpload.name) {
+    errors.push(`${basename} release artifact upload name differs from the code-owned value`);
+  }
+  if (step.uses !== codeOwnedArtifactUpload.uses) {
+    errors.push(`${basename} release artifact upload action differs from the code-owned value`);
+  }
+  if (JSON.stringify(Object.keys(step).sort()) !== JSON.stringify(["name", "uses", "with"])) {
+    errors.push(`${basename} release artifact upload step has extra execution controls`);
+  }
+  if (stableMapping(step.with) !== stableMapping(codeOwnedArtifactUpload.with)) {
+    errors.push(`${basename} release artifact upload options differ from the exact contract`);
+  }
+  return errors;
+}
+
+export function validateWorkflowCommands(document, filename, context) {
+  const basename = path.basename(filename);
+  const errors = [
+    ...validateWorkflowEnvironment(document, filename, context.policy),
+    ...validateCommandPolicyDefinition(context.policy),
+    ...validateArtifactUploads(document, filename),
+  ];
+  const expected = codeOwnedWorkflowRuns[basename];
+  if (!expected) return [...new Set([...errors, `${basename} lacks a code-owned command map`])];
+
+  const actual = {};
   for (const [jobName, job] of entries(document.jobs)) {
     for (const [index, step] of (job.steps ?? []).entries()) {
       if (typeof step.run !== "string") continue;
-      const label = `${jobName}.steps[${index}]`;
-      if (!allowed.includes(step.run)) {
-        errors.push(`${label} run command is not explicitly approved`);
-        continue;
-      }
-      const state = { errors: [], leaves: [], stack: [] };
-      expandCommand(step.run, ".", context, state);
-      errors.push(...state.errors.map((error) => `${label} ${error}`));
+      const key = `${jobName}:${index}`;
+      const normalized = normalizeCommand(step.run);
+      errors.push(...normalized.errors.map((error) => `${jobName}.steps[${index}] ${error}`));
+      actual[key] = normalized.value;
     }
+  }
+  if (stableMapping(actual) !== stableMapping(expected)) {
+    errors.push(`${basename} job/step run map differs from the code-owned exact map`);
+  }
+
+  for (const [key, command] of Object.entries(expected)) {
+    if (actual[key] !== command) continue;
+    const [jobName, index] = key.split(":");
+    const label = `${jobName}.steps[${index}]`;
+    const state = { errors: [], leaves: [], stack: [] };
+    expandCommand(command, ".", context, state);
+    errors.push(...state.errors.map((error) => `${label} ${error}`));
   }
   return [...new Set(errors)];
 }
@@ -505,7 +677,7 @@ function main() {
     .sort();
   assert.ok(files.length > 0, "no GitHub workflows found");
   const errors = [];
-  if (workflowPolicy.schemaVersion !== 1) errors.push("workflow policy schemaVersion must be 1");
+  if (workflowPolicy.schemaVersion !== 2) errors.push("workflow policy schemaVersion must be 2");
   if (dastPolicy.schemaVersion !== 2) errors.push("DAST policy schemaVersion must be 2");
   if (JSON.stringify(dastPolicy.preview.approvedActors) !== JSON.stringify(["PGpenguin72"])) {
     errors.push("DAST policy approved actors must be exactly PGpenguin72");

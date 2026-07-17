@@ -7,6 +7,7 @@ import {
   dangerousCommandErrors,
   expectedPreviewJobCondition,
   loadWorkflowCommandContext,
+  validateArtifactUploads,
   validateWorkflowCommands,
   validateWorkflowDocument,
   validateWorkflowEnvironment,
@@ -55,8 +56,7 @@ test("rejects remote or live Wrangler commands", () => {
   const value = workflow();
   value.jobs.verify.steps.push({ run: "pnpm wrangler deploy --remote" });
   const errors = validateWorkflowDocument(value, "ci.yml", tools);
-  assert.ok(errors.some((error) => error.includes("remote/Preview Wrangler")));
-  assert.ok(errors.some((error) => error.includes("non-dry-run")));
+  assert.ok(errors.some((error) => error.includes("code-owned exact command")));
 });
 
 test("rejects local actions and reusable workflows instead of trusting hidden commands", () => {
@@ -281,6 +281,59 @@ test("rejects multiline environment-file writes and command-level environment in
   }
 });
 
+test("exact job and step maps reject shell quote composition, redirects, and control bytes", () => {
+  const baseline = YAML.parse(
+    readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8"),
+  );
+  const context = loadWorkflowCommandContext();
+  const stepIndex = baseline.jobs.verify.steps.findIndex((step) => step.run === "pnpm check");
+  for (const command of [
+    '"pnpm" "check"',
+    "p'n'p'm' check",
+    "pnpm check && curl https://example.invalid",
+    "PATH=/tmp:$PATH pnpm check",
+    'echo "NODE_OPTIONS=--require ./payload.cjs" >> "$GITHUB_ENV"',
+    "pnpm check > gate.txt",
+    "pnpm check\r\n",
+    "pnpm check\u0000",
+  ]) {
+    const document = structuredClone(baseline);
+    document.jobs.verify.steps[stepIndex].run = command;
+    assert.notDeepEqual(validateWorkflowCommands(document, "ci.yml", context), [], command);
+    assert.notDeepEqual(dangerousCommandErrors(command), [], command);
+  }
+});
+
+test("fixes the release artifact upload to one reviewed directory and exact options", () => {
+  const baseline = YAML.parse(
+    readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8"),
+  );
+  assert.deepEqual(validateArtifactUploads(baseline, "ci.yml"), []);
+  const uploadIndex = baseline.jobs.verify.steps.findIndex((step) =>
+    step.uses?.startsWith("actions/upload-artifact@"),
+  );
+
+  for (const mutate of [
+    (step) => (step.with.path = "."),
+    (step) => (step.with.path = "**/*"),
+    (step) => (step.with.path = ".artifacts/release/"),
+    (step) => (step.with.name = "release-assurance"),
+    (step) => (step.with["if-no-files-found"] = "warn"),
+    (step) => (step.with["retention-days"] = 30),
+    (step) => (step.with["include-hidden-files"] = true),
+    (step) => delete step.with["include-hidden-files"],
+    (step) => (step.if = "always()"),
+  ]) {
+    const document = structuredClone(baseline);
+    mutate(document.jobs.verify.steps[uploadIndex]);
+    assert.notDeepEqual(validateArtifactUploads(document, "ci.yml"), []);
+  }
+
+  const duplicate = structuredClone(baseline);
+  duplicate.jobs.verify.steps.push(structuredClone(duplicate.jobs.verify.steps[uploadIndex]));
+  assert.notDeepEqual(validateArtifactUploads(duplicate, "ci.yml"), []);
+});
+
 test("enforces exact Preview actor/ref condition and authorization step order", () => {
   const document = YAML.parse(
     readFileSync(new URL("../../.github/workflows/dast-preview.yml", import.meta.url), "utf8"),
@@ -313,16 +366,17 @@ test("enforces exact Preview actor/ref condition and authorization step order", 
   }
 });
 
-test("rejects indirect deploys even when package and leaf allowlists are changed together", () => {
+test("rejects indirect deploys even when policy command extensions are changed together", () => {
   const document = YAML.parse(
     readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8"),
   );
   const context = structuredClone(loadWorkflowCommandContext());
   context.packagesByRoot["."].scripts["security:check"] = "wrangler deploy";
-  context.policy.approvedPackageScripts["."]["security:check"] = "wrangler deploy";
-  context.policy.allowedLeafCommands.push("wrangler deploy");
+  context.policy.approvedPackageScripts = { ".": { "security:check": "wrangler deploy" } };
+  context.policy.allowedLeafCommands = ["wrangler deploy"];
   const errors = validateWorkflowCommands(document, "ci.yml", context);
-  assert.ok(errors.some((error) => error.includes("non-dry-run deployment")));
+  assert.ok(errors.some((error) => error.includes("must not define commands")));
+  assert.ok(errors.some((error) => error.includes("code-owned exact value")));
 });
 
 test("rejects unallowlisted local scripts and nonlocal network commands", () => {
@@ -331,10 +385,8 @@ test("rejects unallowlisted local scripts and nonlocal network commands", () => 
   );
   const context = structuredClone(loadWorkflowCommandContext());
   context.packagesByRoot["."].scripts["security:check"] = "node scripts/unreviewed.mjs";
-  context.policy.approvedPackageScripts["."]["security:check"] = "node scripts/unreviewed.mjs";
-  context.policy.allowedLeafCommands.push("node scripts/unreviewed.mjs");
   const errors = validateWorkflowCommands(document, "ci.yml", context);
-  assert.ok(errors.some((error) => error.includes("unapproved local script")));
+  assert.ok(errors.some((error) => error.includes("code-owned exact value")));
 
   for (const command of [
     "curl https://example.invalid",

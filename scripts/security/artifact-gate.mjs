@@ -111,6 +111,8 @@ export function validateArtifactFiles(
       assert.ok(!forbidden.pattern.test(text), `${file.display} contains ${forbidden.name}`);
     }
     for (const rule of scanBufferForSecrets(bytes, {
+      enforceGeneratedLiteralContract:
+        scanRoot === "artifact:worker" && file.relative === filePolicy.entrypoint,
       relativePath: `${scanRoot}/${file.relative}`,
     })) {
       assert.fail(`${file.display} contains redacted secret family [${rule}]`);

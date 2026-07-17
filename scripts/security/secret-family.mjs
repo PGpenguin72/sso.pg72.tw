@@ -3,6 +3,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
+import { analyzeTypeScriptStaticValues } from "./typescript-static-values.mjs";
+
 export const DEFAULT_MAX_SCAN_BYTES = 8 * 1024 * 1024;
 
 const fullyExcludedDirectories = new Set([".git"]);
@@ -18,65 +20,6 @@ const tokenRules = [
 
 const MIN_ASSIGNMENT_VALUE_CHARS = 8;
 const MAX_ASSIGNMENT_VALUE_CHARS = 4096;
-const assignmentDeclarationSource =
-  "(?:(?:export[\\t ]+const|const|let|var)[\\t ]+)?";
-const bareAssignmentKeySource = "([A-Za-z_$][A-Za-z0-9_$./@-]{0,127})";
-
-function escapedDelimiter(quote) {
-  return quote === "`" ? "\\`" : quote;
-}
-
-const assignmentKeySources = [
-  ...['"', "'", "`"].map((quote) => {
-    const delimiter = escapedDelimiter(quote);
-    return `${delimiter}((?:\\\\[^\\r\\n]|(?!${delimiter})[^\\r\\n]){1,128})${delimiter}`;
-  }),
-  bareAssignmentKeySource,
-];
-
-function assignmentPrefixSource(keySource) {
-  return `^[\\t ]*${assignmentDeclarationSource}${keySource}[\\t ]*[:=][\\t ]*`;
-}
-
-const quotedAssignmentPatterns = assignmentKeySources.flatMap((keySource) =>
-  ['"', "'", "`"].map((quote) => {
-    const delimiter = escapedDelimiter(quote);
-    return {
-      pattern: new RegExp(
-        `${assignmentPrefixSource(keySource)}${delimiter}((?:\\\\[\\s\\S]|(?!${delimiter})[\\s\\S]){${MIN_ASSIGNMENT_VALUE_CHARS},${MAX_ASSIGNMENT_VALUE_CHARS}})${delimiter}[\\t ]*[,;]?[\\t ]*(?:(?:#|//).*)?$`,
-        "gm",
-      ),
-      quote,
-    };
-  }),
-);
-const oversizedQuotedAssignmentPatterns = assignmentKeySources.flatMap((keySource) =>
-  ['"', "'", "`"].map((quote) => {
-    const delimiter = escapedDelimiter(quote);
-    return new RegExp(
-      `${assignmentPrefixSource(keySource)}${delimiter}(?:\\\\[\\s\\S]|(?!${delimiter})[\\s\\S]){${MAX_ASSIGNMENT_VALUE_CHARS + 1}}`,
-      "gm",
-    );
-  }),
-);
-const unquotedAssignmentPatterns = assignmentKeySources.map(
-  (keySource) =>
-    new RegExp(
-      `${assignmentPrefixSource(keySource)}([^\\r\\n]{${MIN_ASSIGNMENT_VALUE_CHARS},${MAX_ASSIGNMENT_VALUE_CHARS}})$`,
-      "gm",
-    ),
-);
-const oversizedUnquotedAssignmentPatterns = assignmentKeySources.map(
-  (keySource) =>
-    new RegExp(
-      `${assignmentPrefixSource(keySource)}[^\\r\\n]{${MAX_ASSIGNMENT_VALUE_CHARS + 1}}`,
-      "gm",
-    ),
-);
-const binaryAssignmentPattern = new RegExp(
-  `(?:^|[\\x00\\r\\n])(?:(?:export[\\x00\\t ]+const|const|let|var)[\\x00\\t ]+)?${bareAssignmentKeySource}[\\x00\\t ]{0,8}[:=][\\x00\\t ]{0,8}([^\\x00\\r\\n]{${MIN_ASSIGNMENT_VALUE_CHARS},${MAX_ASSIGNMENT_VALUE_CHARS}})`,
-  "gm",
-);
 
 // These reviewed source fixtures and generated error enums are not substring
 // heuristics. An allowance applies only when raw path, normalized key, and
@@ -182,12 +125,57 @@ const auditedAssignmentAllowances = new Map([
         "User already has a password. Provide that to delete the account.",
       ],
       ["PASSWORD_ALREADY_SET", "User already has a password set"],
-      ["DEFAULT_SECRET", "better-auth-secret-12345678901234567890"],
       ["PEM_CONVERTER_PRIVATE_KEY_TAG", "PRIVATE KEY"],
+      ["PRIVATE_KEY_TAG", "PRIVATE KEY"],
       ["CHALLENGE_PASSWORD_ATTRIBUTE_NAME", "Challenge Password"],
       ["CLIENT_SECRET_PREFIX", "pg72_cs_"],
       ["OPAQUE_ACCESS_TOKEN", "pg72_at_"],
       ["REFRESH_TOKEN", "pg72_rt_"],
+    ]),
+  ],
+]);
+
+const auditedAssignmentDigestAllowances = new Map([
+  [
+    "apps/sso/src/App.tsx",
+    new Map([
+      [
+        "REFRESH_TOKEN_REQUIRES_OFFLINE_ACCESS",
+        new Set(["bbf58f13f3573e210bba2822828db86d1b334f38cb40c7892246fcc83e2b3726"]),
+      ],
+    ]),
+  ],
+  [
+    "apps/sso/test/worker.spec.ts",
+    new Map([
+      [
+        "CLIENT_SECRET_POST_MIGRATION",
+        new Set(["0672e4773de59a6c943466916c939e0bab895a8735668a1d47496439f36e69e3"]),
+      ],
+    ]),
+  ],
+]);
+
+const auditedStaticLiteralAllowances = new Map([
+  [
+    "artifact:worker/index.js",
+    new Map([
+      [
+        "high-entropy-string",
+        new Set([
+          "775ad11d37eebfe985acd54acdaa5d2c40181421389044b87d29d62182a43e6c",
+          "7543b37fa53fde2c84f07fd39f368555966aa1c0eb2f2fd26b294d79966e290e",
+        ]),
+      ],
+    ]),
+  ],
+  [
+    "apps/sso/test/avatar.spec.ts",
+    new Map([
+      [
+        "high-entropy-string",
+        new Set(["c2940c2c0aaac7becda21c33fe8685c27f4ee3e94c4af302cd0d44592bd9c3e6"]),
+      ],
     ]),
   ],
 ]);
@@ -225,122 +213,357 @@ function isSecretAssignmentKey(normalizedKey) {
 function isAuditedFixture(relativePath, normalizedKey, value) {
   return (
     typeof relativePath === "string" &&
-    auditedAssignmentAllowances.get(relativePath)?.get(normalizedKey)?.has(value) === true
+    (auditedAssignmentAllowances.get(relativePath)?.get(normalizedKey)?.has(value) === true ||
+      auditedAssignmentDigestAllowances
+        .get(relativePath)
+        ?.get(normalizedKey)
+        ?.has(sha256(value)) === true)
   );
 }
 
-function unquotedValue(value) {
-  return value
-    .replace(/[\t ]+(?:#|\/\/).*$/, "")
-    .replace(/[\t ]*[,;][\t ]*$/, "")
-    .trim();
+const generatedSensitiveLiteralContract = Object.freeze({
+  path: "artifact:worker/index.js",
+  category: "better-auth-default-secret",
+  digest: "2988a24c0bcc440e2c600c28394590bf7990f260cbf23503e03ee00092086e1f",
+  form: "string-literal",
+  contexts: Object.freeze([
+    "variable:DEFAULT_SECRET:initializer>VariableDeclarationList>FirstStatement",
+    "binary:ExclamationEqualsEqualsToken:right:legacySecret>binary:AmpersandAmpersandToken:right:legacySecret>conditional:condition>property:legacySecret:initializer",
+    "binary:BarBarToken:right:legacySecret>binary:FirstAssignment:right:secret>statement:expression>Block",
+  ]),
+});
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
-function assignments(content) {
-  const matches = [];
-  for (const { pattern, quote } of quotedAssignmentPatterns) {
-    pattern.lastIndex = 0;
-    for (let match = pattern.exec(content); match; match = pattern.exec(content)) {
-      matches.push({
-        normalizedKey: normalizeAssignmentKey(match[1]),
-        quotedValue: true,
-        valueQuote: quote,
-        value: match[2],
-      });
-    }
-  }
-  for (const pattern of unquotedAssignmentPatterns) {
-    pattern.lastIndex = 0;
-    for (let match = pattern.exec(content); match; match = pattern.exec(content)) {
-      const value = unquotedValue(match[2]);
-      if (value.length >= MIN_ASSIGNMENT_VALUE_CHARS && !/^["'`]/.test(value)) {
-        matches.push({ normalizedKey: normalizeAssignmentKey(match[1]), quotedValue: false, value });
-      }
-    }
-  }
-  binaryAssignmentPattern.lastIndex = 0;
-  for (
-    let match = binaryAssignmentPattern.exec(content);
-    match;
-    match = binaryAssignmentPattern.exec(content)
-  ) {
-    if (match[0].includes("\0")) {
-      matches.push({
-        normalizedKey: normalizeAssignmentKey(match[1]),
-        quotedValue: false,
-        value: unquotedValue(match[2]),
-      });
-    }
-  }
-  return matches;
+function isJavaScriptPath(relativePath) {
+  return /\.(?:[cm]?[jt]sx?)$/i.test(relativePath);
 }
 
-function oversizedAssignmentKeys(content) {
-  const normalizedKeys = [];
-  for (const pattern of [
-    ...oversizedQuotedAssignmentPatterns,
-    ...oversizedUnquotedAssignmentPatterns,
+function isLikelyDecodedText(value) {
+  if (!value || value.includes("\u0000")) return false;
+  let printable = 0;
+  let considered = 0;
+  for (const character of value.slice(0, 64 * 1024)) {
+    considered += 1;
+    const code = character.codePointAt(0);
+    if (character === "\t" || character === "\n" || character === "\r" || (code >= 32 && code <= 126)) {
+      printable += 1;
+    }
+  }
+  return considered > 0 && printable / considered >= 0.7;
+}
+
+function decodedRepresentations(input) {
+  const bytes = input.subarray(0, DEFAULT_MAX_SCAN_BYTES);
+  const values = new Map();
+  function add(kind, value, sourceCandidate = false) {
+    const text = value.replace(/^\uFEFF/, "");
+    if (!text || values.has(text)) return;
+    values.set(text, { kind, sourceCandidate, text });
+  }
+
+  const utf8 = bytes.toString("utf8");
+  add("utf8", utf8, !utf8.includes("\uFFFD") && !utf8.includes("\u0000"));
+  for (const [kind, encoding] of [
+    ["utf16le", "utf-16le"],
+    ["utf16be", "utf-16be"],
   ]) {
-    pattern.lastIndex = 0;
-    for (let match = pattern.exec(content); match; match = pattern.exec(content)) {
-      normalizedKeys.push(normalizeAssignmentKey(match[1]));
+    for (const offset of [0, 1]) {
+      if (bytes.length - offset < 4) continue;
+      const value = new TextDecoder(encoding).decode(bytes.subarray(offset));
+      if (isLikelyDecodedText(value)) add(`${kind}:${offset}`, value, true);
     }
   }
-  return normalizedKeys;
-}
 
-function representations(bytes) {
-  const raw = bytes.toString("latin1");
-  const printable = [];
+  const printableRuns = [];
   let current = "";
   for (const byte of bytes) {
     if (byte === 9 || byte === 10 || byte === 13 || (byte >= 32 && byte <= 126)) {
       current += String.fromCharCode(byte);
     } else {
-      if (current.length >= 4) printable.push(current);
+      if (current.length >= 4) printableRuns.push(current);
       current = "";
     }
   }
-  if (current.length >= 4) printable.push(current);
-  return [raw, printable.join("\n"), raw.replace(/[^\x09\x0a\x0d\x20-\x7e]+/g, "\n")];
+  if (current.length >= 4) printableRuns.push(current);
+  add("printable-runs", printableRuns.join("\n"));
+  add("nul-collapsed", bytes.toString("latin1").replaceAll("\u0000", ""));
+  return [...values.values()];
 }
 
-function isCodeLikePath(relativePath) {
-  return /\.(?:[cm]?[jt]sx?|jsonc?|patch|sql)$/i.test(relativePath);
-}
-
-function isNonliteralAssignment(relativePath, quotedValue, valueQuote, value) {
-  if (quotedValue) {
-    return isCodeLikePath(relativePath) && valueQuote === "`" && value.includes("${");
+function readQuoted(value, offset) {
+  const quote = value[offset];
+  let result = "";
+  for (let index = offset + 1; index < value.length; index += 1) {
+    const character = value[index];
+    if (character === "\\" && index + 1 < value.length) {
+      result += character + value[index + 1];
+      index += 1;
+      continue;
+    }
+    if (character === quote) return { end: index + 1, value: result };
+    result += character;
+    if (result.length > MAX_ASSIGNMENT_VALUE_CHARS) return { overflow: true };
   }
-  if (/\$\(|\$\{|^(?:await|new)\b|=>/.test(value)) return true;
-  if (!isCodeLikePath(relativePath)) return false;
+  return null;
+}
+
+function horizontalSpace(value, offset) {
+  let index = offset;
+  while (value[index] === " " || value[index] === "\t") index += 1;
+  return index;
+}
+
+function wordAt(value, offset, word) {
+  if (!value.startsWith(word, offset)) return false;
+  const next = value[offset + word.length];
+  return next === undefined || next === " " || next === "\t";
+}
+
+function lineAssignmentHeader(line) {
+  let offset = horizontalSpace(line, 0);
+  if (wordAt(line, offset, "export")) {
+    offset = horizontalSpace(line, offset + "export".length);
+  }
+  for (const declaration of ["const", "let", "var"]) {
+    if (wordAt(line, offset, declaration)) {
+      offset = horizontalSpace(line, offset + declaration.length);
+      break;
+    }
+  }
+
+  let key;
+  if (line[offset] === '"' || line[offset] === "'" || line[offset] === "`") {
+    const quoted = readQuoted(line, offset);
+    if (!quoted || quoted.overflow || quoted.value.length > 128) return null;
+    key = quoted.value.replace(/\\(.)/g, "$1");
+    offset = quoted.end;
+  } else {
+    const start = offset;
+    if (!/[A-Za-z_$]/.test(line[offset] ?? "")) return null;
+    offset += 1;
+    while (offset - start <= 128 && /[A-Za-z0-9_$./@-]/.test(line[offset] ?? "")) {
+      offset += 1;
+    }
+    key = line.slice(start, offset);
+  }
+  offset = horizontalSpace(line, offset);
+  if (line[offset] !== "=" && line[offset] !== ":") return null;
+  return { key, valueOffset: horizontalSpace(line, offset + 1) };
+}
+
+function lineAssignments(content) {
+  const results = [];
+  let lineStart = 0;
+  while (lineStart <= content.length) {
+    const newline = content.indexOf("\n", lineStart);
+    const lineEnd = newline === -1 ? content.length : newline;
+    const line = content.slice(lineStart, lineEnd).replace(/\r$/, "");
+    const header = lineAssignmentHeader(line);
+    if (header) {
+      const absoluteValueOffset = lineStart + header.valueOffset;
+      const first = content[absoluteValueOffset];
+      if (first === '"' || first === "'" || first === "`") {
+        const quoted = readQuoted(content, absoluteValueOffset);
+        results.push({
+          key: header.key,
+          overflow: !quoted || quoted.overflow === true,
+          quoted: true,
+          value: quoted && !quoted.overflow ? quoted.value : "",
+        });
+      } else {
+        const value = line
+          .slice(header.valueOffset)
+          .replace(/[\t ]+(?:#|\/\/).*$/, "")
+          .replace(/[\t ]*[,;][\t ]*$/, "")
+          .trim();
+        results.push({
+          key: header.key,
+          overflow: value.length > MAX_ASSIGNMENT_VALUE_CHARS,
+          quoted: false,
+          value,
+        });
+      }
+    }
+    if (newline === -1) break;
+    lineStart = newline + 1;
+  }
+  return results;
+}
+
+function isNonliteralLineAssignment(relativePath, assignment) {
+  if (assignment.quoted || !/\.(?:md|patch|sql)$/i.test(relativePath)) return false;
+  const value = assignment.value;
   return (
-    /^(?:true|false|null|undefined|void|[+-]?(?:\d+\.?\d*|\.\d+))$/.test(value) ||
-    /^[a-z_$][A-Za-z0-9_$]*$/.test(value) ||
-    /^(?=[A-Za-z0-9_$]*[a-z])[A-Z][A-Za-z0-9_$]*$/.test(value) ||
-    /^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(value) ||
-    /^![A-Za-z_$][A-Za-z0-9_$]*$/.test(value) ||
-    /^[A-Za-z_$][A-Za-z0-9_$]*(?:\??\.[A-Za-z_$][A-Za-z0-9_$]*)+$/.test(value) ||
-    /(?:===?|!==?|<=|>=|\?|&&|\|\||[.()[\]{}]|^!|\s[|&+*/-]\s)/.test(value)
+    /^(?:await|new|void)\b/.test(value) ||
+    /\$\(|\$\{|=>/.test(value) ||
+    /^[A-Za-z_$][A-Za-z0-9_$]*(?:\??\.[A-Za-z_$][A-Za-z0-9_$]*)+/.test(value) ||
+    /^(?:true|false|null|undefined|[+-]?\d)/.test(value) ||
+    /^[{[(]/.test(value) ||
+    /(?:===?|!==?|&&|\|\||\?\?|\binstanceof\b)/.test(value)
   );
 }
 
-export function scanBufferForSecrets(bytes, { relativePath = "" } = {}) {
-  const findings = new Set();
-  for (const content of representations(bytes)) {
-    for (const rule of tokenRules) {
-      rule.pattern.lastIndex = 0;
-      if (rule.pattern.test(content)) findings.add(rule.name);
+function shannonEntropy(value) {
+  const frequencies = new Map();
+  for (const character of value) {
+    frequencies.set(character, (frequencies.get(character) ?? 0) + 1);
+  }
+  let entropy = 0;
+  for (const count of frequencies.values()) {
+    const probability = count / value.length;
+    entropy -= probability * Math.log2(probability);
+  }
+  return entropy;
+}
+
+function hasHighEntropyFamily(value) {
+  const withoutPublicCertificates = value.replace(
+    /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g,
+    "",
+  );
+  for (const match of withoutPublicCertificates.matchAll(/[A-Za-z0-9+/_=-]{40,}/g)) {
+    const candidate = match[0];
+    const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[+/_=-]/].filter((pattern) =>
+      pattern.test(candidate),
+    ).length;
+    if (classes >= 4 && new Set(candidate).size >= 12 && shannonEntropy(candidate) >= 4.2) {
+      return true;
     }
-    if (oversizedAssignmentKeys(content).some(isSecretAssignmentKey)) {
+  }
+  return false;
+}
+
+function literalSecretRules(value) {
+  const rules = new Set();
+  for (const rule of tokenRules) {
+    rule.pattern.lastIndex = 0;
+    if (rule.pattern.test(value)) rules.add(rule.name);
+  }
+  if (sha256(value) === generatedSensitiveLiteralContract.digest) {
+    rules.add(generatedSensitiveLiteralContract.category);
+  }
+  if (hasHighEntropyFamily(value)) rules.add("high-entropy-string");
+  return rules;
+}
+
+function generatedFallbackAssignmentAllowed(relativePath, normalizedKey, value, form) {
+  return (
+    relativePath === generatedSensitiveLiteralContract.path &&
+    normalizedKey === "DEFAULT_SECRET" &&
+    form === generatedSensitiveLiteralContract.form &&
+    sha256(value) === generatedSensitiveLiteralContract.digest
+  );
+}
+
+function scanTypeScript(content, relativePath, findings, enforceGeneratedLiteralContract) {
+  const analysis = analyzeTypeScriptStaticValues(content, { relativePath });
+  if (analysis.parseErrors > 0) findings.add("typescript-parse-error");
+  for (const { key, evaluation, form } of analysis.assignments) {
+    const normalizedKey = normalizeAssignmentKey(key);
+    if (!isSecretAssignmentKey(normalizedKey)) continue;
+    if (evaluation.status === "overflow") {
+      findings.add("assigned-secret");
+      continue;
+    }
+    if (
+      evaluation.status !== "static" ||
+      typeof evaluation.value !== "string" ||
+      evaluation.value.length < MIN_ASSIGNMENT_VALUE_CHARS
+    ) {
+      continue;
+    }
+    if (
+      !isAuditedFixture(relativePath, normalizedKey, evaluation.value) &&
+      !generatedFallbackAssignmentAllowed(relativePath, normalizedKey, evaluation.value, form)
+    ) {
       findings.add("assigned-secret");
     }
-    for (const { normalizedKey, quotedValue, valueQuote, value } of assignments(content)) {
-      if (!isSecretAssignmentKey(normalizedKey)) continue;
-      if (isNonliteralAssignment(relativePath, quotedValue, valueQuote, value)) continue;
-      if (!isAuditedFixture(relativePath, normalizedKey, value)) {
-        findings.add("assigned-secret");
+  }
+
+  const observedContractContexts = new Map();
+  for (const entry of analysis.staticValues) {
+    const digest = sha256(entry.value);
+    if (
+      entry.form === generatedSensitiveLiteralContract.form &&
+      digest === generatedSensitiveLiteralContract.digest
+    ) {
+      observedContractContexts.set(
+        entry.context,
+        (observedContractContexts.get(entry.context) ?? 0) + 1,
+      );
+    }
+    for (const rule of literalSecretRules(entry.value)) {
+      const reviewedStaticLiteral =
+        auditedStaticLiteralAllowances
+          .get(relativePath)
+          ?.get(rule)
+          ?.has(digest) === true;
+      const reviewedGeneratedLiteral =
+        enforceGeneratedLiteralContract &&
+        relativePath === generatedSensitiveLiteralContract.path &&
+        rule === generatedSensitiveLiteralContract.category &&
+        entry.form === generatedSensitiveLiteralContract.form &&
+        generatedSensitiveLiteralContract.contexts.includes(entry.context);
+      if (!reviewedStaticLiteral && !reviewedGeneratedLiteral) findings.add(rule);
+    }
+  }
+  if (enforceGeneratedLiteralContract) {
+    if (relativePath !== generatedSensitiveLiteralContract.path) {
+      findings.add("generated-sensitive-literal-drift");
+    } else {
+      for (const context of generatedSensitiveLiteralContract.contexts) {
+        if (observedContractContexts.get(context) !== 1) {
+          findings.add("generated-sensitive-literal-drift");
+        }
+      }
+      if (
+        [...observedContractContexts.values()].reduce((total, count) => total + count, 0) !==
+        generatedSensitiveLiteralContract.contexts.length
+      ) {
+        findings.add("generated-sensitive-literal-drift");
+      }
+    }
+  }
+}
+
+export function scanBufferForSecrets(
+  bytes,
+  { enforceGeneratedLiteralContract = false, relativePath = "" } = {},
+) {
+  if (bytes.length === 0) return [];
+  const findings = new Set();
+  const representations = decodedRepresentations(bytes);
+  for (const { text } of representations) {
+    for (const rule of tokenRules) {
+      rule.pattern.lastIndex = 0;
+      if (rule.pattern.test(text)) findings.add(rule.name);
+    }
+  }
+
+  if (isJavaScriptPath(relativePath)) {
+    const source = representations.find(({ sourceCandidate }) => sourceCandidate);
+    if (!source) {
+      findings.add("typescript-decode-error");
+    } else {
+      scanTypeScript(source.text, relativePath, findings, enforceGeneratedLiteralContract);
+    }
+  } else {
+    for (const { text } of representations) {
+      for (const assignment of lineAssignments(text)) {
+        const normalizedKey = normalizeAssignmentKey(assignment.key);
+        if (!isSecretAssignmentKey(normalizedKey)) continue;
+        if (isNonliteralLineAssignment(relativePath, assignment)) continue;
+        if (assignment.overflow) {
+          findings.add("assigned-secret");
+        } else if (
+          assignment.value.length >= MIN_ASSIGNMENT_VALUE_CHARS &&
+          !isAuditedFixture(relativePath, normalizedKey, assignment.value)
+        ) {
+          findings.add("assigned-secret");
+        }
       }
     }
   }

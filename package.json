@@ -34,6 +34,7 @@
     "oxlint": "1.74.0",
     "oxlint-tsgolint": "0.24.0",
     "secretlint": "13.0.2",
+    "typescript": "7.0.2",
     "yaml": "2.9.0"
   }
 }

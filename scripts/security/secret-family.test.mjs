@@ -36,6 +36,24 @@ function assigned(name, value) {
   return `${name}=${value}\n`;
 }
 
+function generatedFallbackValue() {
+  return ["better", "auth", "secret", "12345678901234567890"].join("-");
+}
+
+function generatedFallbackBundle(expressions) {
+  const [declaration, comparison, fallback] = expressions;
+  return [
+    `var DEFAULT_SECRET = ${declaration};`,
+    `function buildSecretConfig(legacySecret) { return { legacySecret: legacySecret && legacySecret !== ${comparison} ? legacySecret : void 0 }; }`,
+    `async function createAuthContext(legacySecret) { let secret; secret = legacySecret || ${fallback}; }`,
+  ].join("\n");
+}
+
+function exactGeneratedFallbackBundle() {
+  const literal = JSON.stringify(generatedFallbackValue());
+  return generatedFallbackBundle([literal, literal, literal]);
+}
+
 test("enumerates tracked, untracked, and ignored sensitive paths independently of gitignore", (context) => {
   const root = repository(context);
   writeFileSync(path.join(root, "ordinary.txt"), "safe untracked content\n");
@@ -235,7 +253,7 @@ test("normalizes declarations and quoted or unquoted secret keys before classifi
     );
   }
   assert.ok(
-    scanBufferForSecrets(Buffer.from(`const serviceSecret = ${"F".repeat(40)}`), {
+    scanBufferForSecrets(Buffer.from(`const serviceSecret = "${"F".repeat(40)}"`), {
       relativePath: "artifact:worker/extra.js",
     }).includes("assigned-secret"),
   );
@@ -297,7 +315,6 @@ test("allows exact generated enums but rejects wrong paths, keys, and values", (
       "User already has a password. Provide that to delete the account.",
     ],
     ["PASSWORD_ALREADY_SET", "User already has a password set"],
-    ["DEFAULT_SECRET", "better-auth-secret-12345678901234567890"],
     ["PEM_CONVERTER_PRIVATE_KEY_TAG", "PRIVATE KEY"],
     ["CHALLENGE_PASSWORD_ATTRIBUTE_NAME", "Challenge Password"],
     ["CLIENT_SECRET_PREFIX", "pg72_cs_"],
@@ -305,7 +322,7 @@ test("allows exact generated enums but rejects wrong paths, keys, and values", (
     ["REFRESH_TOKEN", "pg72_rt_"],
   ];
   const source = Buffer.from(
-    exactEnums.map(([key, value]) => `${key}: "${value}",`).join("\n"),
+    `const errors = {\n${exactEnums.map(([key, value]) => `${key}: "${value}",`).join("\n")}\n};`,
   );
   assert.ok(
     !scanBufferForSecrets(source, { relativePath: "artifact:worker/index.js" }).includes(
@@ -318,12 +335,12 @@ test("allows exact generated enums but rejects wrong paths, keys, and values", (
     ),
   );
   assert.ok(
-    !scanBufferForSecrets(Buffer.from('invalidPassword: "Invalid password",'), {
+    !scanBufferForSecrets(Buffer.from('const errors = { invalidPassword: "Invalid password" };'), {
       relativePath: "artifact:worker/index.js",
     }).includes("assigned-secret"),
   );
   assert.ok(
-    scanBufferForSecrets(Buffer.from('INVALID_PASSWORD: "Invalid password changed",'), {
+    scanBufferForSecrets(Buffer.from('const errors = { INVALID_PASSWORD: "Invalid password changed" };'), {
       relativePath: "artifact:worker/index.js",
     }).includes("assigned-secret"),
   );
@@ -392,6 +409,101 @@ test("parses quote variants, whitespace, passphrases, punctuation, and multiline
   ]) {
     assert.ok(!scanBufferForSecrets(Buffer.from(metadata)).includes("assigned-secret"), metadata);
   }
+});
+
+test("parses export const, let, var, and dotenv export assignments", () => {
+  for (const source of [
+    'export const serviceSecret = "export const material 123456";',
+    'export let serviceSecret = "export let material 123456";',
+    'export var serviceSecret = "export var material 123456";',
+  ]) {
+    assert.ok(
+      scanBufferForSecrets(Buffer.from(source), { relativePath: "fixture.ts" }).includes(
+        "assigned-secret",
+      ),
+      source,
+    );
+  }
+  const dotenvExport = ["export SERVICE_SECRET", "dotenv-export-material-123456"].join("=");
+  assert.ok(
+    scanBufferForSecrets(Buffer.from(dotenvExport), {
+      relativePath: "fixture.env",
+    }).includes("assigned-secret"),
+  );
+});
+
+test("decodes UTF-16LE, UTF-16BE, and NUL-interleaved secret families", () => {
+  const assignment = `SERVICE_PRIVATE_KEY=${"K".repeat(48)}`;
+  const utf16le = Buffer.from(assignment, "utf16le");
+  const utf16be = Buffer.from(assignment, "utf16le");
+  utf16be.swap16();
+  const privateKey = ["-----BEGIN ", "PRIVATE KEY-----"].join("");
+  const nulInterleaved = Buffer.from(
+    [...privateKey].flatMap((character) => [character.charCodeAt(0), 0]),
+  );
+
+  assert.ok(scanBufferForSecrets(utf16le).includes("assigned-secret"));
+  assert.ok(scanBufferForSecrets(utf16be).includes("assigned-secret"));
+  assert.ok(scanBufferForSecrets(nulInterleaved).includes("private-key"));
+});
+
+test("evaluates literal concatenation and static template spans before family checks", () => {
+  const slack = ["xoxb", "123456789012345678901234"].join("-");
+  const highEntropy = [
+    "Aa0+/Bb1-_Cc2+/Dd3-_Ee4+/Ff5-_",
+    "Gg6+/Hh7-_Ii8+/Jj9-_Kk0+/Ll1-_",
+  ].join("");
+  const sources = [
+    `const value = ${JSON.stringify(slack.slice(0, 8))} + ${JSON.stringify(slack.slice(8))};`,
+    `const value = \`${slack.slice(0, 8)}\${${JSON.stringify(slack.slice(8))}}\`;`,
+    `const value = ${JSON.stringify(highEntropy.slice(0, 32))} + ${JSON.stringify(highEntropy.slice(32))};`,
+    'const serviceSecret = `static-${"template-material-123456"}`;',
+  ];
+  for (const source of sources) {
+    assert.notDeepEqual(
+      scanBufferForSecrets(Buffer.from(source), { relativePath: "fixture.ts" }),
+      [],
+      source,
+    );
+  }
+});
+
+test("requires all three generated fallback literals at exact digest, form, and context", () => {
+  const relativePath = "artifact:worker/index.js";
+  const scan = (source) =>
+    scanBufferForSecrets(Buffer.from(source), {
+      enforceGeneratedLiteralContract: true,
+      relativePath,
+    });
+  assert.deepEqual(scan(exactGeneratedFallbackBundle()), []);
+
+  const value = generatedFallbackValue();
+  for (let index = 0; index < 3; index += 1) {
+    const literals = [value, value, value].map((entry) => JSON.stringify(entry));
+    literals[index] = JSON.stringify(`${value}-changed`);
+    assert.ok(scan(generatedFallbackBundle(literals)).includes("generated-sensitive-literal-drift"));
+  }
+
+  const split = Math.floor(value.length / 2);
+  const concatenated = `${JSON.stringify(value.slice(0, split))} + ${JSON.stringify(value.slice(split))}`;
+  const templated = `\`${value.slice(0, split)}\${${JSON.stringify(value.slice(split))}}\``;
+  for (const expression of [concatenated, templated, `\`${value}\``]) {
+    const literals = [value, value, value].map((entry) => JSON.stringify(entry));
+    literals[1] = expression;
+    const findings = scan(generatedFallbackBundle(literals));
+    assert.ok(findings.includes("generated-sensitive-literal-drift"), expression);
+  }
+
+  assert.ok(
+    scan(generatedFallbackBundle([JSON.stringify(value), JSON.stringify(value), '"changed"'])).includes(
+      "generated-sensitive-literal-drift",
+    ),
+  );
+  assert.ok(
+    scan(`${exactGeneratedFallbackBundle()}\nconst extra = ${JSON.stringify(value)};`).includes(
+      "generated-sensitive-literal-drift",
+    ),
+  );
 });
 
 test("hashes secret-family, sensitive, outside, and terminal-unsafe diagnostic paths", () => {

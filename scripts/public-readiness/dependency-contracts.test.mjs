@@ -5,6 +5,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -14,6 +15,7 @@ import test from "node:test";
 import {
   REQUIRED_DEPENDENCY_NAMES,
   dependencyStatus,
+  exactFileSetFingerprint,
   runGlobalLogoutDependencyProof,
   runRecoveryDependencyProof,
   runReleaseAutomationDependencyProof,
@@ -237,6 +239,68 @@ function releaseProofEvents() {
 function eventSource(events) {
   return `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
 }
+
+test("exact file-set fingerprints reject path escapes and non-regular nodes", (context) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "pgid-exact-fingerprint-"));
+  const rootLink = `${root}-link`;
+  context.after(() => rmSync(root, { force: true, recursive: true }));
+  context.after(() => rmSync(rootLink, { force: true }));
+  writeFixture(path.join(root, "a.txt"), "alpha");
+  writeFixture(path.join(root, "nested", "b.txt"), "bravo");
+
+  const files = ["a.txt", "nested/b.txt"];
+  const baseline = exactFileSetFingerprint(root, files);
+  assert.match(baseline, /^[a-f0-9]{64}$/);
+  assert.equal(exactFileSetFingerprint(root, files), baseline);
+  writeFileSync(path.join(root, "nested", "b.txt"), "changed");
+  assert.notEqual(exactFileSetFingerprint(root, files), baseline);
+
+  assert.throws(
+    () => exactFileSetFingerprint(root, [path.join(root, "a.txt")]),
+    /must be relative/,
+  );
+  assert.throws(
+    () => exactFileSetFingerprint(root, ["C:\\outside.txt"]),
+    /absolute Windows path/,
+  );
+  assert.throws(
+    () => exactFileSetFingerprint(root, ["../outside.txt"]),
+    /escaped its repository root/,
+  );
+  assert.throws(
+    () => exactFileSetFingerprint(root, []),
+    /must not be empty/,
+  );
+  assert.throws(
+    () => exactFileSetFingerprint(root, ["nested/b.txt", "a.txt"]),
+    /exact, unique, and ordered/,
+  );
+  assert.throws(
+    () => exactFileSetFingerprint(root, ["a.txt", "a.txt"]),
+    /exact, unique, and ordered/,
+  );
+
+  symlinkSync("a.txt", path.join(root, "leaf-link.txt"));
+  assert.throws(
+    () => exactFileSetFingerprint(root, ["leaf-link.txt"]),
+    /not an exact regular file/,
+  );
+  symlinkSync("nested", path.join(root, "linked-nested"), "dir");
+  assert.throws(
+    () => exactFileSetFingerprint(root, ["linked-nested/b.txt"]),
+    /symbolic-link ancestor/,
+  );
+  symlinkSync(root, rootLink, "dir");
+  assert.throws(
+    () => exactFileSetFingerprint(rootLink, ["a.txt"]),
+    /root must be an exact directory/,
+  );
+  mkdirSync(path.join(root, "directory-entry"));
+  assert.throws(
+    () => exactFileSetFingerprint(root, ["directory-entry"]),
+    /not an exact regular file/,
+  );
+});
 
 test("valid source remains unverified and caller assertions cannot promote it", () => {
   const fixture = createDependencyFixture();

@@ -2,12 +2,17 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import {
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
   lstatSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
 } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -266,23 +271,254 @@ function sqlContractFingerprint(identityRoot, contract) {
   return createHash("sha256").update(source.text).digest("hex");
 }
 
-function exactFileSetFingerprint(root, filenames) {
+const STABLE_FILE_STAT_FIELDS = Object.freeze([
+  "dev",
+  "ino",
+  "size",
+  "mtimeNs",
+  "ctimeNs",
+]);
+
+function assertSameNode(before, after, label) {
+  assert.equal(after.dev, before.dev, `${label} changed device`);
+  assert.equal(after.ino, before.ino, `${label} changed inode`);
+}
+
+function assertStableRegularFile(before, after, label) {
+  assert.ok(before.isFile(), `${label} is not a regular file`);
+  assert.ok(after.isFile(), `${label} stopped being a regular file`);
+  for (const field of STABLE_FILE_STAT_FIELDS) {
+    assert.equal(after[field], before[field], `${label} changed ${field}`);
+  }
+}
+
+function isContainedPath(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return (
+    relative !== "" &&
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+
+function inspectFingerprintRoot(root) {
+  assert.equal(typeof root, "string", "fingerprint root must be a path");
+  assert.ok(root.length > 0, "fingerprint root must not be empty");
+  const lexicalRoot = path.resolve(root);
+  const lexicalStat = lstatSync(lexicalRoot, { bigint: true });
+  assert.ok(
+    lexicalStat.isDirectory() && !lexicalStat.isSymbolicLink(),
+    "fingerprint root must be an exact directory",
+  );
+  const canonicalRoot = realpathSync(lexicalRoot);
+  const currentStat = statSync(lexicalRoot, { bigint: true });
+  assert.ok(currentStat.isDirectory(), "fingerprint root is not a directory");
+  assertSameNode(lexicalStat, currentStat, "fingerprint root");
+  assert.equal(
+    realpathSync(lexicalRoot),
+    canonicalRoot,
+    "fingerprint root changed while it was inspected",
+  );
+  return {
+    canonicalRoot,
+    dev: currentStat.dev,
+    ino: currentStat.ino,
+    lexicalRoot,
+  };
+}
+
+function assertSameFingerprintRoot(before, after) {
+  assert.equal(after.lexicalRoot, before.lexicalRoot);
+  assert.equal(
+    after.canonicalRoot,
+    before.canonicalRoot,
+    "fingerprint root canonical path changed",
+  );
+  assertSameNode(before, after, "fingerprint root");
+}
+
+function validateFingerprintRelativePath(relative) {
+  assert.equal(typeof relative, "string", "fingerprint path must be a string");
+  assert.ok(relative.length > 0, "fingerprint path must not be empty");
+  assert.equal(path.isAbsolute(relative), false, "fingerprint path must be relative");
+  assert.equal(
+    path.win32.isAbsolute(relative),
+    false,
+    "fingerprint path must not be an absolute Windows path",
+  );
+  assert.equal(
+    relative.includes("\\"),
+    false,
+    "fingerprint path must use repository separators",
+  );
+  const segments = relative.split("/");
+  assert.equal(
+    segments.includes(".."),
+    false,
+    "fingerprint path escaped its repository root",
+  );
+  assert.ok(
+    segments.every((segment) => segment.length > 0 && segment !== "."),
+    "fingerprint path must be normalized",
+  );
+  assert.equal(
+    path.posix.normalize(relative),
+    relative,
+    "fingerprint path must be normalized",
+  );
+  return segments;
+}
+
+function inspectFingerprintAncestors(rootSnapshot, segments, relative) {
+  const ancestors = [];
+  let current = rootSnapshot.lexicalRoot;
+  for (const segment of segments.slice(0, -1)) {
+    current = path.join(current, segment);
+    const lexicalStat = lstatSync(current, { bigint: true });
+    assert.ok(
+      lexicalStat.isDirectory() && !lexicalStat.isSymbolicLink(),
+      `${relative} has a non-directory or symbolic-link ancestor`,
+    );
+    const canonical = realpathSync(current);
+    assert.ok(
+      isContainedPath(rootSnapshot.canonicalRoot, canonical),
+      `${relative} has an ancestor outside its canonical root`,
+    );
+    const currentStat = statSync(current, { bigint: true });
+    assert.ok(currentStat.isDirectory(), `${relative} has a non-directory ancestor`);
+    assertSameNode(lexicalStat, currentStat, `${relative} ancestor`);
+    assert.equal(
+      realpathSync(current),
+      canonical,
+      `${relative} ancestor changed while it was inspected`,
+    );
+    ancestors.push({ canonical, dev: currentStat.dev, ino: currentStat.ino });
+  }
+  return ancestors;
+}
+
+function assertSameFingerprintAncestors(before, after, relative) {
+  assert.equal(after.length, before.length, `${relative} ancestor set changed`);
+  for (let index = 0; index < before.length; index += 1) {
+    assert.equal(
+      after[index].canonical,
+      before[index].canonical,
+      `${relative} ancestor canonical path changed`,
+    );
+    assertSameNode(before[index], after[index], `${relative} ancestor`);
+  }
+}
+
+function inspectOpenedFingerprintFile(
+  filename,
+  canonicalRoot,
+  openedStat,
+  relative,
+) {
+  const lexicalStat = lstatSync(filename, { bigint: true });
+  assert.ok(
+    lexicalStat.isFile() && !lexicalStat.isSymbolicLink(),
+    `${relative} is not an exact regular file`,
+  );
+  assertStableRegularFile(openedStat, lexicalStat, relative);
+  const canonical = realpathSync(filename);
+  assert.ok(
+    isContainedPath(canonicalRoot, canonical),
+    `${relative} escaped its canonical root`,
+  );
+  const currentStat = statSync(filename, { bigint: true });
+  assertStableRegularFile(openedStat, currentStat, relative);
+  assert.equal(
+    realpathSync(filename),
+    canonical,
+    `${relative} canonical path changed while it was inspected`,
+  );
+  const finalStat = lstatSync(filename, { bigint: true });
+  assert.ok(!finalStat.isSymbolicLink(), `${relative} became a symbolic link`);
+  assertStableRegularFile(openedStat, finalStat, relative);
+  return canonical;
+}
+
+function readExactFingerprintFile(rootSnapshot, relative, segments) {
+  const filename = path.resolve(rootSnapshot.lexicalRoot, ...segments);
+  assert.ok(
+    isContainedPath(rootSnapshot.lexicalRoot, filename),
+    `${relative} escaped its lexical root`,
+  );
+  const ancestorsBefore = inspectFingerprintAncestors(
+    rootSnapshot,
+    segments,
+    relative,
+  );
+  const lexicalStat = lstatSync(filename, { bigint: true });
+  assert.ok(
+    lexicalStat.isFile() && !lexicalStat.isSymbolicLink(),
+    `${relative} is not an exact regular file`,
+  );
+
+  const noFollow = Number.isInteger(fsConstants.O_NOFOLLOW)
+    ? fsConstants.O_NOFOLLOW
+    : 0;
+  const fileDescriptor = openSync(filename, fsConstants.O_RDONLY | noFollow);
+  try {
+    const beforeRead = fstatSync(fileDescriptor, { bigint: true });
+    assertStableRegularFile(lexicalStat, beforeRead, relative);
+    const canonicalBefore = inspectOpenedFingerprintFile(
+      filename,
+      rootSnapshot.canonicalRoot,
+      beforeRead,
+      relative,
+    );
+    const bytes = readFileSync(fileDescriptor);
+    const afterRead = fstatSync(fileDescriptor, { bigint: true });
+    assertStableRegularFile(beforeRead, afterRead, relative);
+    assert.equal(
+      BigInt(bytes.length),
+      afterRead.size,
+      `${relative} read length differs from its opened file size`,
+    );
+    assert.equal(
+      inspectOpenedFingerprintFile(
+        filename,
+        rootSnapshot.canonicalRoot,
+        afterRead,
+        relative,
+      ),
+      canonicalBefore,
+      `${relative} canonical path changed while it was read`,
+    );
+    const ancestorsAfter = inspectFingerprintAncestors(
+      rootSnapshot,
+      segments,
+      relative,
+    );
+    assertSameFingerprintAncestors(ancestorsBefore, ancestorsAfter, relative);
+    assertSameFingerprintRoot(rootSnapshot, inspectFingerprintRoot(rootSnapshot.lexicalRoot));
+    return bytes;
+  } finally {
+    closeSync(fileDescriptor);
+  }
+}
+
+export function exactFileSetFingerprint(root, filenames) {
+  assert.ok(Array.isArray(filenames), "fingerprint paths must be an array");
+  assert.ok(filenames.length > 0, "fingerprint path set must not be empty");
+  assert.deepEqual(
+    filenames,
+    [...new Set(filenames)].sort(),
+    "fingerprint path set must be exact, unique, and ordered",
+  );
+  const rootSnapshot = inspectFingerprintRoot(root);
   const hash = createHash("sha256");
   hash.update(`files\0${filenames.length}\0`);
   for (const relative of filenames) {
-    assert.equal(path.isAbsolute(relative), false, "fingerprint path must be relative");
-    assert.equal(
-      relative.split("/").includes(".."),
-      false,
-      "fingerprint path escaped its repository root",
-    );
-    const filename = path.join(root, relative);
-    const stat = lstatSync(filename);
-    assert.ok(stat.isFile() && !stat.isSymbolicLink(), `${relative} is not an exact regular file`);
-    const bytes = readFileSync(filename);
+    const segments = validateFingerprintRelativePath(relative);
+    const bytes = readExactFingerprintFile(rootSnapshot, relative, segments);
     hash.update(`${relative}\0${bytes.length}\0`);
     hash.update(bytes);
   }
+  assertSameFingerprintRoot(rootSnapshot, inspectFingerprintRoot(rootSnapshot.lexicalRoot));
   return hash.digest("hex");
 }
 
@@ -329,10 +565,17 @@ function ssoExecutionFingerprint(identityRoot, repositoryRoot) {
     realpathSync(path.join(repositoryRoot, "apps", "sso")),
     "SSO execution source root differs from the repository-owned path",
   );
-  return exactFileSetFingerprint(
+  const trackedFilesBefore = trackedSsoExecutionFiles(repositoryRoot);
+  const fingerprint = exactFileSetFingerprint(
     repositoryRoot,
-    trackedSsoExecutionFiles(repositoryRoot),
+    trackedFilesBefore,
   );
+  assert.deepEqual(
+    trackedSsoExecutionFiles(repositoryRoot),
+    trackedFilesBefore,
+    "SSO execution source path set changed while it was fingerprinted",
+  );
+  return fingerprint;
 }
 
 function dependencyFingerprint(name, identityRoot, repositoryRoot) {

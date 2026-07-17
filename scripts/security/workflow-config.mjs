@@ -33,7 +33,143 @@ export function expectedPreviewJobCondition(policy = dastPolicy) {
   )} && github.ref == '${policy.preview.defaultRef}' }}`;
 }
 
-export function validateWorkflowDocument(document, filename, toolVersions = tools) {
+function forbiddenEnvironmentKey(key) {
+  const normalized = key.toUpperCase();
+  return (
+    [
+      "BASH_ENV",
+      "CLOUDFLARE_API_KEY",
+      "CLOUDFLARE_API_TOKEN",
+      "ENV",
+      "GITHUB_ENV",
+      "GITHUB_PATH",
+      "GITHUB_TOKEN",
+      "LD_PRELOAD",
+      "NODE_OPTIONS",
+      "NODE_PATH",
+      "PATH",
+      "PNPM_HOME",
+    ].includes(normalized) ||
+    normalized.startsWith("DYLD_") ||
+    normalized.startsWith("LD_") ||
+    normalized.startsWith("NPM_CONFIG_") ||
+    normalized.startsWith("PNPM_CONFIG_") ||
+    normalized.startsWith("YARN_") ||
+    /(?:^|_)(?:API_KEY|CREDENTIALS?|PASSWORD|PRIVATE_KEY|SECRET|TOKEN)(?:_|$)/.test(normalized)
+  );
+}
+
+function environmentValue(policy, key) {
+  return policy.exactValues[key] ?? policy.safeStaticValues[key];
+}
+
+function expressionContexts(value) {
+  const contexts = [];
+  for (const match of value.matchAll(/\$\{\{\s*([^{}]+?)\s*}}/g)) contexts.push(match[1].trim());
+  return contexts;
+}
+
+function validateEnvironmentScope(
+  environment,
+  allowedKeys,
+  inheritedKeys,
+  label,
+  environmentPolicy,
+) {
+  const errors = [];
+  const value = environment ?? {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { errors: [`${label} env must be a mapping`], inherited: new Set(inheritedKeys) };
+  }
+  const actualKeys = Object.keys(value).sort();
+  const expectedKeys = [...allowedKeys].sort();
+  if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys)) {
+    errors.push(`${label} env keys differ from the exact scoped policy`);
+  }
+  const inherited = new Set(inheritedKeys);
+  for (const key of actualKeys) {
+    if (inherited.has(key)) errors.push(`${label} env overrides an inherited key`);
+    inherited.add(key);
+    if (forbiddenEnvironmentKey(key)) {
+      errors.push(`${label} env contains a forbidden execution/credential key`);
+      continue;
+    }
+    const actual = value[key];
+    const expected = environmentValue(environmentPolicy, key);
+    if (typeof actual !== "string") {
+      errors.push(`${label} env values must be exact strings`);
+      continue;
+    }
+    if (expected === undefined || actual !== expected) {
+      errors.push(`${label} env value differs from the exact key/value policy`);
+    }
+    const contexts = expressionContexts(actual);
+    if (/[\r\n]/.test(actual)) errors.push(`${label} env values must be single-line`);
+    if (actual.includes("${{") && contexts.length === 0) {
+      errors.push(`${label} env contains a malformed expression`);
+    }
+    for (const context of contexts) {
+      if (
+        !context.startsWith("vars.") ||
+        !environmentPolicy.allowedExpressionContexts.includes(context) ||
+        actual !== `\${{ ${context} }}`
+      ) {
+        errors.push(`${label} env contains a forbidden or interpolated expression context`);
+      }
+    }
+    if (/(?:^|\s)(?:--import|--require|-r)(?:\s|=)|\b(?:DYLD_|LD_PRELOAD|NODE_PATH)\b/i.test(actual)) {
+      errors.push(`${label} env contains a dynamic executable preload value`);
+    }
+  }
+  return { errors, inherited };
+}
+
+export function validateWorkflowEnvironment(document, filename, policy = workflowPolicy) {
+  const basename = path.basename(filename);
+  const environmentPolicy = policy.environmentPolicy;
+  const scopes = environmentPolicy?.scopes?.[basename];
+  if (!environmentPolicy || !scopes) return [`${basename} lacks an exact environment policy`];
+  const errors = [];
+  const workflow = validateEnvironmentScope(
+    document.env,
+    scopes.workflow ?? [],
+    new Set(),
+    `${basename}.workflow`,
+    environmentPolicy,
+  );
+  errors.push(...workflow.errors);
+  for (const [jobName, job] of entries(document.jobs)) {
+    const jobScope = validateEnvironmentScope(
+      job.env,
+      scopes.jobs?.[jobName] ?? [],
+      workflow.inherited,
+      `${basename}.${jobName}`,
+      environmentPolicy,
+    );
+    errors.push(...jobScope.errors);
+    for (const [index, step] of (job.steps ?? []).entries()) {
+      const stepScope = validateEnvironmentScope(
+        step.env,
+        scopes.steps?.[`${jobName}:${index}`] ?? [],
+        jobScope.inherited,
+        `${basename}.${jobName}.steps[${index}]`,
+        environmentPolicy,
+      );
+      errors.push(...stepScope.errors);
+    }
+  }
+  for (const jobName of Object.keys(scopes.jobs ?? {})) {
+    if (!document.jobs?.[jobName]) errors.push(`${basename} environment policy names a missing job`);
+  }
+  return [...new Set(errors)];
+}
+
+export function validateWorkflowDocument(
+  document,
+  filename,
+  toolVersions = tools,
+  policy = workflowPolicy,
+) {
   const errors = [];
   const triggers = document.on;
   if (!triggers || typeof triggers !== "object") errors.push("on must be a mapping");
@@ -50,6 +186,7 @@ export function validateWorkflowDocument(document, filename, toolVersions = tool
   if (!document.concurrency?.group || document.concurrency?.["cancel-in-progress"] !== true) {
     errors.push("concurrency must define a group and cancel-in-progress: true");
   }
+  errors.push(...validateWorkflowEnvironment(document, filename, policy));
 
   for (const [jobName, job] of entries(document.jobs)) {
     if (job.uses !== undefined) errors.push(`${jobName} reusable workflows are forbidden`);
@@ -126,6 +263,19 @@ function exactPattern(value) {
 
 export function dangerousCommandErrors(command) {
   const errors = [];
+  if (/GITHUB_(?:ENV|PATH)|::(?:add-path|set-env)::/i.test(command)) {
+    errors.push("contains a forbidden GitHub environment/path mutation");
+  }
+  if (/\$\{\{\s*(?:github\.token|secrets\.)/i.test(command)) {
+    errors.push("contains a forbidden credential expression context");
+  }
+  for (const match of command.matchAll(
+    /(?:^|[\s;&|])(?:export\s+|env\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/g,
+  )) {
+    if (forbiddenEnvironmentKey(match[1])) {
+      errors.push("contains a forbidden execution/credential environment assignment");
+    }
+  }
   if (/(?:^|[\s;&|])(?:curl|wget|nc|ncat|ssh|scp|rsync)\b/i.test(command)) {
     errors.push("contains a forbidden nonlocal network command");
   }
@@ -220,7 +370,7 @@ function expandCommand(command, packageRoot, context, state) {
 }
 
 export function validateWorkflowCommands(document, filename, context) {
-  const errors = [];
+  const errors = [...validateWorkflowEnvironment(document, filename, context.policy)];
   const allowed = context.policy.workflows[path.basename(filename)]?.allowedRunCommands;
   if (!allowed) return [`${path.basename(filename)} lacks an explicit command policy`];
   const actualRunCommands = entries(document.jobs).flatMap(([, job]) =>
@@ -305,7 +455,8 @@ function main() {
     console.log("actionlint is unavailable; using the deterministic YAML/semantic fallback validator.");
   }
 
-  assert.deepEqual(errors, [], errors.join("\n"));
+  const uniqueErrors = [...new Set(errors)];
+  assert.deepEqual(uniqueErrors, [], uniqueErrors.join("\n"));
   console.log(`GitHub workflow gate passed (${files.length} workflows).`);
 }
 

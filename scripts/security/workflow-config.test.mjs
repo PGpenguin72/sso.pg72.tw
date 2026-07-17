@@ -9,6 +9,8 @@ import {
   loadWorkflowCommandContext,
   validateWorkflowCommands,
   validateWorkflowDocument,
+  validateWorkflowEnvironment,
+  workflowPolicy,
 } from "./workflow-config.mjs";
 
 const tools = {
@@ -85,6 +87,117 @@ test("accepts only the exact recursively reachable package-script graph", () => 
       readFileSync(new URL(`../../.github/workflows/${filename}`, import.meta.url), "utf8"),
     );
     assert.deepEqual(validateWorkflowCommands(document, filename, context), []);
+  }
+});
+
+test("enforces exact environment scopes and rejects inherited overrides", () => {
+  const document = workflow();
+  document.env = { CI: "1" };
+  document.jobs.verify.env = { NO_COLOR: "1" };
+  const policy = structuredClone(workflowPolicy);
+  policy.environmentPolicy.scopes["ci.yml"].workflow = ["CI"];
+  policy.environmentPolicy.scopes["ci.yml"].jobs.verify = ["NO_COLOR"];
+  assert.deepEqual(validateWorkflowEnvironment(document, "ci.yml", policy), []);
+  assert.deepEqual(validateWorkflowDocument(document, "ci.yml", tools, policy), []);
+
+  document.jobs.verify.steps[0].env = { CI: "1" };
+  policy.environmentPolicy.scopes["ci.yml"].steps["verify:0"] = ["CI"];
+  assert.ok(
+    validateWorkflowEnvironment(document, "ci.yml", policy).some((error) =>
+      error.includes("overrides an inherited key"),
+    ),
+  );
+});
+
+test("rejects dynamic, secret-context, multiline, and default-denied env values", () => {
+  for (const value of [
+    "${{ secrets.CLOUDFLARE_API_TOKEN }}",
+    "${{ github.token }}",
+    "${{ vars.PGID_DAST_PREVIEW_ORIGIN }}-suffix",
+    "1\nNODE_OPTIONS=--require ./payload.cjs",
+  ]) {
+    const document = workflow();
+    document.env = { CI: value };
+    const policy = structuredClone(workflowPolicy);
+    policy.environmentPolicy.exactValues.CI = value;
+    policy.environmentPolicy.allowedExpressionContexts.push(
+      "secrets.CLOUDFLARE_API_TOKEN",
+      "github.token",
+    );
+    policy.environmentPolicy.scopes["ci.yml"].workflow = ["CI"];
+    assert.notDeepEqual(validateWorkflowEnvironment(document, "ci.yml", policy), [], value);
+  }
+
+  const unapproved = workflow();
+  unapproved.jobs.verify.env = { SAFE_VALUE: "fixed" };
+  assert.ok(
+    validateWorkflowEnvironment(unapproved, "ci.yml").some((error) =>
+      error.includes("keys differ from the exact scoped policy"),
+    ),
+  );
+});
+
+test("rejects execution preload, package-manager, PATH, and credential environment keys", () => {
+  for (const key of [
+    "NODE_OPTIONS",
+    "BASH_ENV",
+    "ENV",
+    "PATH",
+    "NODE_PATH",
+    "LD_PRELOAD",
+    "DYLD_INSERT_LIBRARIES",
+    "NPM_CONFIG_USERCONFIG",
+    "npm_config_prefix",
+    "PNPM_CONFIG_GLOBALCONFIG",
+    "PNPM_HOME",
+    "CLOUDFLARE_API_TOKEN",
+    "AWS_SECRET_ACCESS_KEY",
+  ]) {
+    const document = workflow();
+    document.jobs.verify.env = { [key]: "fixed-value" };
+    const policy = structuredClone(workflowPolicy);
+    policy.environmentPolicy.exactValues[key] = "fixed-value";
+    policy.environmentPolicy.scopes["ci.yml"].jobs.verify = [key];
+    assert.ok(
+      validateWorkflowEnvironment(document, "ci.yml", policy).some((error) =>
+        error.includes("forbidden execution/credential key"),
+      ),
+      key,
+    );
+  }
+});
+
+test("document and command validators reject malicious env on an approved command", () => {
+  const document = YAML.parse(
+    readFileSync(new URL("../../.github/workflows/dast-preview.yml", import.meta.url), "utf8"),
+  );
+  const stepIndex = document.jobs["safe-dast"].steps.findIndex(
+    (step) => step.run === "pnpm dast:preview",
+  );
+  document.jobs["safe-dast"].steps[stepIndex].env = {
+    NODE_OPTIONS: "--require ./payload.cjs",
+  };
+  const policy = structuredClone(workflowPolicy);
+  policy.environmentPolicy.exactValues.NODE_OPTIONS = "--require ./payload.cjs";
+  policy.environmentPolicy.scopes["dast-preview.yml"].steps[`safe-dast:${stepIndex}`] = [
+    "NODE_OPTIONS",
+  ];
+  const context = loadWorkflowCommandContext(undefined, policy);
+  assert.notDeepEqual(validateWorkflowDocument(document, "dast-preview.yml", undefined, policy), []);
+  assert.notDeepEqual(validateWorkflowCommands(document, "dast-preview.yml", context), []);
+});
+
+test("rejects multiline environment-file writes and command-level environment injection", () => {
+  for (const command of [
+    'echo "NODE_OPTIONS=--require ./payload.cjs" >> "$GITHUB_ENV"',
+    'printf "%s\\n" "/tmp/payload" >> "${GITHUB_PATH}"',
+    'cat <<EOF >> "$GITHUB_ENV"\nBASH_ENV=/tmp/payload\nEOF',
+    "env NODE_OPTIONS=--import=./payload.mjs pnpm check",
+    "npm_config_userconfig=/tmp/npmrc pnpm install --frozen-lockfile",
+    "CLOUDFLARE_API_TOKEN=credential pnpm check",
+    "echo '${{ secrets.CLOUDFLARE_API_TOKEN }}'",
+  ]) {
+    assert.notDeepEqual(dangerousCommandErrors(command), [], command);
   }
 });
 

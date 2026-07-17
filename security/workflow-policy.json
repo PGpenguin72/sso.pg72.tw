@@ -19,6 +19,40 @@
       ]
     }
   },
+  "environmentPolicy": {
+    "exactValues": {
+      "DAST_TARGET": "${{ vars.PGID_DAST_PREVIEW_ORIGIN }}",
+      "DAST_ALLOWED_PREVIEW_ORIGIN": "${{ vars.PGID_DAST_PREVIEW_ORIGIN }}",
+      "DAST_PREVIEW_OPT_IN": "${{ vars.PGID_DAST_PREVIEW_OPT_IN }}"
+    },
+    "safeStaticValues": {
+      "CI": "1",
+      "NO_COLOR": "1",
+      "WRANGLER_SEND_METRICS": "false"
+    },
+    "allowedExpressionContexts": [
+      "vars.PGID_DAST_PREVIEW_ORIGIN",
+      "vars.PGID_DAST_PREVIEW_OPT_IN"
+    ],
+    "scopes": {
+      "ci.yml": {
+        "workflow": [],
+        "jobs": { "verify": [] },
+        "steps": {}
+      },
+      "dast-preview.yml": {
+        "workflow": [],
+        "jobs": {
+          "safe-dast": [
+            "DAST_TARGET",
+            "DAST_ALLOWED_PREVIEW_ORIGIN",
+            "DAST_PREVIEW_OPT_IN"
+          ]
+        },
+        "steps": {}
+      }
+    }
+  },
   "approvedPackageScripts": {
     ".": {
       "check": "pnpm test:clean-dist && pnpm --filter @pg72/id check && pnpm --filter @pg72/test-rp check && pnpm --filter @pg72/wiki check",

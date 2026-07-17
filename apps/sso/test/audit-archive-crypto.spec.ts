@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 
 import {
   AUDIT_ARCHIVE_CONTENT_TYPE,
@@ -92,17 +92,21 @@ function expectArchiveError(
   action: () => unknown | Promise<unknown>,
   code?: AuditArchiveCryptoError["code"],
 ): Promise<void> {
-  return Promise.resolve()
-    .then(action)
-    .then(
-      () => {
-        throw new Error("Expected archive crypto to fail");
-      },
-      (error: unknown) => {
-        expect(error).toBeInstanceOf(AuditArchiveCryptoError);
-        if (code) expect((error as AuditArchiveCryptoError).code).toBe(code);
-      },
-    );
+  return archiveError(action).then((error) => {
+    if (code) expect(error.code).toBe(code);
+  });
+}
+
+async function archiveError(
+  action: () => unknown | Promise<unknown>,
+): Promise<AuditArchiveCryptoError> {
+  try {
+    await action();
+  } catch (error) {
+    expect(error).toBeInstanceOf(AuditArchiveCryptoError);
+    return error as AuditArchiveCryptoError;
+  }
+  throw new Error("Expected archive crypto to fail");
 }
 
 function fullBoundaryMetadata(): string {
@@ -117,6 +121,17 @@ function fullBoundaryMetadata(): string {
 }
 
 describe("audit archive crypto v1", () => {
+  it("exposes one-argument entry points backed only by global Web Crypto", () => {
+    expectTypeOf<
+      Parameters<typeof sealAuditArchiveV1>["length"]
+    >().toEqualTypeOf<1>();
+    expectTypeOf<
+      Parameters<typeof openAuditArchiveV1>["length"]
+    >().toEqualTypeOf<1>();
+    expect(sealAuditArchiveV1).toHaveLength(1);
+    expect(openAuditArchiveV1).toHaveLength(1);
+  });
+
   it("round-trips exact records while fresh Web Crypto randomness changes the envelope", async () => {
     const records = [record(5), record(9, { outcome: "denied" })];
     const kek = generatedKek();
@@ -184,7 +199,25 @@ describe("audit archive crypto v1", () => {
         actorUserId: null,
         clientId: null,
         ipHash: null,
+        metadataJson: JSON.stringify({ ipPrefix: "local" }),
+        sessionId: null,
+        subjectId: null,
+        userAgentHash: null,
+      }),
+      record(3, {
+        actorUserId: null,
+        clientId: null,
+        ipHash: null,
         metadataJson: JSON.stringify({ ipPrefix: "203.0.x.x" }),
+        sessionId: null,
+        subjectId: null,
+        userAgentHash: null,
+      }),
+      record(4, {
+        actorUserId: null,
+        clientId: null,
+        ipHash: null,
+        metadataJson: JSON.stringify({ ipPrefix: "2001::" }),
         sessionId: null,
         subjectId: null,
         userAgentHash: null,
@@ -282,6 +315,24 @@ describe("audit archive crypto v1", () => {
         }),
       "bounds_exceeded",
     );
+    for (const ipPrefix of [
+      "203.0.113.9",
+      "256.0.x.x",
+      "0.256.x.x",
+      "2001:db8::",
+      "2001:0db8:0000:0000:0000:ff00:0042:8329",
+    ]) {
+      await expectArchiveError(
+        () =>
+          sealAuditArchiveV1({
+            ...input,
+            records: [
+              record(1, { metadataJson: JSON.stringify({ ipPrefix }) }),
+            ],
+          }),
+        "invalid_input",
+      );
+    }
     for (const kind of ["at", "cs", "rt"] as const) {
       const marker = `${credentialMarker(kind)}${crypto.randomUUID()}`;
       await expectArchiveError(
@@ -548,37 +599,48 @@ describe("audit archive crypto v1", () => {
     expect(message).not.toContain(records[0]?.metadataJson ?? "unreachable");
     expect([...sealed.objectBytes]).toEqual(objectBefore);
     expect(records).toEqual(recordsBefore);
-  });
 
-  it("maps seal-side Web Crypto failures to one redacted encryption error", async () => {
-    const providerDetail = `provider-${crypto.randomUUID()}`;
-    let failure: unknown;
-    try {
-      await sealAuditArchiveV1(
-        {
-          batchGeneration: 1,
-          createdAt: CREATED_AT,
-          kek: generatedKek(),
-          keyVersion: "v1",
-          records: [record(1)],
+    const invalidKek = `${crypto.randomUUID()}-${crypto.randomUUID()}`;
+    const invalidKekRecords = [record(2)];
+    const invalidKekRecordsBefore = structuredClone(invalidKekRecords);
+    let invalidKekRecordsRead = false;
+    const invalidKekError = await archiveError(() =>
+      sealAuditArchiveV1({
+        batchGeneration: 1,
+        createdAt: CREATED_AT,
+        kek: invalidKek,
+        keyVersion: "v1",
+        get records() {
+          invalidKekRecordsRead = true;
+          return invalidKekRecords;
         },
-        {
-          getRandomValues(bytes) {
-            return crypto.getRandomValues(bytes);
-          },
-          subtle: {
-            digest() {
-              return Promise.reject(new Error(providerDetail));
-            },
-          } as unknown as SubtleCrypto,
-        },
-      );
-    } catch (error) {
-      failure = error;
-    }
+      }),
+    );
+    expect(invalidKekError.code).toBe("invalid_kek");
+    expect(invalidKekError.message).not.toContain(invalidKek);
+    expect(invalidKekError.message).not.toContain(
+      invalidKekRecords[0]?.eventId ?? "unreachable",
+    );
+    expect(invalidKekRecordsRead).toBe(false);
+    expect(invalidKekRecords).toEqual(invalidKekRecordsBefore);
 
-    expect(failure).toBeInstanceOf(AuditArchiveCryptoError);
-    expect((failure as AuditArchiveCryptoError).code).toBe("encryption_failed");
-    expect((failure as Error).message).not.toContain(providerDetail);
+    const invalidIdentifier = `${credentialMarker("at")}${crypto.randomUUID()}`;
+    const invalidRecords = [record(3, { eventId: invalidIdentifier })];
+    const invalidRecordsBefore = structuredClone(invalidRecords);
+    const invalidRecordError = await archiveError(() =>
+      sealAuditArchiveV1({
+        batchGeneration: 1,
+        createdAt: CREATED_AT,
+        kek,
+        keyVersion: "v1",
+        records: invalidRecords,
+      }),
+    );
+    expect(invalidRecordError.code).toBe("invalid_input");
+    expect(invalidRecordError.message).not.toContain(invalidIdentifier);
+    expect(invalidRecordError.message).not.toContain(
+      invalidRecords[0]?.metadataJson ?? "unreachable",
+    );
+    expect(invalidRecords).toEqual(invalidRecordsBefore);
   });
 });

@@ -132,11 +132,6 @@ export interface AuditArchiveOpenInputV1 {
   objectBytes: Uint8Array<ArrayBuffer>;
 }
 
-export interface AuditArchiveCryptoProvider {
-  getRandomValues(bytes: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer>;
-  readonly subtle: SubtleCrypto;
-}
-
 export type AuditArchiveCryptoErrorCode =
   | "bounds_exceeded"
   | "decryption_failed"
@@ -181,19 +176,30 @@ interface CanonicalRecordSet {
   records: AuditArchiveRecordV1[];
 }
 
+interface DecodedArchiveEnvelopeV1 {
+  ciphertextBytes: Uint8Array<ArrayBuffer>;
+  envelope: ArchiveEnvelopeV1;
+  nonceBytes: Uint8Array<ArrayBuffer>;
+  wrappedDekBytes: Uint8Array<ArrayBuffer>;
+}
+
 function fail(code: AuditArchiveCryptoErrorCode): never {
   throw new AuditArchiveCryptoError(code);
 }
 
-function providerOrDefault(
-  provider?: AuditArchiveCryptoProvider,
-): AuditArchiveCryptoProvider {
-  return provider ?? {
-    getRandomValues(bytes) {
-      return crypto.getRandomValues(bytes);
-    },
-    subtle: crypto.subtle,
-  };
+function redactedArchiveError(
+  error: unknown,
+  fallback: "decryption_failed" | "encryption_failed",
+): AuditArchiveCryptoError {
+  return error instanceof AuditArchiveCryptoError
+    ? error
+    : new AuditArchiveCryptoError(fallback);
+}
+
+function clearBytes(
+  ...buffers: Array<Uint8Array<ArrayBuffer> | undefined>
+): void {
+  for (const bytes of buffers) bytes?.fill(0);
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -282,10 +288,28 @@ function safeRedactedText(value: string): boolean {
   );
 }
 
+function isCurrentMaskedIpPrefix(value: string): boolean {
+  if (value === "local") return true;
+  const maskedV4 = /^(\d{1,3})\.(\d{1,3})\.x\.x$/.exec(value);
+  if (maskedV4) {
+    return maskedV4.slice(1).every((octet) => Number(octet) <= 255);
+  }
+  return /^[A-Fa-f0-9]{1,4}::$/.test(value);
+}
+
+function utf8ByteLength(value: string): number {
+  const bytes = new TextEncoder().encode(value);
+  try {
+    return bytes.byteLength;
+  } finally {
+    bytes.fill(0);
+  }
+}
+
 function validateMetadataJson(value: unknown): string | null {
   if (value === null) return null;
   if (typeof value !== "string") fail("invalid_input");
-  if (new TextEncoder().encode(value).byteLength > AUDIT_ARCHIVE_MAX_METADATA_BYTES) {
+  if (utf8ByteLength(value) > AUDIT_ARCHIVE_MAX_METADATA_BYTES) {
     fail("bounds_exceeded");
   }
   let metadata: unknown;
@@ -303,6 +327,12 @@ function validateMetadataJson(value: unknown): string | null {
       containsCredentialMaterial(key)
     ) {
       fail("invalid_input");
+    }
+    if (key === "ipPrefix") {
+      if (typeof child !== "string" || !isCurrentMaskedIpPrefix(child)) {
+        fail("invalid_input");
+      }
+      continue;
     }
     if (typeof child === "string") {
       if (!safeRedactedText(child)) fail("invalid_input");
@@ -359,7 +389,7 @@ function canonicalRecordSet(value: unknown): CanonicalRecordSet {
     }
     previousSequence = record.sequence;
     eventIds.add(record.eventId);
-    const recordBytes = new TextEncoder().encode(JSON.stringify(record)).byteLength;
+    const recordBytes = utf8ByteLength(JSON.stringify(record));
     if (recordBytes > AUDIT_ARCHIVE_MAX_RECORD_BYTES) fail("bounds_exceeded");
     cumulativeBytes += recordBytes;
     if (cumulativeBytes > AUDIT_ARCHIVE_MAX_PLAINTEXT_BYTES) {
@@ -374,6 +404,7 @@ function canonicalRecordSet(value: unknown): CanonicalRecordSet {
     }),
   );
   if (bytes.byteLength > AUDIT_ARCHIVE_MAX_PLAINTEXT_BYTES) {
+    bytes.fill(0);
     fail("bounds_exceeded");
   }
   return { bytes, records };
@@ -407,29 +438,35 @@ function base64UrlToBytes(
   ) {
     fail("invalid_input");
   }
-  let binary: string;
+  let bytes: Uint8Array<ArrayBuffer> | undefined;
   try {
+    let binary: string;
     const normalized = value.replaceAll("-", "+").replaceAll("_", "/");
-    binary = atob(
-      normalized.padEnd(
-        normalized.length + ((4 - (normalized.length % 4)) % 4),
-        "=",
-      ),
-    );
-  } catch {
-    fail("invalid_input");
+    try {
+      binary = atob(
+        normalized.padEnd(
+          normalized.length + ((4 - (normalized.length % 4)) % 4),
+          "=",
+        ),
+      );
+    } catch {
+      fail("invalid_input");
+    }
+    bytes = new Uint8Array(new ArrayBuffer(binary.length));
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    if (
+      (expectedLength !== undefined && bytes.byteLength !== expectedLength) ||
+      bytesToBase64Url(bytes) !== value
+    ) {
+      fail("invalid_input");
+    }
+    return bytes;
+  } catch (error) {
+    bytes?.fill(0);
+    throw error;
   }
-  const bytes = new Uint8Array(new ArrayBuffer(binary.length));
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  if (
-    (expectedLength !== undefined && bytes.byteLength !== expectedLength) ||
-    bytesToBase64Url(bytes) !== value
-  ) {
-    fail("invalid_input");
-  }
-  return bytes;
 }
 
 function parseKek(value: unknown): Uint8Array<ArrayBuffer> {
@@ -449,11 +486,13 @@ function bytesToHex(bytes: Uint8Array<ArrayBuffer>): string {
   return value;
 }
 
-async function sha256Hex(
-  subtle: SubtleCrypto,
-  bytes: Uint8Array<ArrayBuffer>,
-): Promise<string> {
-  return bytesToHex(new Uint8Array(await subtle.digest("SHA-256", bytes)));
+async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  try {
+    return bytesToHex(digest);
+  } finally {
+    digest.fill(0);
+  }
 }
 
 function canonicalHeader(value: {
@@ -491,14 +530,15 @@ function objectKey(firstSequence: number, lastSequence: number, digest: string):
   ).padStart(16, "0")}/${digest}.pgid-audit`;
 }
 
-function randomBytes(
-  length: number,
-  provider: AuditArchiveCryptoProvider,
-): Uint8Array<ArrayBuffer> {
+function randomBytes(length: number): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(new ArrayBuffer(length));
-  const result = provider.getRandomValues(bytes);
-  if (result !== bytes || result.byteLength !== length) fail("invalid_input");
-  return bytes;
+  try {
+    crypto.getRandomValues(bytes);
+    return bytes;
+  } catch (error) {
+    bytes.fill(0);
+    throw error;
+  }
 }
 
 function canonicalEnvelopeBytes(
@@ -605,24 +645,33 @@ function bytesEqual(
 
 export async function sealAuditArchiveV1(
   value: AuditArchiveSealInputV1,
-  cryptoProvider?: AuditArchiveCryptoProvider,
 ): Promise<SealedAuditArchiveV1> {
-  const input = exactObject(value, SEAL_INPUT_KEYS);
-  const batchGeneration = safeInteger(input.batchGeneration, 1);
-  const createdAt = canonicalTimestamp(input.createdAt);
-  const keyVersion = validatedKeyVersion(input.keyVersion);
-  const canonical = canonicalRecordSet(input.records);
-  const firstSequence = canonical.records[0]?.sequence;
-  const lastSequence = canonical.records.at(-1)?.sequence;
-  if (firstSequence === undefined || lastSequence === undefined) {
-    fail("invalid_input");
-  }
-  const provider = providerOrDefault(cryptoProvider);
-  const kekBytes = parseKek(input.kek);
-  const dekBytes = randomBytes(AES_256_BYTES, provider);
-  const nonce = randomBytes(AES_GCM_NONCE_BYTES, provider);
+  let canonical: CanonicalRecordSet | undefined;
+  let kekBytes: Uint8Array<ArrayBuffer> | undefined;
+  let dekBytes: Uint8Array<ArrayBuffer> | undefined;
+  let nonceBytes: Uint8Array<ArrayBuffer> | undefined;
+  let aadBytes: Uint8Array<ArrayBuffer> | undefined;
+  let wrappedDekBytes: Uint8Array<ArrayBuffer> | undefined;
+  let ciphertextBytes: Uint8Array<ArrayBuffer> | undefined;
+  let objectBytes: Uint8Array<ArrayBuffer> | undefined;
+  let completed = false;
   try {
-    const plaintextSha256 = await sha256Hex(provider.subtle, canonical.bytes);
+    const input = exactObject(value, SEAL_INPUT_KEYS);
+    const batchGeneration = safeInteger(input.batchGeneration, 1);
+    const createdAt = canonicalTimestamp(input.createdAt);
+    const keyVersion = validatedKeyVersion(input.keyVersion);
+
+    kekBytes = parseKek(input.kek);
+    canonical = canonicalRecordSet(input.records);
+    const firstSequence = canonical.records[0]?.sequence;
+    const lastSequence = canonical.records.at(-1)?.sequence;
+    if (firstSequence === undefined || lastSequence === undefined) {
+      fail("invalid_input");
+    }
+
+    dekBytes = randomBytes(AES_256_BYTES);
+    nonceBytes = randomBytes(AES_GCM_NONCE_BYTES);
+    const plaintextSha256 = await sha256Hex(canonical.bytes);
     const header = canonicalHeader({
       batchGeneration,
       createdAt,
@@ -632,49 +681,49 @@ export async function sealAuditArchiveV1(
       lastSequence,
       plaintextSha256,
     });
-    const [kek, dek] = await Promise.all([
-      provider.subtle.importKey(
-        "raw",
-        kekBytes,
-        { name: "AES-KW" },
-        false,
-        ["wrapKey", "unwrapKey"],
-      ),
-      provider.subtle.importKey(
-        "raw",
-        dekBytes,
-        { name: "AES-GCM" },
-        true,
-        ["encrypt", "decrypt"],
-      ),
-    ]);
-    const [wrappedDekBuffer, ciphertextBuffer] = await Promise.all([
-      provider.subtle.wrapKey("raw", dek, kek, { name: "AES-KW" }),
-      provider.subtle.encrypt(
+    aadBytes = headerBytes(header);
+    const kek = await crypto.subtle.importKey(
+      "raw",
+      kekBytes,
+      { name: "AES-KW" },
+      false,
+      ["wrapKey"],
+    );
+    const dek = await crypto.subtle.importKey(
+      "raw",
+      dekBytes,
+      { name: "AES-GCM" },
+      true,
+      ["encrypt"],
+    );
+    wrappedDekBytes = new Uint8Array(
+      await crypto.subtle.wrapKey("raw", dek, kek, { name: "AES-KW" }),
+    );
+    if (wrappedDekBytes.byteLength !== AES_KW_WRAPPED_256_BYTES) {
+      fail("integrity_mismatch");
+    }
+    ciphertextBytes = new Uint8Array(
+      await crypto.subtle.encrypt(
         {
-          additionalData: headerBytes(header),
-          iv: nonce,
+          additionalData: aadBytes,
+          iv: nonceBytes,
           name: "AES-GCM",
           tagLength: AES_GCM_TAG_BITS,
         },
         dek,
         canonical.bytes,
       ),
-    ]);
-    const wrappedDek = new Uint8Array(wrappedDekBuffer);
-    if (wrappedDek.byteLength !== AES_KW_WRAPPED_256_BYTES) {
-      fail("integrity_mismatch");
-    }
-    const objectBytes = canonicalEnvelopeBytes({
-      ciphertext: bytesToBase64Url(new Uint8Array(ciphertextBuffer)),
+    );
+    objectBytes = canonicalEnvelopeBytes({
+      ciphertext: bytesToBase64Url(ciphertextBytes),
       header,
-      nonce: bytesToBase64Url(nonce),
-      wrappedDek: bytesToBase64Url(wrappedDek),
+      nonce: bytesToBase64Url(nonceBytes),
+      wrappedDek: bytesToBase64Url(wrappedDekBytes),
     });
     if (objectBytes.byteLength > AUDIT_ARCHIVE_MAX_OBJECT_BYTES) {
       fail("bounds_exceeded");
     }
-    const objectSha256 = await sha256Hex(provider.subtle, objectBytes);
+    const objectSha256 = await sha256Hex(objectBytes);
     const manifest: AuditArchiveManifestV1 = {
       batchGeneration,
       contentType: AUDIT_ARCHIVE_CONTENT_TYPE,
@@ -690,14 +739,21 @@ export async function sealAuditArchiveV1(
       plaintextSha256,
       schemaVersion: 1,
     };
+    completed = true;
     return { manifest, objectBytes };
   } catch (error) {
-    if (error instanceof AuditArchiveCryptoError) throw error;
-    fail("encryption_failed");
+    throw redactedArchiveError(error, "encryption_failed");
   } finally {
-    canonical.bytes.fill(0);
-    dekBytes.fill(0);
-    kekBytes.fill(0);
+    clearBytes(
+      canonical?.bytes,
+      kekBytes,
+      dekBytes,
+      nonceBytes,
+      aadBytes,
+      wrappedDekBytes,
+      ciphertextBytes,
+      completed ? undefined : objectBytes,
+    );
   }
 }
 
@@ -717,22 +773,39 @@ function parseJsonBytes(bytes: Uint8Array<ArrayBuffer>): unknown {
   }
 }
 
-function validatedEnvelope(value: unknown): ArchiveEnvelopeV1 {
-  const envelope = exactObject(value, ENVELOPE_KEYS);
-  const header = validatedHeader(envelope.header);
-  const nonce = base64UrlToBytes(envelope.nonce, AES_GCM_NONCE_BYTES);
-  const wrappedDek = base64UrlToBytes(
-    envelope.wrappedDek,
-    AES_KW_WRAPPED_256_BYTES,
-  );
-  const ciphertext = base64UrlToBytes(envelope.ciphertext);
-  if (ciphertext.byteLength <= AES_GCM_TAG_BITS / 8) fail("invalid_input");
-  return {
-    ciphertext: bytesToBase64Url(ciphertext),
-    header,
-    nonce: bytesToBase64Url(nonce),
-    wrappedDek: bytesToBase64Url(wrappedDek),
-  };
+function decodedEnvelope(value: unknown): DecodedArchiveEnvelopeV1 {
+  let nonceBytes: Uint8Array<ArrayBuffer> | undefined;
+  let wrappedDekBytes: Uint8Array<ArrayBuffer> | undefined;
+  let ciphertextBytes: Uint8Array<ArrayBuffer> | undefined;
+  let transferred = false;
+  try {
+    const input = exactObject(value, ENVELOPE_KEYS);
+    const header = validatedHeader(input.header);
+    nonceBytes = base64UrlToBytes(input.nonce, AES_GCM_NONCE_BYTES);
+    wrappedDekBytes = base64UrlToBytes(
+      input.wrappedDek,
+      AES_KW_WRAPPED_256_BYTES,
+    );
+    ciphertextBytes = base64UrlToBytes(input.ciphertext);
+    if (ciphertextBytes.byteLength <= AES_GCM_TAG_BITS / 8) {
+      fail("invalid_input");
+    }
+    const result: DecodedArchiveEnvelopeV1 = {
+      ciphertextBytes,
+      envelope: {
+        ciphertext: bytesToBase64Url(ciphertextBytes),
+        header,
+        nonce: bytesToBase64Url(nonceBytes),
+        wrappedDek: bytesToBase64Url(wrappedDekBytes),
+      },
+      nonceBytes,
+      wrappedDekBytes,
+    };
+    transferred = true;
+    return result;
+  } finally {
+    if (!transferred) clearBytes(nonceBytes, wrappedDekBytes, ciphertextBytes);
+  }
 }
 
 function manifestMatchesHeader(
@@ -754,47 +827,49 @@ function manifestMatchesHeader(
 
 export async function openAuditArchiveV1(
   value: AuditArchiveOpenInputV1,
-  cryptoProvider?: AuditArchiveCryptoProvider,
 ): Promise<readonly AuditArchiveRecordV1[]> {
-  const input = exactObject(value, OPEN_INPUT_KEYS);
-  const objectBytes = decodeObjectBytes(input.objectBytes);
-  const manifest = validatedManifest(input.expected);
-  const provider = providerOrDefault(cryptoProvider);
-  const objectSha256 = await sha256Hex(provider.subtle, objectBytes);
-  if (
-    objectBytes.byteLength !== manifest.objectBytes ||
-    objectSha256 !== manifest.objectSha256 ||
-    objectKey(manifest.firstSequence, manifest.lastSequence, objectSha256) !==
-      manifest.objectKey
-  ) {
-    fail("integrity_mismatch");
-  }
-  const envelope = validatedEnvelope(parseJsonBytes(objectBytes));
-  if (
-    !bytesEqual(canonicalEnvelopeBytes(envelope), objectBytes) ||
-    !manifestMatchesHeader(manifest, envelope.header)
-  ) {
-    fail("integrity_mismatch");
-  }
-  const kekBytes = parseKek(input.kek);
-  const nonce = base64UrlToBytes(envelope.nonce, AES_GCM_NONCE_BYTES);
-  const wrappedDek = base64UrlToBytes(
-    envelope.wrappedDek,
-    AES_KW_WRAPPED_256_BYTES,
-  );
-  const ciphertext = base64UrlToBytes(envelope.ciphertext);
+  let objectBytes: Uint8Array<ArrayBuffer> | undefined;
+  let decoded: DecodedArchiveEnvelopeV1 | undefined;
+  let canonicalEnvelope: Uint8Array<ArrayBuffer> | undefined;
+  let kekBytes: Uint8Array<ArrayBuffer> | undefined;
+  let aadBytes: Uint8Array<ArrayBuffer> | undefined;
   let plaintext: Uint8Array<ArrayBuffer> | undefined;
+  let canonical: CanonicalRecordSet | undefined;
   try {
-    const kek = await provider.subtle.importKey(
+    const input = exactObject(value, OPEN_INPUT_KEYS);
+    objectBytes = decodeObjectBytes(input.objectBytes);
+    const manifest = validatedManifest(input.expected);
+    const objectSha256 = await sha256Hex(objectBytes);
+    if (
+      objectBytes.byteLength !== manifest.objectBytes ||
+      objectSha256 !== manifest.objectSha256 ||
+      objectKey(manifest.firstSequence, manifest.lastSequence, objectSha256) !==
+        manifest.objectKey
+    ) {
+      fail("integrity_mismatch");
+    }
+
+    decoded = decodedEnvelope(parseJsonBytes(objectBytes));
+    canonicalEnvelope = canonicalEnvelopeBytes(decoded.envelope);
+    if (
+      !bytesEqual(canonicalEnvelope, objectBytes) ||
+      !manifestMatchesHeader(manifest, decoded.envelope.header)
+    ) {
+      fail("integrity_mismatch");
+    }
+
+    kekBytes = parseKek(input.kek);
+    aadBytes = headerBytes(decoded.envelope.header);
+    const kek = await crypto.subtle.importKey(
       "raw",
       kekBytes,
       { name: "AES-KW" },
       false,
       ["unwrapKey"],
     );
-    const dek = await provider.subtle.unwrapKey(
+    const dek = await crypto.subtle.unwrapKey(
       "raw",
-      wrappedDek,
+      decoded.wrappedDekBytes,
       kek,
       { name: "AES-KW" },
       { name: "AES-GCM", length: 256 },
@@ -802,29 +877,24 @@ export async function openAuditArchiveV1(
       ["decrypt"],
     );
     plaintext = new Uint8Array(
-      await provider.subtle.decrypt(
+      await crypto.subtle.decrypt(
         {
-          additionalData: headerBytes(envelope.header),
-          iv: nonce,
+          additionalData: aadBytes,
+          iv: decoded.nonceBytes,
           name: "AES-GCM",
           tagLength: AES_GCM_TAG_BITS,
         },
         dek,
-        ciphertext,
+        decoded.ciphertextBytes,
       ),
     );
-  } catch {
-    fail("decryption_failed");
-  } finally {
-    kekBytes.fill(0);
-  }
-  try {
     if (
       plaintext.byteLength > AUDIT_ARCHIVE_MAX_PLAINTEXT_BYTES ||
-      (await sha256Hex(provider.subtle, plaintext)) !== manifest.plaintextSha256
+      (await sha256Hex(plaintext)) !== manifest.plaintextSha256
     ) {
       fail("integrity_mismatch");
     }
+
     const parsed = exactObject(parseJsonBytes(plaintext), PLAINTEXT_KEYS);
     if (
       parsed.contract !== AUDIT_ARCHIVE_RECORDS_CONTRACT ||
@@ -832,21 +902,29 @@ export async function openAuditArchiveV1(
     ) {
       fail("invalid_input");
     }
-    const canonical = canonicalRecordSet(parsed.records);
-    try {
-      if (
-        !bytesEqual(canonical.bytes, plaintext) ||
-        canonical.records.length !== manifest.eventCount ||
-        canonical.records[0]?.sequence !== manifest.firstSequence ||
-        canonical.records.at(-1)?.sequence !== manifest.lastSequence
-      ) {
-        fail("integrity_mismatch");
-      }
-      return canonical.records;
-    } finally {
-      canonical.bytes.fill(0);
+    canonical = canonicalRecordSet(parsed.records);
+    if (
+      !bytesEqual(canonical.bytes, plaintext) ||
+      canonical.records.length !== manifest.eventCount ||
+      canonical.records[0]?.sequence !== manifest.firstSequence ||
+      canonical.records.at(-1)?.sequence !== manifest.lastSequence
+    ) {
+      fail("integrity_mismatch");
     }
+    return canonical.records;
+  } catch (error) {
+    throw redactedArchiveError(error, "decryption_failed");
   } finally {
-    plaintext.fill(0);
+    clearBytes(
+      objectBytes,
+      decoded?.nonceBytes,
+      decoded?.wrappedDekBytes,
+      decoded?.ciphertextBytes,
+      canonicalEnvelope,
+      kekBytes,
+      aadBytes,
+      plaintext,
+      canonical?.bytes,
+    );
   }
 }

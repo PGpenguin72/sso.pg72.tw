@@ -5,7 +5,12 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
-import { validateArtifactFiles } from "./artifact-gate.mjs";
+import {
+  validateArtifactFiles,
+  validateProductionWorkerArtifactFiles,
+  validateProductionWorkerEntrypointIdentity,
+} from "./artifact-gate.mjs";
+import { scanBufferForSecrets } from "./secret-family.mjs";
 
 const basePolicy = {
   entrypoint: "index.js",
@@ -32,6 +37,15 @@ function reviewedGeneratedFallbacks(body) {
     `function buildSecretConfig(legacySecret) { return { legacySecret: legacySecret && legacySecret !== ${literal} ? legacySecret : void 0 }; }`,
     `async function createAuthContext(legacySecret) { let secret; secret = legacySecret || ${literal}; }`,
   ].join("\n");
+}
+
+function fallbackBehavioralDecoys(count) {
+  const overrides = [
+    "DEFAULT_SECRET = void 0;",
+    "function buildSecretConfig(legacySecret) { return { legacySecret: void 0 }; }",
+    "async function createAuthContext(legacySecret) { let secret; secret = legacySecret; }",
+  ];
+  return `${reviewedGeneratedFallbacks("")}\n${overrides.slice(0, count).join("\n")}`;
 }
 
 test("accepts a bounded allowlisted Worker artifact", (context) => {
@@ -109,6 +123,38 @@ test("allows only exact reviewed Worker error-enum assignments", (context) => {
     () => validateArtifactFiles(directory, basePolicy, { scanRoot: "artifact:worker" }),
     /redacted secret family \[assigned-secret]/,
   );
+});
+
+test("rejects wrong production entry digests before the structural artifact scanner", (context) => {
+  const directory = fixture();
+  context.after(() => rmSync(directory, { force: true, recursive: true }));
+  assert.throws(
+    () => validateProductionWorkerEntrypointIdentity(Buffer.from("export default {};")),
+    /entrypoint identity/,
+  );
+  assert.throws(
+    () => validateProductionWorkerArtifactFiles(directory, basePolicy),
+    /entrypoint identity/,
+  );
+});
+
+test("whole-entry identity rejects one, two, and three reviewed-context decoys", () => {
+  for (const count of [1, 2, 3]) {
+    const source = Buffer.from(fallbackBehavioralDecoys(count));
+    assert.deepEqual(
+      scanBufferForSecrets(source, {
+        enforceGeneratedLiteralContract: true,
+        relativePath: "artifact:worker/index.js",
+      }),
+      [],
+      `${count} decoy override(s) unexpectedly failed the structural control`,
+    );
+    assert.throws(
+      () => validateProductionWorkerEntrypointIdentity(source),
+      /entrypoint identity/,
+      `${count} decoy override(s) bypassed the whole-entry identity`,
+    );
+  }
 });
 
 test("hashes sensitive, secret-bearing, control-character, and outside artifact paths", (context) => {

@@ -23,11 +23,19 @@ const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const policy = JSON.parse(
   readFileSync(new URL("../../security/release-policy.json", import.meta.url), "utf8"),
 );
+const codeOwnedProductionWorkerEntrypoint = Object.freeze({
+  path: "index.js",
+  sha256: "6b6cdf4adbe409792615c5e8bebf08d0ab1c75691d0a8deb8dc4d670bc6c77b3",
+});
 
 const forbiddenContent = [
   { name: "private machine path", pattern: /(?:\/Users\/|\/private\/(?:tmp|var)\/|\/home\/(?:runner|[^/\s]+)\/|[A-Za-z]:\\Users\\)/ },
   { name: "source map reference", pattern: /(?:sourceMappingURL|"sourcesContent"\s*:)/ },
 ];
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
 
 function scrubbedEnvironment() {
   const environment = {
@@ -80,12 +88,7 @@ function walk(directory, prefix = "") {
   return files;
 }
 
-export function validateArtifactFiles(
-  directory,
-  filePolicy,
-  { scanRoot = "artifact:unclassified" } = {},
-) {
-  const files = walk(directory);
+function validateArtifactFileRecords(files, filePolicy, scanRoot) {
   assert.ok(
     files.some((file) => file.relative === filePolicy.entrypoint),
     `missing ${diagnosticPath(filePolicy.entrypoint)}`,
@@ -129,6 +132,43 @@ export function validateArtifactFiles(
     assert.ok(entrypoint.size <= filePolicy.maxEntrypointBytes, `entrypoint is ${entrypoint.size} bytes`);
   }
   return { totalBytes, files: inventory };
+}
+
+export function validateArtifactFiles(
+  directory,
+  filePolicy,
+  { scanRoot = "artifact:unclassified" } = {},
+) {
+  return validateArtifactFileRecords(walk(directory), filePolicy, scanRoot);
+}
+
+export function validateProductionWorkerEntrypointIdentity(bytes) {
+  assert.equal(
+    sha256(bytes),
+    codeOwnedProductionWorkerEntrypoint.sha256,
+    "production Worker entrypoint identity differs from the code-owned digest",
+  );
+}
+
+export function validateProductionWorkerArtifactFiles(directory, filePolicy) {
+  assert.equal(
+    filePolicy.entrypoint,
+    codeOwnedProductionWorkerEntrypoint.path,
+    "production Worker entrypoint path differs from the code-owned contract",
+  );
+  const files = walk(directory);
+  const entrypoint = files.find(
+    (file) => file.relative === codeOwnedProductionWorkerEntrypoint.path,
+  );
+  assert.ok(entrypoint, `missing ${diagnosticPath(codeOwnedProductionWorkerEntrypoint.path)}`);
+  let bytes;
+  try {
+    bytes = readFileSync(entrypoint.absolute);
+  } catch {
+    throw new Error(`unable to read artifact file: ${entrypoint.display}`);
+  }
+  validateProductionWorkerEntrypointIdentity(bytes);
+  return validateArtifactFileRecords(files, filePolicy, "artifact:worker");
 }
 
 export function validateDeploymentConfig(config) {
@@ -201,9 +241,7 @@ function main() {
   );
   const deploymentConfig = JSON.parse(readFileSync(deploymentConfigPath, "utf8"));
   validateDeploymentConfig(deploymentConfig);
-  const worker = validateArtifactFiles(workerDirectory, policy.artifact, {
-    scanRoot: "artifact:worker",
-  });
+  const worker = validateProductionWorkerArtifactFiles(workerDirectory, policy.artifact);
   const staticAssets = validateArtifactFiles(
     path.join(repoRoot, "apps", "sso", "dist", "client"),
     policy.staticAssets,

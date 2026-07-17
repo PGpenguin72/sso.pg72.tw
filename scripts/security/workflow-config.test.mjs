@@ -7,10 +7,14 @@ import {
   dangerousCommandErrors,
   expectedPreviewJobCondition,
   loadWorkflowCommandContext,
+  reachablePackageScriptDigest,
   validateArtifactUploads,
+  validateReachablePackageScriptIdentity,
   validateWorkflowCommands,
   validateWorkflowDocument,
   validateWorkflowEnvironment,
+  validateWorkflowFileSet,
+  validateWorkflowSourceIdentity,
   workflowPolicy,
 } from "./workflow-config.mjs";
 
@@ -38,6 +42,11 @@ function workflow() {
       },
     },
   };
+}
+
+function replaceExactly(source, search, replacement) {
+  assert.equal(source.split(search).length, 2, `mutation anchor must occur exactly once: ${search}`);
+  return source.replace(search, replacement);
 }
 
 test("accepts least-privilege immutable workflows", () => {
@@ -87,6 +96,92 @@ test("accepts only the exact recursively reachable package-script graph", () => 
       readFileSync(new URL(`../../.github/workflows/${filename}`, import.meta.url), "utf8"),
     );
     assert.deepEqual(validateWorkflowCommands(document, filename, context), []);
+  }
+});
+
+test("pins the exact workflow file set and raw LF-only tracked bytes", () => {
+  assert.deepEqual(validateWorkflowFileSet(["dast-preview.yml", "ci.yml"]), []);
+  assert.notDeepEqual(validateWorkflowFileSet(["ci.yml"]), []);
+  assert.notDeepEqual(validateWorkflowFileSet(["ci.yml", "dast-preview.yml", "extra.yml"]), []);
+
+  for (const filename of ["ci.yml", "dast-preview.yml"]) {
+    const source = readFileSync(
+      new URL(`../../.github/workflows/${filename}`, import.meta.url),
+    );
+    assert.deepEqual(validateWorkflowSourceIdentity(source, filename), []);
+    const crlf = Buffer.from(source.toString("utf8").replaceAll("\n", "\r\n"));
+    assert.notDeepEqual(validateWorkflowSourceIdentity(crlf, filename), [], filename);
+  }
+});
+
+test("rejects the complete workflow reviewer mutation matrix at the raw identity layer", () => {
+  const source = readFileSync(
+    new URL("../../.github/workflows/ci.yml", import.meta.url),
+    "utf8",
+  );
+  const checkoutWith = "        with:\n          persist-credentials: false\n          fetch-depth: 0";
+  const gateStep = "      - name: Run repository gate\n        run: pnpm check";
+  const jobBoundary = "    timeout-minutes: 30\n\n    steps:";
+  const mutations = [
+    ["action uses", (value) => replaceExactly(value, "actions/checkout@df4cb1c", "actions/checkout@ef4cb1c")],
+    ["checkout repository", (value) => replaceExactly(value, checkoutWith, `${checkoutWith}\n          repository: attacker/repository`)],
+    ["checkout ref", (value) => replaceExactly(value, checkoutWith, `${checkoutWith}\n          ref: attacker-ref`)],
+    ["checkout token", (value) => replaceExactly(value, checkoutWith, `${checkoutWith}\n          token: \${{ github.token }}`)],
+    ["checkout path", (value) => replaceExactly(value, checkoutWith, `${checkoutWith}\n          path: nested`)],
+    ["setup extra with", (value) => replaceExactly(value, "          version: 11.5.0", "          version: 11.5.0\n          standalone: true")],
+    ["job if", (value) => replaceExactly(value, "  verify:\n    runs-on:", "  verify:\n    if: \${{ false }}\n    runs-on:")],
+    ["step if", (value) => replaceExactly(value, gateStep, `${gateStep}\n        if: \${{ false }}`)],
+    ["continue-on-error", (value) => replaceExactly(value, gateStep, `${gateStep}\n        continue-on-error: true`)],
+    ["timeout", (value) => replaceExactly(value, "    timeout-minutes: 30", "    timeout-minutes: 31")],
+    ["needs", (value) => replaceExactly(value, "  verify:\n    runs-on:", "  verify:\n    needs: bootstrap\n    runs-on:")],
+    ["environment", (value) => replaceExactly(value, "    runs-on: ubuntu-24.04", "    runs-on: ubuntu-24.04\n    environment: production")],
+    ["job permissions", (value) => replaceExactly(value, "    timeout-minutes: 30", "    timeout-minutes: 30\n    permissions:\n      contents: write")],
+    ["top-level permissions", (value) => replaceExactly(value, "  contents: read", "  contents: write")],
+    ["runs-on", (value) => replaceExactly(value, "    runs-on: ubuntu-24.04", "    runs-on: self-hosted")],
+    ["strategy", (value) => replaceExactly(value, jobBoundary, "    timeout-minutes: 30\n    strategy:\n      matrix:\n        node: [24]\n\n    steps:")],
+    ["container", (value) => replaceExactly(value, jobBoundary, "    timeout-minutes: 30\n    container: node:24\n\n    steps:")],
+    ["services", (value) => replaceExactly(value, jobBoundary, "    timeout-minutes: 30\n    services:\n      cache:\n        image: redis:7\n\n    steps:")],
+    ["workflow env", (value) => replaceExactly(value, "permissions:\n  contents: read", "env:\n  NODE_OPTIONS: --require ./payload.cjs\n\npermissions:\n  contents: read")],
+    ["job env", (value) => replaceExactly(value, "    timeout-minutes: 30", "    timeout-minutes: 30\n    env:\n      NODE_OPTIONS: --require ./payload.cjs")],
+    ["step env", (value) => replaceExactly(value, gateStep, `${gateStep}\n        env:\n          NODE_OPTIONS: --require ./payload.cjs`)],
+    ["run", (value) => replaceExactly(value, "        run: pnpm check", "        run: pnpm check && echo bypass")],
+    ["shell", (value) => replaceExactly(value, gateStep, `${gateStep}\n        shell: sh`)],
+    ["working-directory", (value) => replaceExactly(value, gateStep, `${gateStep}\n        working-directory: /tmp`)],
+    ["whole-checkout upload", (value) => replaceExactly(value, "          path: .artifacts/release", "          path: .")],
+    ["upload retention", (value) => replaceExactly(value, "          retention-days: 7", "          retention-days: 30")],
+    ["upload hidden files", (value) => replaceExactly(value, "          include-hidden-files: false", "          include-hidden-files: true")],
+  ];
+
+  for (const [label, mutate] of mutations) {
+    const changed = mutate(source);
+    assert.notEqual(changed, source, label);
+    assert.notDeepEqual(
+      validateWorkflowSourceIdentity(Buffer.from(changed), "ci.yml"),
+      [],
+      label,
+    );
+  }
+});
+
+test("pins reachable package-script names and complete values to one code-owned digest", () => {
+  const baseline = loadWorkflowCommandContext();
+  assert.equal(
+    reachablePackageScriptDigest(baseline),
+    "04c31e7ea87041f5841a7904a5cba6dc28c32355ae03c93364ec191139a7b98f",
+  );
+  assert.deepEqual(validateReachablePackageScriptIdentity(baseline), []);
+
+  for (const mutate of [
+    (context) => (context.packagesByRoot["."].scripts.check += " && echo bypass"),
+    (context) => delete context.packagesByRoot["apps/sso"].scripts.build,
+    (context) => {
+      context.packagesByRoot.wiki.scripts.verify = context.packagesByRoot.wiki.scripts.check;
+      delete context.packagesByRoot.wiki.scripts.check;
+    },
+  ]) {
+    const context = structuredClone(baseline);
+    mutate(context);
+    assert.notDeepEqual(validateReachablePackageScriptIdentity(context), []);
   }
 });
 

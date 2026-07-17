@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { accessSync, constants, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -51,6 +52,12 @@ const codeOwnedExpressionContexts = Object.freeze([
   "vars.PGID_DAST_PREVIEW_OPT_IN",
 ]);
 const codeOwnedPackageRoots = Object.freeze([".", "apps/sso", "apps/test-rp", "wiki"]);
+const codeOwnedWorkflowSourceDigests = Object.freeze({
+  "ci.yml": "5408d19375e9ad871817a589afd5b3e557f0bd16d327789efe8278786898805a",
+  "dast-preview.yml": "357a11ae8a31a068135108459859b0ccb348a701f8686f7de3ffb922b10de180",
+});
+const codeOwnedReachablePackageScriptDigest =
+  "04c31e7ea87041f5841a7904a5cba6dc28c32355ae03c93364ec191139a7b98f";
 const codeOwnedWorkflowRuns = Object.freeze({
   "ci.yml": Object.freeze({
     "verify:3": "pnpm install --frozen-lockfile",
@@ -160,6 +167,41 @@ const codeOwnedArtifactUpload = Object.freeze({
     "include-hidden-files": false,
   }),
 });
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => canonicalJson(entry)).join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function validateWorkflowFileSet(files) {
+  const actual = [...files].sort();
+  const expected = Object.keys(codeOwnedWorkflowSourceDigests).sort();
+  return JSON.stringify(actual) === JSON.stringify(expected)
+    ? []
+    : ["workflow file set differs from the code-owned exact set"];
+}
+
+export function validateWorkflowSourceIdentity(source, filename) {
+  const basename = path.basename(filename);
+  const expected = codeOwnedWorkflowSourceDigests[basename];
+  if (!expected) return [`${basename} lacks a code-owned raw-byte identity`];
+  const bytes = Buffer.isBuffer(source) ? source : Buffer.from(source);
+  return sha256(bytes) === expected
+    ? []
+    : [`${basename} raw-byte identity differs from the code-owned LF-only source`];
+}
 
 function forbiddenEnvironmentKey(key) {
   const normalized = key.toUpperCase();
@@ -475,6 +517,12 @@ export function dangerousCommandErrors(command) {
 
 function validateCommandPolicyDefinition(policy) {
   const errors = [];
+  if (
+    JSON.stringify(Object.keys(policy).sort()) !==
+    JSON.stringify(["environmentPolicy", "packageRoots", "schemaVersion"])
+  ) {
+    errors.push("workflow policy top-level keys differ from the code-owned schema");
+  }
   if (JSON.stringify(policy.packageRoots) !== JSON.stringify(codeOwnedPackageRoots)) {
     errors.push("packageRoots differ from the code-owned exact roots");
   }
@@ -517,6 +565,7 @@ function localScriptError(command, packageRoot) {
 
 function expandPackageScript(packageRoot, scriptName, context, state) {
   const key = `${packageRoot}:${scriptName}`;
+  state.scripts?.add(key);
   if (state.stack.includes(key)) {
     state.errors.push(`package script cycle: ${[...state.stack, key].join(" -> ")}`);
     return;
@@ -567,6 +616,51 @@ function expandCommand(command, packageRoot, context, state) {
   expandPackageScript(packageRoot, scriptName, context, state);
 }
 
+function reachablePackageScriptSnapshot(context) {
+  const state = { errors: [], leaves: [], scripts: new Set(), stack: [] };
+  for (const commands of Object.values(codeOwnedWorkflowRuns)) {
+    for (const command of Object.values(commands)) {
+      expandCommand(command, ".", context, state);
+    }
+  }
+  const snapshot = {};
+  for (const key of [...state.scripts].sort()) {
+    const separator = key.indexOf(":");
+    const packageRoot = key.slice(0, separator);
+    const scriptName = key.slice(separator + 1);
+    snapshot[packageRoot] ??= {};
+    snapshot[packageRoot][scriptName] =
+      context.packagesByRoot[packageRoot]?.scripts?.[scriptName] ?? null;
+  }
+  return { errors: state.errors, scripts: state.scripts, snapshot };
+}
+
+export function reachablePackageScriptDigest(context) {
+  return sha256(canonicalJson(reachablePackageScriptSnapshot(context).snapshot));
+}
+
+export function validateReachablePackageScriptIdentity(context) {
+  const errors = [];
+  const actual = reachablePackageScriptSnapshot(context);
+  errors.push(...actual.errors);
+  const expectedKeys = Object.entries(codeOwnedPackageScripts)
+    .flatMap(([packageRoot, scripts]) =>
+      Object.keys(scripts).map((scriptName) => `${packageRoot}:${scriptName}`),
+    )
+    .sort();
+  const actualKeys = [...actual.scripts].sort();
+  if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys)) {
+    errors.push("reachable package-script names differ from the code-owned exact graph");
+  }
+  if (sha256(canonicalJson(codeOwnedPackageScripts)) !== codeOwnedReachablePackageScriptDigest) {
+    errors.push("code-owned reachable package-script definition digest drifted");
+  }
+  if (sha256(canonicalJson(actual.snapshot)) !== codeOwnedReachablePackageScriptDigest) {
+    errors.push("reachable package-script name/value digest differs from the code-owned contract");
+  }
+  return [...new Set(errors)];
+}
+
 function stableMapping(value) {
   return JSON.stringify(Object.entries(value ?? {}).sort(([left], [right]) => left.localeCompare(right)));
 }
@@ -614,6 +708,7 @@ export function validateWorkflowCommands(document, filename, context) {
   const errors = [
     ...validateWorkflowEnvironment(document, filename, context.policy),
     ...validateCommandPolicyDefinition(context.policy),
+    ...validateReachablePackageScriptIdentity(context),
     ...validateArtifactUploads(document, filename),
   ];
   const expected = codeOwnedWorkflowRuns[basename];
@@ -676,7 +771,7 @@ function main() {
     .filter((name) => /\.ya?ml$/.test(name))
     .sort();
   assert.ok(files.length > 0, "no GitHub workflows found");
-  const errors = [];
+  const errors = [...validateWorkflowFileSet(files)];
   if (workflowPolicy.schemaVersion !== 2) errors.push("workflow policy schemaVersion must be 2");
   if (dastPolicy.schemaVersion !== 2) errors.push("DAST policy schemaVersion must be 2");
   if (JSON.stringify(dastPolicy.preview.approvedActors) !== JSON.stringify(["PGpenguin72"])) {
@@ -688,7 +783,11 @@ function main() {
   const commandContext = loadWorkflowCommandContext();
   for (const name of files) {
     const filename = path.join(workflowDirectory, name);
-    const document = YAML.parse(readFileSync(filename, "utf8"));
+    const source = readFileSync(filename);
+    const identityErrors = validateWorkflowSourceIdentity(source, filename);
+    errors.push(...identityErrors.map((error) => `${name}: ${error}`));
+    if (identityErrors.length > 0) continue;
+    const document = YAML.parse(source.toString("utf8"));
     errors.push(...validateWorkflowDocument(document, filename).map((error) => `${name}: ${error}`));
     errors.push(...validateWorkflowCommands(document, filename, commandContext).map((error) => `${name}: ${error}`));
   }

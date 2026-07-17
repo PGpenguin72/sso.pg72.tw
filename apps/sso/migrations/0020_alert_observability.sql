@@ -7,6 +7,12 @@
 -- Passkey/OAuth-report/admin/audit-fanout/logout/runtime sources. Queue DLQ
 -- metrics are explicitly approximate; every other source is exact D1 state.
 -- Threshold values remain in versioned rule definitions/tests, not this SQL.
+-- Persisted alert timestamps are exact 24-character UTC millisecond strings.
+-- Their canonical form makes text ordering precise; SQLite epoch-second
+-- conversion drops sub-second ownership and chronology differences.
+-- The '+0 seconds' modifier forces calendar normalization. Each formatter
+-- result is also checked for non-null because SQLite treats a null CHECK result
+-- as passing rather than as a constraint violation.
 
 ALTER TABLE "audit_event" ADD COLUMN "actor_ref" text CHECK (
   "actor_ref" IS NULL
@@ -125,7 +131,13 @@ CREATE TABLE "alert_hash_key_sentinel" (
   ),
   "hash_version" integer NOT NULL
     CHECK (typeof("hash_version") = 'integer' AND "hash_version" = 1),
-  "created_at" date NOT NULL CHECK (unixepoch("created_at") IS NOT NULL)
+  "created_at" date NOT NULL CHECK (
+    typeof("created_at") = 'text'
+    AND length("created_at") = 24
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds') IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds')
+      = "created_at"
+  )
 );
 
 CREATE TRIGGER "alert_hash_key_sentinel_insert_guard"
@@ -296,26 +308,79 @@ CREATE TABLE "alert_state" (
     CHECK ("generation" BETWEEN 0 AND 1000000),
   "revision" integer NOT NULL DEFAULT 0
     CHECK ("revision" BETWEEN 0 AND 1000000000),
-  "cooldown_until" date
-    CHECK ("cooldown_until" IS NULL OR unixepoch("cooldown_until") IS NOT NULL),
-  "last_evaluated_at" date NOT NULL
-    CHECK (unixepoch("last_evaluated_at") IS NOT NULL),
+  "cooldown_until" date CHECK (
+    "cooldown_until" IS NULL
+    OR (typeof("cooldown_until") = 'text'
+      AND length("cooldown_until") = 24
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "cooldown_until", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "cooldown_until", '+0 seconds'
+      )
+        = "cooldown_until")
+  ),
+  "last_evaluated_at" date NOT NULL CHECK (
+    typeof("last_evaluated_at") = 'text'
+    AND length("last_evaluated_at") = 24
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', "last_evaluated_at", '+0 seconds'
+    ) IS NOT NULL
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', "last_evaluated_at", '+0 seconds'
+    )
+      = "last_evaluated_at"
+  ),
   "last_breached_at" date CHECK (
-    "last_breached_at" IS NULL OR unixepoch("last_breached_at") IS NOT NULL
+    "last_breached_at" IS NULL
+    OR (typeof("last_breached_at") = 'text'
+      AND length("last_breached_at") = 24
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_breached_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_breached_at", '+0 seconds'
+      )
+        = "last_breached_at")
   ),
   "last_cleared_at" date CHECK (
-    "last_cleared_at" IS NULL OR unixepoch("last_cleared_at") IS NOT NULL
+    "last_cleared_at" IS NULL
+    OR (typeof("last_cleared_at") = 'text'
+      AND length("last_cleared_at") = 24
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_cleared_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_cleared_at", '+0 seconds'
+      )
+        = "last_cleared_at")
   ),
   "last_notification_scheduled_at" date CHECK (
     "last_notification_scheduled_at" IS NULL
-    OR (
-      unixepoch("last_notification_scheduled_at") IS NOT NULL
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "last_notification_scheduled_at")
-        = "last_notification_scheduled_at"
-    )
+    OR (typeof("last_notification_scheduled_at") = 'text'
+      AND length("last_notification_scheduled_at") = 24
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_notification_scheduled_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_notification_scheduled_at", '+0 seconds'
+      )
+        = "last_notification_scheduled_at")
   ),
-  "created_at" date NOT NULL CHECK (unixepoch("created_at") IS NOT NULL),
-  "updated_at" date NOT NULL CHECK (unixepoch("updated_at") IS NOT NULL),
+  "created_at" date NOT NULL CHECK (
+    typeof("created_at") = 'text'
+    AND length("created_at") = 24
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds') IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds')
+      = "created_at"
+  ),
+  "updated_at" date NOT NULL CHECK (
+    typeof("updated_at") = 'text'
+    AND length("updated_at") = 24
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at", '+0 seconds') IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at", '+0 seconds')
+      = "updated_at"
+  ),
   UNIQUE ("id", "rule_id", "environment", "source_kind"),
   CHECK (
     typeof("window_seconds") = 'integer'
@@ -570,19 +635,19 @@ CREATE TABLE "alert_state" (
       AND "last_notification_scheduled_at" IS NULL)
     OR ("current_severity" IN ('warning', 'critical')
       AND "last_notification_scheduled_at" IS NOT NULL
-      AND unixepoch("last_notification_scheduled_at") >= unixepoch("created_at")
-      AND unixepoch("last_notification_scheduled_at") <= unixepoch("updated_at"))
+      AND "last_notification_scheduled_at" >= "created_at"
+      AND "last_notification_scheduled_at" <= "updated_at")
   ),
-  CHECK (unixepoch("updated_at") >= unixepoch("created_at")),
-  CHECK (unixepoch("last_evaluated_at") >= unixepoch("created_at")),
-  CHECK (unixepoch("last_evaluated_at") <= unixepoch("updated_at")),
+  CHECK ("updated_at" >= "created_at"),
+  CHECK ("last_evaluated_at" >= "created_at"),
+  CHECK ("last_evaluated_at" <= "updated_at"),
   CHECK (
     "last_breached_at" IS NULL
-    OR unixepoch("last_breached_at") >= unixepoch("created_at")
+    OR "last_breached_at" >= "created_at"
   ),
   CHECK (
     "last_cleared_at" IS NULL
-    OR unixepoch("last_cleared_at") >= unixepoch("created_at")
+    OR "last_cleared_at" >= "created_at"
   )
 );
 
@@ -621,15 +686,15 @@ END;
 CREATE TRIGGER "alert_state_transition_guard"
 BEFORE UPDATE ON "alert_state"
 WHEN NEW."revision" <> OLD."revision" + 1
-  OR unixepoch(NEW."updated_at") < unixepoch(OLD."updated_at")
-  OR unixepoch(NEW."last_evaluated_at")
-    <= unixepoch(OLD."last_evaluated_at")
+  OR NEW."updated_at" < OLD."updated_at"
+  OR NEW."last_evaluated_at" <= OLD."last_evaluated_at"
   OR (OLD."current_severity" IN ('warning', 'critical')
     AND NEW."current_severity" = 'none'
     AND (
       NEW."cooldown_until" IS NULL
-      OR unixepoch(NEW."cooldown_until")
-        <> unixepoch(NEW."last_evaluated_at") + 1800
+      OR NEW."cooldown_until" <> strftime(
+        '%Y-%m-%dT%H:%M:%fZ', NEW."last_evaluated_at", '+1800 seconds'
+      )
     ))
   OR (OLD."current_severity" = 'none'
     AND NEW."current_severity" = 'none'
@@ -637,13 +702,12 @@ WHEN NEW."revision" <> OLD."revision" + 1
       NEW."cooldown_until" IS OLD."cooldown_until"
       OR (OLD."cooldown_until" IS NOT NULL
         AND NEW."cooldown_until" IS NULL
-        AND unixepoch(NEW."last_evaluated_at")
-          >= unixepoch(OLD."cooldown_until"))
+        AND NEW."last_evaluated_at" >= OLD."cooldown_until")
     ))
   OR (OLD."last_notification_scheduled_at" IS NOT NULL
     AND NEW."last_notification_scheduled_at" IS NOT NULL
-    AND unixepoch(NEW."last_notification_scheduled_at")
-      < unixepoch(OLD."last_notification_scheduled_at"))
+    AND NEW."last_notification_scheduled_at"
+      < OLD."last_notification_scheduled_at")
   OR NOT (
     (OLD."current_severity" = 'none'
       AND NEW."current_severity" = 'none'
@@ -654,8 +718,7 @@ WHEN NEW."revision" <> OLD."revision" + 1
       AND OLD."breach_severity" = 'warning'
       AND OLD."consecutive_breaches" = 1
       AND (OLD."cooldown_until" IS NULL
-        OR unixepoch(NEW."last_evaluated_at")
-          >= unixepoch(OLD."cooldown_until"))
+        OR NEW."last_evaluated_at" >= OLD."cooldown_until")
       AND NEW."breach_severity" IS NULL
       AND NEW."consecutive_breaches" = 0
       AND NEW."consecutive_clears" = 0)
@@ -789,8 +852,22 @@ CREATE TABLE "security_alert" (
     CHECK ("status" IN ('open', 'acknowledged', 'resolved')),
   "source_kind" text NOT NULL
     CHECK ("source_kind" IN ('d1_exact', 'queue_approximate')),
-  "first_seen_at" date NOT NULL CHECK (unixepoch("first_seen_at") IS NOT NULL),
-  "last_seen_at" date NOT NULL CHECK (unixepoch("last_seen_at") IS NOT NULL),
+  "first_seen_at" date NOT NULL CHECK (
+    typeof("first_seen_at") = 'text'
+    AND length("first_seen_at") = 24
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "first_seen_at", '+0 seconds')
+      IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "first_seen_at", '+0 seconds')
+      = "first_seen_at"
+  ),
+  "last_seen_at" date NOT NULL CHECK (
+    typeof("last_seen_at") = 'text'
+    AND length("last_seen_at") = 24
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "last_seen_at", '+0 seconds')
+      IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "last_seen_at", '+0 seconds')
+      = "last_seen_at"
+  ),
   "window_seconds" integer NOT NULL
     CHECK ("window_seconds" IN (300, 900, 3600)),
   "metric_name" text NOT NULL CHECK (
@@ -844,7 +921,16 @@ CREATE TABLE "security_alert" (
     OR "secondary_threshold" BETWEEN 1 AND 1000000000
   ),
   "acknowledged_at" date CHECK (
-    "acknowledged_at" IS NULL OR unixepoch("acknowledged_at") IS NOT NULL
+    "acknowledged_at" IS NULL
+    OR (typeof("acknowledged_at") = 'text'
+      AND length("acknowledged_at") = 24
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "acknowledged_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "acknowledged_at", '+0 seconds'
+      )
+        = "acknowledged_at")
   ),
   "acknowledged_by_ref" text CHECK (
     "acknowledged_by_ref" IS NULL
@@ -861,8 +947,15 @@ CREATE TABLE "security_alert" (
     "acknowledged_by_hash_version" IS NULL
     OR "acknowledged_by_hash_version" = 1
   ),
-  "resolved_at" date
-    CHECK ("resolved_at" IS NULL OR unixepoch("resolved_at") IS NOT NULL),
+  "resolved_at" date CHECK (
+    "resolved_at" IS NULL
+    OR (typeof("resolved_at") = 'text'
+      AND length("resolved_at") = 24
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "resolved_at", '+0 seconds')
+        IS NOT NULL
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "resolved_at", '+0 seconds')
+        = "resolved_at")
+  ),
   "resolved_by_ref" text CHECK (
     "resolved_by_ref" IS NULL
     OR (
@@ -883,8 +976,20 @@ CREATE TABLE "security_alert" (
       'healthy', 'manual_false_positive', 'approved_test', 'operator_resolved'
     )
   ),
-  "created_at" date NOT NULL CHECK (unixepoch("created_at") IS NOT NULL),
-  "updated_at" date NOT NULL CHECK (unixepoch("updated_at") IS NOT NULL),
+  "created_at" date NOT NULL CHECK (
+    typeof("created_at") = 'text'
+    AND length("created_at") = 24
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds') IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds')
+      = "created_at"
+  ),
+  "updated_at" date NOT NULL CHECK (
+    typeof("updated_at") = 'text'
+    AND length("updated_at") = 24
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at", '+0 seconds') IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at", '+0 seconds')
+      = "updated_at"
+  ),
   UNIQUE ("state_id", "generation"),
   UNIQUE ("id", "generation"),
   UNIQUE ("id", "generation", "rule_id", "environment", "source_kind"),
@@ -1043,24 +1148,24 @@ CREATE TABLE "security_alert" (
     "secondary_metric_name" IS NULL
     OR "secondary_observed_value" >= "secondary_threshold"
   ),
-  CHECK (unixepoch("last_seen_at") >= unixepoch("first_seen_at")),
-  CHECK (unixepoch("created_at") <= unixepoch("first_seen_at")),
-  CHECK (unixepoch("updated_at") >= unixepoch("created_at")),
-  CHECK (unixepoch("updated_at") >= unixepoch("last_seen_at")),
+  CHECK ("last_seen_at" >= "first_seen_at"),
+  CHECK ("created_at" <= "first_seen_at"),
+  CHECK ("updated_at" >= "created_at"),
+  CHECK ("updated_at" >= "last_seen_at"),
   CHECK (
     "acknowledged_at" IS NULL
-    OR (unixepoch("acknowledged_at") >= unixepoch("created_at")
-      AND unixepoch("acknowledged_at") <= unixepoch("updated_at"))
+    OR ("acknowledged_at" >= "created_at"
+      AND "acknowledged_at" <= "updated_at")
   ),
   CHECK (
     "resolved_at" IS NULL
-    OR (unixepoch("resolved_at") >= unixepoch("created_at")
-      AND unixepoch("resolved_at") <= unixepoch("updated_at"))
+    OR ("resolved_at" >= "created_at"
+      AND "resolved_at" <= "updated_at")
   ),
   CHECK (
     "acknowledged_at" IS NULL
     OR "resolved_at" IS NULL
-    OR unixepoch("resolved_at") >= unixepoch("acknowledged_at")
+    OR "resolved_at" >= "acknowledged_at"
   ),
   CHECK (
     ("acknowledged_at" IS NULL
@@ -1197,8 +1302,8 @@ WHEN NEW."id" <> OLD."id"
   OR NEW."generation" <> OLD."generation"
   OR NEW."first_seen_at" <> OLD."first_seen_at"
   OR NEW."created_at" <> OLD."created_at"
-  OR unixepoch(NEW."updated_at") < unixepoch(OLD."updated_at")
-  OR unixepoch(NEW."last_seen_at") < unixepoch(OLD."last_seen_at")
+  OR NEW."updated_at" < OLD."updated_at"
+  OR NEW."last_seen_at" < OLD."last_seen_at"
   OR NOT (
     NEW."severity" = OLD."severity"
     OR (OLD."severity" = 'warning' AND NEW."severity" = 'critical')
@@ -1385,8 +1490,22 @@ CREATE TABLE "alert_outbox" (
       'alert_delivery', 'archive'
     )
   ),
-  "first_seen_at" date NOT NULL CHECK (unixepoch("first_seen_at") IS NOT NULL),
-  "last_seen_at" date NOT NULL CHECK (unixepoch("last_seen_at") IS NOT NULL),
+  "first_seen_at" date NOT NULL CHECK (
+    typeof("first_seen_at") = 'text'
+    AND length("first_seen_at") = 24
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "first_seen_at", '+0 seconds')
+      IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "first_seen_at", '+0 seconds')
+      = "first_seen_at"
+  ),
+  "last_seen_at" date NOT NULL CHECK (
+    typeof("last_seen_at") = 'text'
+    AND length("last_seen_at") = 24
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "last_seen_at", '+0 seconds')
+      IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "last_seen_at", '+0 seconds')
+      = "last_seen_at"
+  ),
   "window_seconds" integer NOT NULL
     CHECK ("window_seconds" IN (300, 900, 3600)),
   "metric_name" text NOT NULL CHECK (
@@ -1445,17 +1564,50 @@ CREATE TABLE "alert_outbox" (
   "replay_count" integer NOT NULL DEFAULT 0
     CHECK ("replay_count" BETWEEN 0 AND 1000),
   "next_attempt_at" date CHECK (
-    "next_attempt_at" IS NULL OR unixepoch("next_attempt_at") IS NOT NULL
+    "next_attempt_at" IS NULL
+    OR (typeof("next_attempt_at") = 'text'
+      AND length("next_attempt_at") = 24
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "next_attempt_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "next_attempt_at", '+0 seconds'
+      )
+        = "next_attempt_at")
   ),
   "lease_id" text CHECK (
     "lease_id" IS NULL OR length("lease_id") = 36
   ),
   "lease_expires_at" date CHECK (
-    "lease_expires_at" IS NULL OR unixepoch("lease_expires_at") IS NOT NULL
+    "lease_expires_at" IS NULL
+    OR (typeof("lease_expires_at") = 'text'
+      AND length("lease_expires_at") = 24
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "lease_expires_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "lease_expires_at", '+0 seconds'
+      )
+        = "lease_expires_at")
   ),
-  "accepted_at" date
-    CHECK ("accepted_at" IS NULL OR unixepoch("accepted_at") IS NOT NULL),
-  "dead_at" date CHECK ("dead_at" IS NULL OR unixepoch("dead_at") IS NOT NULL),
+  "accepted_at" date CHECK (
+    "accepted_at" IS NULL
+    OR (typeof("accepted_at") = 'text'
+      AND length("accepted_at") = 24
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "accepted_at", '+0 seconds')
+        IS NOT NULL
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "accepted_at", '+0 seconds')
+        = "accepted_at")
+  ),
+  "dead_at" date CHECK (
+    "dead_at" IS NULL
+    OR (typeof("dead_at") = 'text'
+      AND length("dead_at") = 24
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "dead_at", '+0 seconds')
+        IS NOT NULL
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "dead_at", '+0 seconds')
+        = "dead_at")
+  ),
   "last_error_code" text CHECK (
     "last_error_code" IS NULL
     OR "last_error_code" IN (
@@ -1466,8 +1618,20 @@ CREATE TABLE "alert_outbox" (
       'payload_integrity'
     )
   ),
-  "created_at" date NOT NULL CHECK (unixepoch("created_at") IS NOT NULL),
-  "updated_at" date NOT NULL CHECK (unixepoch("updated_at") IS NOT NULL),
+  "created_at" date NOT NULL CHECK (
+    typeof("created_at") = 'text'
+    AND length("created_at") = 24
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds') IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds')
+      = "created_at"
+  ),
+  "updated_at" date NOT NULL CHECK (
+    typeof("updated_at") = 'text'
+    AND length("updated_at") = 24
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at", '+0 seconds') IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at", '+0 seconds')
+      = "updated_at"
+  ),
   UNIQUE (
     "alert_id", "generation", "event_kind", "event_sequence", "channel"
   ),
@@ -1690,8 +1854,8 @@ CREATE TABLE "alert_outbox" (
     "secondary_metric_name" IS NULL
     OR "secondary_observed_value" >= "secondary_threshold"
   ),
-  CHECK (unixepoch("last_seen_at") >= unixepoch("first_seen_at")),
-  CHECK (unixepoch("updated_at") >= unixepoch("created_at")),
+  CHECK ("last_seen_at" >= "first_seen_at"),
+  CHECK ("updated_at" >= "created_at"),
   CHECK (
     ("lease_id" IS NULL AND "lease_expires_at" IS NULL)
     OR ("lease_id" IS NOT NULL AND "lease_expires_at" IS NOT NULL)
@@ -1806,7 +1970,7 @@ WHEN NEW."status" <> 'pending'
   OR NEW."accepted_at" IS NOT NULL
   OR NEW."dead_at" IS NOT NULL
   OR NEW."last_error_code" IS NOT NULL
-  OR unixepoch(NEW."next_attempt_at") < unixepoch(NEW."created_at")
+  OR NEW."next_attempt_at" < NEW."created_at"
   OR NOT EXISTS (
   SELECT 1
     FROM "security_alert" AS a
@@ -1858,7 +2022,7 @@ END;
 -- authorize replay; the future admin Worker still owns actor/session guards.
 CREATE TRIGGER "alert_outbox_transition_guard"
 BEFORE UPDATE ON "alert_outbox"
-WHEN unixepoch(NEW."updated_at") < unixepoch(OLD."updated_at")
+WHEN NEW."updated_at" < OLD."updated_at"
   OR NOT (
   (NEW."replay_count" = OLD."replay_count"
     AND NEW."status" = OLD."status"
@@ -1873,8 +2037,8 @@ WHEN unixepoch(NEW."updated_at") < unixepoch(OLD."updated_at")
     AND OLD."status" IN ('pending', 'retry')
     AND NEW."status" = 'processing'
     AND NEW."attempts" = OLD."attempts" + 1
-    AND unixepoch(NEW."updated_at") >= unixepoch(OLD."next_attempt_at")
-    AND unixepoch(NEW."lease_expires_at") > unixepoch(NEW."updated_at"))
+    AND NEW."updated_at" >= OLD."next_attempt_at"
+    AND NEW."lease_expires_at" > NEW."updated_at")
   OR (NEW."replay_count" = OLD."replay_count"
     AND OLD."status" = 'processing'
     AND NEW."status" IN ('accepted', 'retry', 'dead')
@@ -1883,7 +2047,7 @@ WHEN unixepoch(NEW."updated_at") < unixepoch(OLD."updated_at")
       (NEW."status" = 'accepted' AND NEW."accepted_at" = NEW."updated_at")
       OR (NEW."status" = 'dead' AND NEW."dead_at" = NEW."updated_at")
       OR (NEW."status" = 'retry'
-        AND unixepoch(NEW."next_attempt_at") > unixepoch(NEW."updated_at"))
+        AND NEW."next_attempt_at" > NEW."updated_at")
     )
     AND EXISTS (
       SELECT 1
@@ -1895,15 +2059,14 @@ WHEN unixepoch(NEW."updated_at") < unixepoch(OLD."updated_at")
          AND attempt."outcome" <> 'in_flight'
          AND attempt."resulting_status" = NEW."status"
          AND attempt."error_code" IS NEW."last_error_code"
-         AND unixepoch(NEW."updated_at")
-           >= unixepoch(attempt."completed_at")
+         AND NEW."updated_at" >= attempt."completed_at"
     ))
   OR (NEW."replay_count" = OLD."replay_count" + 1
     AND OLD."status" IN ('accepted', 'dead')
     AND OLD."last_error_code" IS NOT 'payload_integrity'
     AND NEW."status" = 'pending'
     AND NEW."attempts" = 0
-    AND unixepoch(NEW."next_attempt_at") >= unixepoch(NEW."updated_at"))
+    AND NEW."next_attempt_at" >= NEW."updated_at")
 )
 BEGIN
   SELECT RAISE(ABORT, 'invalid alert delivery transition');
@@ -1939,9 +2102,22 @@ CREATE TABLE "alert_delivery_attempt" (
       'payload_integrity'
     )
   ),
-  "started_at" date NOT NULL CHECK (unixepoch("started_at") IS NOT NULL),
+  "started_at" date NOT NULL CHECK (
+    typeof("started_at") = 'text'
+    AND length("started_at") = 24
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "started_at", '+0 seconds')
+      IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "started_at", '+0 seconds')
+      = "started_at"
+  ),
   "completed_at" date CHECK (
-    "completed_at" IS NULL OR unixepoch("completed_at") IS NOT NULL
+    "completed_at" IS NULL
+    OR (typeof("completed_at") = 'text'
+      AND length("completed_at") = 24
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "completed_at", '+0 seconds')
+        IS NOT NULL
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "completed_at", '+0 seconds')
+        = "completed_at")
   ),
   UNIQUE ("outbox_id", "replay_count", "attempt_number"),
   CHECK (
@@ -1951,7 +2127,7 @@ CREATE TABLE "alert_delivery_attempt" (
   ),
   CHECK (
     "completed_at" IS NULL
-    OR unixepoch("completed_at") >= unixepoch("started_at")
+    OR "completed_at" >= "started_at"
   ),
   CHECK (
     ("outcome" = 'in_flight'
@@ -2002,8 +2178,8 @@ WHEN NEW."outcome" <> 'in_flight'
        AND delivery."replay_count" = NEW."replay_count"
        AND delivery."attempts" = NEW."attempt_number"
        AND delivery."lease_id" = NEW."lease_id"
-       AND unixepoch(NEW."started_at") >= unixepoch(delivery."updated_at")
-       AND unixepoch(NEW."started_at") < unixepoch(delivery."lease_expires_at")
+       AND NEW."started_at" >= delivery."updated_at"
+       AND NEW."started_at" < delivery."lease_expires_at"
   )
 BEGIN
   SELECT RAISE(ABORT, 'alert attempt does not match its active delivery claim');
@@ -2032,11 +2208,9 @@ WHEN OLD."outcome" <> 'in_flight'
        AND delivery."lease_id" = OLD."lease_id"
        AND (
          (NEW."outcome" = 'lease_expired'
-           AND unixepoch(NEW."completed_at")
-             >= unixepoch(delivery."lease_expires_at"))
+           AND NEW."completed_at" >= delivery."lease_expires_at")
          OR (NEW."outcome" IN ('accepted', 'retry', 'dead')
-           AND unixepoch(NEW."completed_at")
-             < unixepoch(delivery."lease_expires_at"))
+           AND NEW."completed_at" < delivery."lease_expires_at")
        )
   )
 BEGIN
@@ -2066,16 +2240,52 @@ CREATE TABLE "alert_runtime_status" (
     CHECK ("revision" BETWEEN 0 AND 1000000000),
   "lease_id" text CHECK ("lease_id" IS NULL OR length("lease_id") = 36),
   "lease_expires_at" date CHECK (
-    "lease_expires_at" IS NULL OR unixepoch("lease_expires_at") IS NOT NULL
+    "lease_expires_at" IS NULL
+    OR (typeof("lease_expires_at") = 'text'
+      AND length("lease_expires_at") = 24
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "lease_expires_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "lease_expires_at", '+0 seconds'
+      )
+        = "lease_expires_at")
   ),
   "last_started_at" date CHECK (
-    "last_started_at" IS NULL OR unixepoch("last_started_at") IS NOT NULL
+    "last_started_at" IS NULL
+    OR (typeof("last_started_at") = 'text'
+      AND length("last_started_at") = 24
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_started_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_started_at", '+0 seconds'
+      )
+        = "last_started_at")
   ),
   "last_success_at" date CHECK (
-    "last_success_at" IS NULL OR unixepoch("last_success_at") IS NOT NULL
+    "last_success_at" IS NULL
+    OR (typeof("last_success_at") = 'text'
+      AND length("last_success_at") = 24
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_success_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_success_at", '+0 seconds'
+      )
+        = "last_success_at")
   ),
   "last_error_at" date CHECK (
-    "last_error_at" IS NULL OR unixepoch("last_error_at") IS NOT NULL
+    "last_error_at" IS NULL
+    OR (typeof("last_error_at") = 'text'
+      AND length("last_error_at") = 24
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_error_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "last_error_at", '+0 seconds'
+      )
+        = "last_error_at")
   ),
   "last_error_code" text CHECK (
     "last_error_code" IS NULL
@@ -2086,11 +2296,15 @@ CREATE TABLE "alert_runtime_status" (
   ),
   "metric_sampled_at" date CHECK (
     "metric_sampled_at" IS NULL
-    OR (
-      unixepoch("metric_sampled_at") IS NOT NULL
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "metric_sampled_at")
-        = "metric_sampled_at"
-    )
+    OR (typeof("metric_sampled_at") = 'text'
+      AND length("metric_sampled_at") = 24
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "metric_sampled_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "metric_sampled_at", '+0 seconds'
+      )
+        = "metric_sampled_at")
   ),
   "backlog_count" integer
     CHECK ("backlog_count" IS NULL OR "backlog_count" BETWEEN 0 AND 1000000000),
@@ -2103,21 +2317,35 @@ CREATE TABLE "alert_runtime_status" (
   ),
   "nonzero_since_at" date CHECK (
     "nonzero_since_at" IS NULL
-    OR (
-      unixepoch("nonzero_since_at") IS NOT NULL
-      AND strftime('%Y-%m-%dT%H:%M:%fZ', "nonzero_since_at")
-        = "nonzero_since_at"
-    )
+    OR (typeof("nonzero_since_at") = 'text'
+      AND length("nonzero_since_at") = 24
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "nonzero_since_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "nonzero_since_at", '+0 seconds'
+      )
+        = "nonzero_since_at")
   ),
   "consecutive_nonzero_samples" integer CHECK (
     "consecutive_nonzero_samples" IS NULL
     OR "consecutive_nonzero_samples" BETWEEN 0 AND 1000000
   ),
-  "watermark_at" date
-    CHECK ("watermark_at" IS NULL OR unixepoch("watermark_at") IS NOT NULL),
+  "watermark_at" date CHECK (
+    "watermark_at" IS NULL
+    OR (typeof("watermark_at") = 'text'
+      AND length("watermark_at") = 24
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "watermark_at", '+0 seconds')
+        IS NOT NULL
+      AND strftime('%Y-%m-%dT%H:%M:%fZ', "watermark_at", '+0 seconds')
+        = "watermark_at")
+  ),
   "updated_at" date NOT NULL CHECK (
-    unixepoch("updated_at") IS NOT NULL
-    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at") = "updated_at"
+    typeof("updated_at") = 'text'
+    AND length("updated_at") = 24
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at", '+0 seconds') IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "updated_at", '+0 seconds')
+      = "updated_at"
   ),
   CHECK (
     typeof("generation") = 'integer'
@@ -2135,8 +2363,10 @@ CREATE TABLE "alert_runtime_status" (
   ),
   CHECK (
     "lease_id" IS NULL
-    OR (unixepoch("lease_expires_at") > unixepoch("updated_at")
-      AND unixepoch("lease_expires_at") <= unixepoch("updated_at") + 300)
+    OR ("lease_expires_at" > "updated_at"
+      AND "lease_expires_at" <= strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "updated_at", '+300 seconds'
+      ))
   ),
   CHECK (
     ("last_error_at" IS NULL AND "last_error_code" IS NULL)
@@ -2163,30 +2393,30 @@ CREATE TABLE "alert_runtime_status" (
           AND "consecutive_nonzero_samples" = 0)
         OR ("backlog_count" > 0
           AND "nonzero_since_at" IS NOT NULL
-          AND unixepoch("nonzero_since_at") <= unixepoch("metric_sampled_at")
+          AND "nonzero_since_at" <= "metric_sampled_at"
           AND "consecutive_nonzero_samples" BETWEEN 1 AND 1000000)
       ))
   ),
   CHECK (
     "metric_sampled_at" IS NULL
-    OR unixepoch("metric_sampled_at") <= unixepoch("updated_at")
+    OR "metric_sampled_at" <= "updated_at"
   ),
   CHECK (
     "last_started_at" IS NULL
-    OR unixepoch("last_started_at") <= unixepoch("updated_at")
+    OR "last_started_at" <= "updated_at"
   ),
   CHECK (
     "last_success_at" IS NULL
-    OR unixepoch("last_success_at") <= unixepoch("updated_at")
+    OR "last_success_at" <= "updated_at"
   ),
   CHECK (
     "last_error_at" IS NULL
-    OR unixepoch("last_error_at") <= unixepoch("updated_at")
+    OR "last_error_at" <= "updated_at"
   ),
   CHECK (
     "watermark_at" IS NULL
     OR ("last_success_at" IS NOT NULL
-      AND unixepoch("watermark_at") <= unixepoch("last_success_at"))
+      AND "watermark_at" <= "last_success_at")
   )
 );
 
@@ -2216,7 +2446,7 @@ CREATE TRIGGER "alert_runtime_status_transition_guard"
 BEFORE UPDATE ON "alert_runtime_status"
 WHEN NEW."component" <> OLD."component"
   OR NEW."revision" <> OLD."revision" + 1
-  OR unixepoch(NEW."updated_at") <= unixepoch(OLD."updated_at")
+  OR NEW."updated_at" <= OLD."updated_at"
   OR NOT (
     (OLD."lease_id" IS NULL
       AND NEW."lease_id" IS NULL
@@ -2227,57 +2457,55 @@ WHEN NEW."component" <> OLD."component"
     OR (OLD."lease_id" IS NOT NULL
       AND NEW."lease_id" IS OLD."lease_id"
       AND NEW."generation" = OLD."generation"
-      AND unixepoch(NEW."updated_at") < unixepoch(OLD."lease_expires_at")
-      AND unixepoch(NEW."lease_expires_at")
-        >= unixepoch(OLD."lease_expires_at"))
+      AND NEW."updated_at" < OLD."lease_expires_at"
+      AND NEW."lease_expires_at" >= OLD."lease_expires_at")
     OR (OLD."lease_id" IS NOT NULL
       AND NEW."lease_id" IS NULL
       AND NEW."generation" = OLD."generation"
-      AND unixepoch(NEW."updated_at") < unixepoch(OLD."lease_expires_at"))
+      AND NEW."updated_at" < OLD."lease_expires_at")
     OR (OLD."lease_id" IS NOT NULL
       AND NEW."lease_id" IS NOT NULL
       AND NEW."lease_id" IS NOT OLD."lease_id"
       AND NEW."generation" = OLD."generation" + 1
-      AND unixepoch(NEW."updated_at") >= unixepoch(OLD."lease_expires_at"))
+      AND NEW."updated_at" >= OLD."lease_expires_at")
   )
   OR (OLD."last_started_at" IS NOT NULL AND (
     NEW."last_started_at" IS NULL
-    OR unixepoch(NEW."last_started_at") < unixepoch(OLD."last_started_at")
+    OR NEW."last_started_at" < OLD."last_started_at"
   ))
   OR (OLD."last_success_at" IS NOT NULL AND (
     NEW."last_success_at" IS NULL
-    OR unixepoch(NEW."last_success_at") < unixepoch(OLD."last_success_at")
+    OR NEW."last_success_at" < OLD."last_success_at"
   ))
   OR (OLD."last_error_at" IS NOT NULL AND (
     NEW."last_error_at" IS NULL
-    OR unixepoch(NEW."last_error_at") < unixepoch(OLD."last_error_at")
+    OR NEW."last_error_at" < OLD."last_error_at"
   ))
   OR (OLD."watermark_at" IS NOT NULL AND (
     NEW."watermark_at" IS NULL
-    OR unixepoch(NEW."watermark_at") < unixepoch(OLD."watermark_at")
+    OR NEW."watermark_at" < OLD."watermark_at"
   ))
   OR NOT (
     (NEW."last_error_at" IS OLD."last_error_at"
       AND NEW."last_error_code" IS OLD."last_error_code")
     OR (NEW."last_error_at" IS NOT NULL
       AND (OLD."last_error_at" IS NULL
-        OR unixepoch(NEW."last_error_at") > unixepoch(OLD."last_error_at"))
+        OR NEW."last_error_at" > OLD."last_error_at")
       AND NEW."last_error_code" IS NOT NULL)
   )
   OR (NEW."last_success_at" IS NOT OLD."last_success_at" AND (
     NEW."last_started_at" IS NULL
-    OR unixepoch(NEW."last_success_at") < unixepoch(NEW."last_started_at")
+    OR NEW."last_success_at" < NEW."last_started_at"
   ))
   OR (NEW."last_error_at" IS NOT OLD."last_error_at" AND (
     NEW."last_started_at" IS NULL
-    OR unixepoch(NEW."last_error_at") < unixepoch(NEW."last_started_at")
+    OR NEW."last_error_at" < NEW."last_started_at"
   ))
   OR (OLD."metric_sampled_at" IS NOT NULL
     AND NEW."metric_sampled_at" IS NULL)
   OR (OLD."metric_sampled_at" IS NOT NULL
     AND NEW."metric_sampled_at" IS NOT NULL
-    AND unixepoch(NEW."metric_sampled_at")
-      < unixepoch(OLD."metric_sampled_at"))
+    AND NEW."metric_sampled_at" < OLD."metric_sampled_at")
   OR NOT (
     (NEW."metric_sampled_at" IS OLD."metric_sampled_at"
       AND NEW."backlog_count" IS OLD."backlog_count"
@@ -2289,8 +2517,7 @@ WHEN NEW."component" <> OLD."component"
         IS OLD."consecutive_nonzero_samples")
     OR (NEW."metric_sampled_at" IS NOT NULL
       AND (OLD."metric_sampled_at" IS NULL
-        OR unixepoch(NEW."metric_sampled_at")
-          > unixepoch(OLD."metric_sampled_at"))
+        OR NEW."metric_sampled_at" > OLD."metric_sampled_at")
       AND (
         (NEW."backlog_count" = 0
           AND NEW."nonzero_since_at" IS NULL
@@ -2298,15 +2525,21 @@ WHEN NEW."component" <> OLD."component"
         OR (NEW."backlog_count" > 0 AND (
           (OLD."metric_sampled_at" IS NOT NULL
             AND OLD."backlog_count" > 0
-            AND unixepoch(NEW."metric_sampled_at")
-              - unixepoch(OLD."metric_sampled_at") = 60
+            AND NEW."metric_sampled_at" = strftime(
+              '%Y-%m-%dT%H:%M:%fZ',
+              OLD."metric_sampled_at",
+              '+60 seconds'
+            )
             AND NEW."nonzero_since_at" = OLD."nonzero_since_at"
             AND NEW."consecutive_nonzero_samples"
               = OLD."consecutive_nonzero_samples" + 1)
           OR ((OLD."metric_sampled_at" IS NULL
               OR OLD."backlog_count" = 0
-              OR unixepoch(NEW."metric_sampled_at")
-                - unixepoch(OLD."metric_sampled_at") <> 60)
+              OR NEW."metric_sampled_at" <> strftime(
+                '%Y-%m-%dT%H:%M:%fZ',
+                OLD."metric_sampled_at",
+                '+60 seconds'
+              ))
             AND NEW."nonzero_since_at" = NEW."metric_sampled_at"
             AND NEW."consecutive_nonzero_samples" = 1)
         ))
@@ -2322,8 +2555,14 @@ END;
 CREATE TABLE "alert_evaluator_bootstrap" (
   "component" text PRIMARY KEY NOT NULL CHECK ("component" = 'evaluator'),
   "first_success_at" date NOT NULL CHECK (
-    unixepoch("first_success_at") IS NOT NULL
-    AND strftime('%Y-%m-%dT%H:%M:%fZ', "first_success_at")
+    typeof("first_success_at") = 'text'
+    AND length("first_success_at") = 24
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', "first_success_at", '+0 seconds'
+    ) IS NOT NULL
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', "first_success_at", '+0 seconds'
+    )
       = "first_success_at"
   ),
   "source_generation" integer NOT NULL CHECK (

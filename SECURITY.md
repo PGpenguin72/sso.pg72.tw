@@ -6,6 +6,8 @@ This deployed state is not the same as full Production GO or general-public appr
 
 The repository's local source now includes the narrowly scoped Mail Path A introspection prerequisite, Passkey step-up for every OAuth client mutation, public-registration prerequisites using Turnstile, versioned legal acceptance and persistent restricted-account access, the global-logout source contract, and recovery migration `0019`. Production has none of migrations `0013` through `0019` or this Worker version; `pgid-mail-introspect` has not been provisioned, no public-registration or logout-Queue bindings have been configured, `RECOVERY_MODE` remains disabled, no remote D1 operation was performed, and the mail VPS and production RP receivers have not been cut over. These local results must not be represented as production behavior.
 
+The repository also contains fail-closed synthetic continuity and bounded-load tooling. It requires an exact clean Git commit, uses fresh local D1 state, complete ordered migration-ledger comparison, literal loopback Workers, ephemeral Web Crypto fixtures, an exact six-scenario bounded profile, redacted mode-`0600` schema-version-2 reports, and no Cloudflare credentials. Dependency evidence distinguishes missing, invalid, source-present-unverified, and verified states; source content alone cannot pass, because only the corresponding proof executed in that same run can mark it verified. Recovery `0019`, observability `0020`, encrypted R2 archive, or release automation that is not verified keeps the command blocked with a nonzero exit. A local synthetic pass is not a Preview restore, live key rotation, Queue/DLQ/R2 drill, external alert test, or production approval. Operator instructions are in [`docs/runbooks/continuity.md`](./docs/runbooks/continuity.md) and [`docs/runbooks/load-failure-drills.md`](./docs/runbooks/load-failure-drills.md).
+
 ## Reporting
 
 Do not open a public issue containing secrets, tokens, personal data, or an
@@ -119,6 +121,7 @@ Before enabling `REGISTRATION_MODE=public` or declaring full Production GO, comp
   session/token revocation, and RP logout-delivery drill before any
   owner-approved enablement;
 - signing-key rotation, D1 restore, and Queue retry/DLQ drills;
+- integrate and independently review the recovery, observability, encrypted R2 archive, and release-automation dependencies required by the local continuity/drill reports; then record a clean synthetic run without treating it as remote evidence;
 - deploy, configure, independently review, and smoke-test the locally implemented Turnstile, versioned Terms/Privacy acceptance, and restricted-account paths after applying migrations `0016` and `0017`; the owner must approve the exact live policy versions, validate the initial abuse thresholds in Preview, assign an operator, and test external alert delivery;
 - deploy and independently review the locally implemented Passkey step-up for high-risk system-client provisioning and secret rotation; production must apply migration `0014`, and the session-age freshness check remains an additional condition rather than a substitute;
 - no unresolved Critical or High finding; every accepted Medium still needs an owner, deadline, and compensating control.

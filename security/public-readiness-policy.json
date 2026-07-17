@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "forbiddenOrigins": ["https://sso.pg72.tw"],
+  "local": {
+    "origins": {
+      "continuity": "http://127.0.0.1:5183",
+      "drills": "http://127.0.0.1:5185"
+    },
+    "profiles": {
+      "continuity": {
+        "concurrency": 1,
+        "durationMs": 10000,
+        "requestsPerSecond": 4,
+        "totalRequests": 40
+      },
+      "drills": {
+        "concurrency": 4,
+        "durationMs": 10000,
+        "requestsPerSecond": 12,
+        "totalRequests": 96
+      }
+    },
+    "absoluteCeilings": {
+      "concurrency": 8,
+      "durationMs": 15000,
+      "requestsPerSecond": 20,
+      "totalRequests": 200
+    }
+  },
+  "preview": {
+    "approvedOrigin": null,
+    "budgets": null
+  },
+  "production": {
+    "origin": "https://sso.pg72.tw",
+    "deployAllowed": false,
+    "faultInjectionAllowed": false,
+    "loadAllowed": false,
+    "restoreAllowed": false
+  }
+}

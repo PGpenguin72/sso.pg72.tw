@@ -354,6 +354,9 @@ access:                  standard <-> restricted
 - [ ] 在隔離 Preview 完成 authenticated DAST，覆蓋 auth、OIDC、admin、gateway 與 logout endpoints；repository 現有 `pnpm dast:local` 只跑 ephemeral loopback Worker/test RP 的無憑證 public/error/header/CSRF baseline，受保護的 manual Preview workflow 尚未執行，不能取代完整 gate。
 - [x] Repository source 已有 `pnpm security:check` 自動化 gate：type-aware Worker Promise SAST、checksum-pinned Gitleaks 完整 history、明確枚舉 tracked/untracked/ignored sensitive path，並以 TypeScript compiler AST bounded static evaluator、line/dotenv parser、UTF-8/UTF-16/NUL decode、exact fixture/fallback digest+context contract 與 unsafe-path hash diagnostics 實作 redacted scan。兩個 workflow 在 checkout 後、任何 repository script／Preview authorization／`pnpm install` 前先執行只用 Node standard library 的 identity checker，固定 workflow raw LF bytes/file set、四個 manifest/完整 scripts map、`pnpm-workspace.yaml` lifecycle/build policy、`pnpm-lock.yaml` raw digest 與 `patches/` exact file set/digests，並要求 workspace `.pnpmfile.mjs`／legacy `.pnpmfile.cjs`、各 code-owned package root `.npmrc`／`binding.gyp`／pre-existing `node_modules` 不存在；後段再固定完整 scripts objects、reachable graph，並展開每個 pnpm script 的 `pre*`/`post*` 及全 workspace `preinstall`/`install`/`postinstall`/`prepare`。另以 code-owned SHA-256 固定 deterministic production Wrangler entry whole-file identity，再保留 GitHub Action SHA、workflow/job/step structural validation、artifact upload、environment scope、Wrangler source/generated typed binding/resource contract、exact advisory reconciliation、production artifact source-map/private-path/secret/size scan，以及 dependency/license inventory。任何 runtime/dependency/bundler/build-chain 變更都必須經人工 review 與兩次 byte-identical clean build/dry-run 後才可明確更新 entry digest，不可從 policy 或目前產物自動學習；目前 Linux entry digest equality 尚未實測，不能宣稱跨平台一致。每個 release candidate 仍必須先安裝 pinned tools、實際跑完並保存結果。
 - [ ] 負載測試、備份還原演練、key rotation 與 Queue retry/DLQ 演練。
+- [x] Source-local fail-closed continuity/load tooling：固定 literal-loopback target、clean Git commit attribution、fresh D1 migration/export/restore、完整 ordered migration ledger、synthetic Passkey/session/consent/JWK overlap-retirement、固定六 scenario／每項 16 request 的 bounded profile、mode-`0600` redacted schema-v2 report 與 cleanup regression；命令與報告格式見 [`docs/runbooks/continuity.md`](./docs/runbooks/continuity.md) 與 [`docs/runbooks/load-failure-drills.md`](./docs/runbooks/load-failure-drills.md)。這只代表工具已進 source，不代表 dependency 或演練已通過。
+- [ ] 整合並獨立 review recovery `0019`、observability `0020`、encrypted R2 archive 與 release automation；dependency 必須先通過 exact content contract，再由同一次命令的對應 execution proof 從 `source_present_unverified` 升為 `verified`。兩個 local report 對任何非 `verified` 項目都必須維持 blocked + nonzero，全部到位後才記錄 synthetic local pass。
+- [ ] 在隔離 Preview 另行執行核准 budget 的 D1 restore、signing-key rotation、recovery、Queue retry/DLQ、R2 archive/restore、外部 alert delivery、failure rollback 與 RP smoke；local synthetic report 不可勾除此項。
 - [x] Local source 的 persistent restricted-account state、request guards、D1 race guards、admin controls 與 workerd regression。
 - [ ] 套用 `0017`、部署 restricted-account Worker 至隔離 Preview，完成獨立 review、race/rollback/ordinary-OIDC smoke，再納入 production rollout；不得因 local gate 通過而宣稱已部署。
 - [x] Local source 的 visited-client ledger、durable logout outbox、opaque delivery key、原子 `in_flight`/terminal attempt evidence、self-delete 全批 rollback、專用 Queue consumer、Cron replayer、bounded retry、redacted operator replay、bounded JWKS reader 與 test-RP receiver/regression。
@@ -865,6 +868,29 @@ Webmail 仍須分成兩個問題：
 - 使用 `@cloudflare/vitest-pool-workers` 在 workerd 環境測 D1、Queue、cookies 與 bindings，不只在 Node.js mock 測試。
 - Local credential-free DAST 僅接受 canonical literal `http://127.0.0.1:5173`/`:5174`，manual redirect、禁止 Host override，並覆蓋 health/readiness/discovery/JWKS、authorize/token/userinfo/introspection/revocation/logout/admin errors、resource rejection、headers/CSRF 與 test RP；repository Preview origin 尚未核定而 fail closed，isolated Preview 的 authenticated login/consent/admin/gateway/logout 完整 DAST 仍是未完成 gate。
 - SAST/secret scan/dependency scan 無未處理的 Critical 或 High finding；Medium 必須有書面接受期限與補救措施。
+
+### 19.5 Local continuity and bounded drills
+
+- `pnpm public-readiness:continuity:local` 只從 exact clean Git commit、只在
+  policy-owned `http://127.0.0.1:5183` 建立 fresh source/restore D1，驗證完整
+  ordered migration ledger（逐筆 source/D1 比對及 count/head/digest）、
+  schema/row-count/D1 `quick_check`/FK 等價、synthetic consent/session/Passkey、
+  discovery issuer、JWK decrypt/overlap/retirement，並刪除所有 ephemeral
+  SQL、secret 與 state。
+- `pnpm public-readiness:drills:local` 只在 policy-owned
+  `http://127.0.0.1:5185` 以固定 96 requests、concurrency 4、12 rps、10 秒
+  hard deadline 跑 workerd/global-logout regression；live profile 固定為六個
+  ordered scenario、每項 16 requests，report 必須精確符合 ID、count、status、
+  latency ordering 與 throughput contract；不可接受 caller target/budget。
+- 兩者都必須拒絕 Cloudflare credentials、remote/Preview/production target，
+  也必須拒絕 dirty/untracked/unavailable Git source，只寫 mode-`0600`
+  allowlisted schema-v2 aggregate report。Dependency 的 exact source content
+  與同輪 execution proof 必須同時成立才是 `verified`；cleanup failure、local
+  invariant failure或 recovery `0019`／observability `0020`／encrypted R2／
+  release automation 未 verified 皆 nonzero。
+- Synthetic local pass 只證明 source-local contract；不取代 Preview D1
+  restore、live Queue/DLQ/R2、external alert、production smoke、獨立 review
+  或 owner GO。
 
 ## 20. 導入階段
 

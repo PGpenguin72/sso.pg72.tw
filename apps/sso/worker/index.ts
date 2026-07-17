@@ -55,6 +55,7 @@ import {
 } from "./oauth-reports";
 import { passkeyStepUpRoutes } from "./passkey-step-up";
 import { recoveryCodeManagementRoutes } from "./recovery-codes";
+import { requireRecoveryEnabled } from "./recovery-gate";
 import { recoveryRoutes } from "./recovery";
 import {
   bindPublicRegistrationOAuthState,
@@ -642,6 +643,10 @@ for (const path of [
   "/api/account/recovery-codes",
   "/api/account/recovery-codes/*",
 ]) {
+  // Keep the runtime kill switch ahead of every body reader. Disabled
+  // recovery surfaces return the same 404 without touching request bodies or
+  // authentication, D1, Queue, and rate-limit bindings.
+  app.use(path, requireRecoveryEnabled);
   app.use(
     path,
     bodyLimit({
@@ -670,10 +675,18 @@ for (const path of [
 
 app.use(
   "/api/recovery/start",
+  requireRecoveryEnabled,
+);
+app.use(
+  "/api/recovery/start",
   bodyLimit({
     maxSize: 1024,
     onError: (c) => c.json({ error: "request_too_large" }, 413),
   }),
+);
+app.use(
+  "/api/recovery/*",
+  requireRecoveryEnabled,
 );
 app.use(
   "/api/recovery/*",

@@ -12,6 +12,7 @@ import {
   RECOVERY_FORMAT_VERSION,
   readRuntimeConfig,
 } from "./config";
+import { recoveryDisabledResponse } from "./recovery-gate";
 
 type AppEnv = { Bindings: Env };
 
@@ -151,12 +152,6 @@ export async function generateRecoveryCodeSet(): Promise<GeneratedRecoveryCodeSe
 function noStoreHeaders(c: Context<AppEnv>): void {
   c.header("Cache-Control", "no-store");
   c.header("Pragma", "no-cache");
-}
-
-function recoveryDisabled(c: Context<AppEnv>): Response | null {
-  return readRuntimeConfig(c.env).recoveryEnabled
-    ? null
-    : c.json({ error: "not_found" }, 404);
 }
 
 async function loadManagementSnapshot(
@@ -320,7 +315,7 @@ async function authenticatedManagement(
   | { ok: true; sessionId: string; userId: string; snapshot: ManagementSnapshot }
   | { ok: false; response: Response }
 > {
-  const disabled = recoveryDisabled(c);
+  const disabled = recoveryDisabledResponse(c);
   if (disabled) return { ok: false, response: disabled };
   const auth = createAuth(c.env, c.executionCtx);
   const session = await auth.api.getSession({ headers: c.req.raw.headers });

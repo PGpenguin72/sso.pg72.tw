@@ -60,6 +60,24 @@ function recoveryRequest(
   return new Request(`${BASE_URL}${path}`, { ...options, headers });
 }
 
+function unreadRequestBody(byteLength: number): {
+  body: ReadableStream<Uint8Array<ArrayBuffer>>;
+  readCount: () => number;
+} {
+  let reads = 0;
+  const body = new ReadableStream<Uint8Array<ArrayBuffer>>(
+    {
+      pull(controller) {
+        reads += 1;
+        controller.enqueue(new Uint8Array(new ArrayBuffer(byteLength)));
+        controller.close();
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return { body, readCount: () => reads };
+}
+
 async function issueCodes(
   session: Awaited<ReturnType<typeof createAuthenticatedUser>>,
 ): Promise<{ payload: IssuedCodes; response: Response }> {
@@ -134,6 +152,7 @@ function rawEcdsaToDer(
 async function createRegistration(
   challenge: string,
   options: {
+    credentialByteLength?: number;
     origin?: string;
     rpId?: string;
     userVerified?: boolean;
@@ -156,7 +175,9 @@ async function createRegistration(
       [-3, rawPublicKey.slice(33, 65)],
     ]),
   );
-  const credentialBytes = crypto.getRandomValues(new Uint8Array(32));
+  const credentialBytes = crypto.getRandomValues(
+    new Uint8Array(new ArrayBuffer(options.credentialByteLength ?? 32)),
+  );
   const credentialId = isoBase64URL.fromBuffer(credentialBytes);
   const rpId = options.rpId ?? "localhost";
   const rpIdHash = new Uint8Array(
@@ -319,6 +340,84 @@ async function seedVisitedRp(
     ),
   ]);
   return clientId;
+}
+
+interface RecoveryCompletionState {
+  completed_audits: number;
+  logout_deliveries: number;
+  passkeys: number;
+  recovery_codes: number;
+  recovery_sessions: number;
+  recovery_sets: number;
+  revoked_sets: number;
+  sessions: number;
+}
+
+async function recoveryCompletionState(
+  userId: string,
+): Promise<RecoveryCompletionState> {
+  const state = await env.PG72_ID_DB.prepare(
+    `SELECT
+       (SELECT COUNT(*) FROM passkey WHERE userId = ?) AS passkeys,
+       (SELECT COUNT(*) FROM recovery_code_set WHERE user_id = ?)
+         AS recovery_sets,
+       (SELECT COUNT(*) FROM recovery_code_set
+         WHERE user_id = ? AND revoked_at IS NOT NULL) AS revoked_sets,
+       (SELECT COUNT(*) FROM recovery_code
+         JOIN recovery_code_set ON recovery_code_set.id = recovery_code.set_id
+        WHERE recovery_code_set.user_id = ?) AS recovery_codes,
+       (SELECT COUNT(*) FROM recovery_session WHERE user_id = ?)
+         AS recovery_sessions,
+       (SELECT COUNT(*) FROM session WHERE userId = ?) AS sessions,
+       (SELECT COUNT(*) FROM logout_delivery WHERE user_id = ?)
+         AS logout_deliveries,
+       (SELECT COUNT(*) FROM audit_event
+         WHERE subject_id = ? AND event_type = 'recovery.completed')
+         AS completed_audits`,
+  )
+    .bind(
+      userId,
+      userId,
+      userId,
+      userId,
+      userId,
+      userId,
+      userId,
+      userId,
+    )
+    .first<RecoveryCompletionState>();
+  if (!state) throw new Error("Recovery completion state unavailable");
+  return state;
+}
+
+async function verifyRecoveryWithQueueSpies(
+  cookie: string,
+  options: RecoveryOptions,
+  response: RegistrationResponseJSON,
+): Promise<{
+  logoutSend: ReturnType<typeof vi.fn>;
+  response: Response;
+  securitySend: ReturnType<typeof vi.fn>;
+}> {
+  const securitySend = vi.fn(async () => undefined);
+  const logoutSend = vi.fn(async () => undefined);
+  const requestEnv = {
+    ...env,
+    SECURITY_EVENTS: { send: securitySend } as unknown as Queue,
+    LOGOUT_DELIVERIES: { send: logoutSend } as unknown as Queue,
+  } as Env;
+  const ctx = createExecutionContext();
+  const result = await app.fetch(
+    recoveryRequest("/api/recovery/passkey/verify", {
+      method: "POST",
+      headers: { Cookie: cookie },
+      body: JSON.stringify({ challengeId: options.challengeId, response }),
+    }),
+    requestEnv,
+    ctx,
+  );
+  await waitOnExecutionContext(ctx);
+  return { logoutSend, response: result, securitySend };
 }
 
 describe("recovery code management", () => {
@@ -569,34 +668,100 @@ describe("recovery code management", () => {
 });
 
 describe("restricted recovery entry", () => {
-  it("is disabled independently of migration state", async () => {
-    const ctx = createExecutionContext();
-    const response = await app.fetch(
-      new Request(`${BASE_URL}/api/recovery/start`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          code: "PGID-R1-0000-0000-0000-0000-0000-0000-0000-0000",
-        }),
-      }),
-      { ...env, RECOVERY_MODE: "disabled" } as Env,
-      ctx,
-    );
-    await waitOnExecutionContext(ctx);
-    expect(response.status).toBe(404);
+  it("rejects disabled recovery before fixed-length or streamed bodies and bindings", async () => {
+    const prepare = vi.fn(() => {
+      throw new Error("disabled recovery touched D1");
+    });
+    const batch = vi.fn(() => {
+      throw new Error("disabled recovery touched D1");
+    });
+    const authLimit = vi.fn(async () => ({ success: true }));
+    const recoveryLimit = vi.fn(async () => ({ success: true }));
+    const securitySend = vi.fn(async () => undefined);
+    const logoutSend = vi.fn(async () => undefined);
+    const disabledEnv = {
+      ...env,
+      RECOVERY_MODE: "disabled",
+      PG72_ID_DB: { batch, prepare } as unknown as D1Database,
+      AUTH_RATE_LIMITER: { limit: authLimit } as unknown as RateLimit,
+      RECOVERY_RATE_LIMITER: {
+        limit: recoveryLimit,
+      } as unknown as RateLimit,
+      SECURITY_EVENTS: { send: securitySend } as unknown as Queue,
+      LOGOUT_DELIVERIES: { send: logoutSend } as unknown as Queue,
+    } as Env;
+    const surfaces = [
+      { path: "/api/account/recovery-codes", size: 2 * 1024 },
+      { path: "/api/account/recovery-codes/rotate", size: 2 * 1024 },
+      { path: "/api/recovery/start", size: 2 * 1024 },
+      { path: "/api/recovery/passkey/verify", size: 65 * 1024 },
+    ];
+    const responseBodies: number[][] = [];
 
-    const managementCtx = createExecutionContext();
-    const management = await app.fetch(
-      new Request(`${BASE_URL}/api/account/recovery-codes/rotate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}",
-      }),
-      { ...env, RECOVERY_MODE: "disabled" } as Env,
-      managementCtx,
+    for (const surface of surfaces) {
+      for (const fixedLength of [true, false]) {
+        const instrumented = unreadRequestBody(surface.size);
+        const headers = new Headers({
+          "Content-Type": "application/json",
+          Origin: BASE_URL,
+        });
+        if (fixedLength) headers.set("Content-Length", String(surface.size));
+        const ctx = createExecutionContext();
+        const response = await app.fetch(
+          new Request(`${BASE_URL}${surface.path}`, {
+            method: "POST",
+            headers,
+            body: instrumented.body,
+          }),
+          disabledEnv,
+          ctx,
+        );
+        await waitOnExecutionContext(ctx);
+        expect(response.status).toBe(404);
+        expect(response.headers.get("cache-control")).toBe("no-store");
+        expect(response.headers.get("pragma")).toBe("no-cache");
+        expect(instrumented.readCount()).toBe(0);
+        responseBodies.push([...new Uint8Array(await response.arrayBuffer())]);
+      }
+    }
+
+    const referenceBody = responseBodies[0];
+    if (!referenceBody) throw new Error("Disabled recovery response missing");
+    for (const body of responseBodies.slice(1)) {
+      expect(body).toEqual(referenceBody);
+    }
+    expect(new TextDecoder().decode(new Uint8Array(referenceBody))).toBe(
+      '{"error":"not_found"}',
     );
-    await waitOnExecutionContext(managementCtx);
-    expect(management.status).toBe(404);
+    expect(prepare).not.toHaveBeenCalled();
+    expect(batch).not.toHaveBeenCalled();
+    expect(authLimit).not.toHaveBeenCalled();
+    expect(recoveryLimit).not.toHaveBeenCalled();
+    expect(securitySend).not.toHaveBeenCalled();
+    expect(logoutSend).not.toHaveBeenCalled();
+  });
+
+  it("retains the enabled body limits for every recovery matcher", async () => {
+    const surfaces = [
+      { path: "/api/account/recovery-codes", size: 2 * 1024 },
+      { path: "/api/account/recovery-codes/rotate", size: 2 * 1024 },
+      { path: "/api/recovery/start", size: 2 * 1024 },
+      { path: "/api/recovery/passkey/verify", size: 65 * 1024 },
+    ];
+    for (const surface of surfaces) {
+      const ctx = createExecutionContext();
+      const response = await app.fetch(
+        recoveryRequest(surface.path, {
+          method: "POST",
+          body: "x".repeat(surface.size),
+        }),
+        env,
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+      expect(response.status).toBe(413);
+      expect(await response.json()).toEqual({ error: "request_too_large" });
+    }
   });
   it("returns equal generic denials and has exactly one winner for a competing code", async () => {
     const session = await createAuthenticatedUser(
@@ -870,6 +1035,118 @@ describe("restricted recovery entry", () => {
 });
 
 describe("recovery Passkey completion", () => {
+  it("rejects a 1024-byte outer credential ID before verifier completion", async () => {
+    const session = await createAuthenticatedUser(
+      `recovery-outer-id-${crypto.randomUUID()}@example.test`,
+      "user",
+      { passkeyStepUp: true },
+    );
+    const issued = await issueCodes(session);
+    const started = await startRecovery(issued.payload.codes[0] ?? "");
+    const cookie = cookieFrom(started);
+    const options = await beginPasskeyRecovery(cookie);
+    const registration = await createRegistration(options.options.challenge, {
+      credentialByteLength: 1024,
+    });
+    expect(isoBase64URL.toBuffer(registration.credentialId).byteLength).toBe(1024);
+    const before = await recoveryCompletionState(session.userId);
+
+    const verified = await verifyRecoveryWithQueueSpies(
+      cookie,
+      options,
+      registration.response,
+    );
+    expect(verified.response.status).toBe(400);
+    expect(await verified.response.json()).toEqual({
+      error: "recovery_passkey_failed",
+    });
+    // A matched challenge remains one-time even when the parsed credential is
+    // rejected before SimpleWebAuthn. The failure audit/security event below
+    // are intentional; no completion state or logout work may change.
+    expect(await recoveryCompletionState(session.userId)).toEqual(before);
+    expect(
+      await env.PG72_ID_DB.prepare(
+        "SELECT COUNT(*) AS count FROM recovery_passkey_challenge WHERE id = ?",
+      )
+        .bind(options.challengeId)
+        .first<{ count: number }>(),
+    ).toEqual({ count: 0 });
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT COUNT(*) AS count FROM audit_event
+          WHERE subject_id = ? AND event_type = 'recovery.passkey_failed'`,
+      )
+        .bind(session.userId)
+        .first<{ count: number }>(),
+    ).toEqual({ count: 1 });
+    expect(verified.securitySend).toHaveBeenCalledTimes(1);
+    expect(verified.logoutSend).not.toHaveBeenCalled();
+  });
+
+  it("rejects verifier credential mismatches before every completion mutation", async () => {
+    for (const idCase of [
+      { embeddedBytes: 32, outerBytes: 32 },
+      { embeddedBytes: 1024, outerBytes: 1023 },
+    ]) {
+      const session = await createAuthenticatedUser(
+        `recovery-id-mismatch-${crypto.randomUUID()}@example.test`,
+        "user",
+        { passkeyStepUp: true },
+      );
+      const issued = await issueCodes(session);
+      const started = await startRecovery(issued.payload.codes[0] ?? "");
+      const cookie = cookieFrom(started);
+      const options = await beginPasskeyRecovery(cookie);
+      const registration = await createRegistration(options.options.challenge, {
+        credentialByteLength: idCase.embeddedBytes,
+      });
+      const outerId = isoBase64URL.fromBuffer(
+        crypto.getRandomValues(
+          new Uint8Array(new ArrayBuffer(idCase.outerBytes)),
+        ),
+      );
+      expect(outerId).not.toBe(registration.credentialId);
+      const mismatched: RegistrationResponseJSON = {
+        ...registration.response,
+        id: outerId,
+        rawId: outerId,
+      };
+      const before = await recoveryCompletionState(session.userId);
+
+      const verified = await verifyRecoveryWithQueueSpies(
+        cookie,
+        options,
+        mismatched,
+      );
+      expect(verified.response.status).toBe(400);
+      expect(await verified.response.json()).toEqual({
+        error: "recovery_passkey_failed",
+      });
+      // Authoritative-ID rejection happens after verifier success and keeps
+      // the same one-time challenge and failure-audit policy. The aggregate
+      // snapshot excludes those intentional effects and covers every
+      // completion mutation plus central session/logout state.
+      expect(await recoveryCompletionState(session.userId)).toEqual(before);
+      expect(
+        await env.PG72_ID_DB.prepare(
+          "SELECT COUNT(*) AS count FROM recovery_passkey_challenge WHERE id = ?",
+        )
+          .bind(options.challengeId)
+          .first<{ count: number }>(),
+      ).toEqual({ count: 0 });
+      expect(
+        await env.PG72_ID_DB.prepare(
+          `SELECT COUNT(*) AS count FROM audit_event
+            WHERE subject_id = ? AND event_type = 'recovery.passkey_failed'`,
+        )
+          .bind(session.userId)
+          .first<{ count: number }>(),
+      ).toEqual({ count: 1 });
+      expect(verified.securitySend).toHaveBeenCalledTimes(1);
+      expect(verified.logoutSend).not.toHaveBeenCalled();
+    }
+  });
+
   it("requires exact origin and UV, consumes challenges once, then atomically rotates and revokes all normal sessions", async () => {
     const session = await createAuthenticatedUser(
       `recovery-complete-${crypto.randomUUID()}@example.test`,
@@ -935,7 +1212,10 @@ describe("recovery Passkey completion", () => {
     expect(options.options.authenticatorSelection?.userVerification).toBe("required");
     expect(options.options.authenticatorSelection?.residentKey).toBe("preferred");
     expect(options.options.attestation).toBe("none");
-    const registration = await createRegistration(options.options.challenge);
+    const registration = await createRegistration(options.options.challenge, {
+      credentialByteLength: 1023,
+    });
+    expect(isoBase64URL.toBuffer(registration.credentialId).byteLength).toBe(1023);
     const clientId = await seedVisitedRp(session.userId, session.sessionId);
     const queueFailureEnv = {
       ...env,

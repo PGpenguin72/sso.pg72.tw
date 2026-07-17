@@ -30,6 +30,7 @@ import {
   isStrictRecoveryJsonMediaType,
   sha256Base64Url,
 } from "./recovery-codes";
+import { recoveryDisabledResponse } from "./recovery-gate";
 
 type AppEnv = { Bindings: Env };
 
@@ -38,7 +39,10 @@ const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
 const REGISTRATION_FIELD_MAX_LENGTH = 16 * 1024;
-const CREDENTIAL_ID_MAX_LENGTH = 2 * 1024;
+const CREDENTIAL_ID_MAX_BYTES = 1023;
+const CREDENTIAL_ID_MAX_ENCODED_LENGTH = Math.ceil(
+  (CREDENTIAL_ID_MAX_BYTES * 4) / 3,
+);
 const DUMMY_CANONICAL_CODE = `PGIDR${RECOVERY_FORMAT_VERSION}${"0".repeat(32)}`;
 const DUMMY_RECOVERY_TOKEN = "0".repeat(43);
 const ALLOWED_TRANSPORTS: ReadonlySet<AuthenticatorTransportFuture> = new Set([
@@ -84,12 +88,6 @@ interface RecoveryVerifyInput {
 function noStoreHeaders(c: Context<AppEnv>): void {
   c.header("Cache-Control", "no-store");
   c.header("Pragma", "no-cache");
-}
-
-function recoveryDisabled(c: Context<AppEnv>): Response | null {
-  return readRuntimeConfig(c.env).recoveryEnabled
-    ? null
-    : c.json({ error: "not_found" }, 404);
 }
 
 function cookieValue(headers: Headers): string | null {
@@ -158,6 +156,41 @@ function boundedBase64Url(
   );
 }
 
+function decodedCredentialId(value: unknown): Uint8Array<ArrayBuffer> | null {
+  if (!boundedBase64Url(value, CREDENTIAL_ID_MAX_ENCODED_LENGTH)) return null;
+  try {
+    const bytes = isoBase64URL.toBuffer(value);
+    if (
+      bytes.byteLength === 0 ||
+      bytes.byteLength > CREDENTIAL_ID_MAX_BYTES ||
+      isoBase64URL.fromBuffer(bytes) !== value
+    ) {
+      return null;
+    }
+    return new Uint8Array(bytes);
+  } catch {
+    return null;
+  }
+}
+
+function validCredentialId(value: unknown): value is string {
+  return decodedCredentialId(value) !== null;
+}
+
+function matchingCredentialIds(
+  outerRawId: string,
+  verifiedCredentialId: string,
+): boolean {
+  const outer = decodedCredentialId(outerRawId);
+  const verified = decodedCredentialId(verifiedCredentialId);
+  return (
+    outer !== null &&
+    verified !== null &&
+    outer.byteLength === verified.byteLength &&
+    outer.every((byte, index) => byte === verified[index])
+  );
+}
+
 function parseTransports(value: unknown): AuthenticatorTransportFuture[] | null {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > 8) return null;
@@ -180,8 +213,8 @@ function parseRegistrationResponse(value: unknown): RegistrationResponseJSON | n
   const transports = parseTransports(response.transports);
   if (
     value.type !== "public-key" ||
-    !boundedBase64Url(value.id, CREDENTIAL_ID_MAX_LENGTH) ||
-    !boundedBase64Url(value.rawId, CREDENTIAL_ID_MAX_LENGTH) ||
+    !validCredentialId(value.id) ||
+    !validCredentialId(value.rawId) ||
     value.id !== value.rawId ||
     !boundedBase64Url(response.clientDataJSON) ||
     !boundedBase64Url(response.attestationObject) ||
@@ -428,7 +461,7 @@ export const recoveryRoutes = new Hono<AppEnv>();
 
 recoveryRoutes.post("/api/recovery/start", async (c) => {
   noStoreHeaders(c);
-  const disabled = recoveryDisabled(c);
+  const disabled = recoveryDisabledResponse(c);
   if (disabled) return disabled;
   const limited = await recoveryLimit(c);
   if (limited) return limited;
@@ -568,7 +601,7 @@ recoveryRoutes.post("/api/recovery/start", async (c) => {
 
 recoveryRoutes.get("/api/recovery/session", async (c) => {
   noStoreHeaders(c);
-  const disabled = recoveryDisabled(c);
+  const disabled = recoveryDisabledResponse(c);
   if (disabled) return disabled;
   const now = new Date().toISOString();
   const session = await recoverySession(c.env, cookieValue(c.req.raw.headers), now);
@@ -578,7 +611,7 @@ recoveryRoutes.get("/api/recovery/session", async (c) => {
 
 recoveryRoutes.delete("/api/recovery/session", async (c) => {
   noStoreHeaders(c);
-  const disabled = recoveryDisabled(c);
+  const disabled = recoveryDisabledResponse(c);
   if (disabled) return disabled;
   const token = cookieValue(c.req.raw.headers);
   const tokenHash = await sha256Base64Url(token ?? DUMMY_RECOVERY_TOKEN);
@@ -593,7 +626,7 @@ recoveryRoutes.delete("/api/recovery/session", async (c) => {
 
 recoveryRoutes.post("/api/recovery/passkey/options", async (c) => {
   noStoreHeaders(c);
-  const disabled = recoveryDisabled(c);
+  const disabled = recoveryDisabledResponse(c);
   if (disabled) return disabled;
   if (!isStrictRecoveryJsonMediaType(c.req.header("content-type") ?? null)) {
     return c.json({ error: "invalid_request" }, 415);
@@ -688,7 +721,7 @@ recoveryRoutes.post("/api/recovery/passkey/options", async (c) => {
 
 recoveryRoutes.post("/api/recovery/passkey/verify", async (c) => {
   noStoreHeaders(c);
-  const disabled = recoveryDisabled(c);
+  const disabled = recoveryDisabledResponse(c);
   if (disabled) return disabled;
   const now = new Date().toISOString();
   const token = cookieValue(c.req.raw.headers);
@@ -761,12 +794,17 @@ recoveryRoutes.post("/api/recovery/passkey/verify", async (c) => {
     return c.json({ error: "recovery_passkey_failed" }, 400);
   }
 
+  const credential = verification.registrationInfo.credential;
+  if (!matchingCredentialIds(input.response.rawId, credential.id)) {
+    await recordPasskeyFailure(c, session.user_id, "credential_id_invalid");
+    return c.json({ error: "recovery_passkey_failed" }, 400);
+  }
+
   const generated = await generateRecoveryCodeSet();
   const finalNow = new Date().toISOString();
   const passkeyId = crypto.randomUUID();
   const nextSetId = crypto.randomUUID();
   const nextGeneration = session.generation + 1;
-  const credential = verification.registrationInfo.credential;
   const event = createAuditEvent({
     eventType: "recovery.completed",
     outcome: "success",

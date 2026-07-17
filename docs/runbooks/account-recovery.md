@@ -30,14 +30,18 @@ stores, logs, exports, or reconstructs.
   normal account, admin, OIDC, consent, or token surface.
 - Replacement Passkey registration uses a two-minute one-time challenge,
   exact origin/RP ID, required user verification, no attestation, bounded
-  fields, and global credential-ID uniqueness.
+  fields, and global credential-ID uniqueness. The decoded browser `rawId`
+  and verifier-returned credential ID must be byte-identical and no longer
+  than 1023 bytes before completion can generate codes or mutate state.
 - Completion atomically creates the replacement Passkey and success audit,
   revokes the old code set, creates the next ten hashes, removes all central
   sessions/access tokens/refresh tokens and relevant verification state, and
   creates durable logout work for visited RPs. Queue dispatch is post-commit.
   The browser receives the next raw codes once and must perform normal sign-in.
 - `RECOVERY_MODE=disabled` makes both management and recovery endpoints return
-  404. Existing users receive no rows merely because `0019` was applied.
+  the same no-store 404 before any fixed-length or streamed request body is
+  read and before any D1, Queue, authentication, or rate-limit binding is
+  called. Existing users receive no rows merely because `0019` was applied.
 
 ## Preview prerequisites
 

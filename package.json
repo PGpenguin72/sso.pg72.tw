@@ -12,6 +12,7 @@
     "dev": "pnpm --filter @pg72/id dev",
     "dev:rp": "pnpm --filter @pg72/test-rp dev",
     "dev:wiki": "pnpm --filter @pg72/wiki dev",
+    "public-readiness:continuity:local": "node scripts/public-readiness/continuity-local.mjs",
     "test": "pnpm -r --if-present test",
     "test:clean-dist": "node --test scripts/clean-package-dist.test.mjs",
     "test:public-readiness": "node --test scripts/public-readiness/*.test.mjs",

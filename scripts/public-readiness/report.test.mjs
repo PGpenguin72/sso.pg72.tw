@@ -62,6 +62,13 @@ test("closed report validation rejects extra fields and sensitive values", () =>
       ),
     /contains a URL/,
   );
+  assert.throws(
+    () =>
+      validateClosedReport(
+        drillReport({ scenarios: [{ id: "bad", result: "192.0.2.1" }] }),
+      ),
+    /address-like/,
+  );
 });
 
 test("writes reports atomically with owner-only permissions", () => {

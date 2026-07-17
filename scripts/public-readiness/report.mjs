@@ -41,6 +41,26 @@ const TOP_LEVEL_KEYS = {
     "syntheticOnly",
   ],
 };
+const CONTINUITY_CHECK_KEYS = [
+  "centralSidPreserved",
+  "clientMetadataPreserved",
+  "clientSecretHashOnly",
+  "configuredIssuerMatchesDiscovery",
+  "consentRevokedAndRestored",
+  "consentUnique",
+  "counterAdvanced",
+  "currentKeyAccepted",
+  "expiredSessionRejected",
+  "globalLogoutStatePresent",
+  "immutableSubjectPreserved",
+  "jwksPrivateKeysDecryptable",
+  "jwksRestored",
+  "liveSessionAccepted",
+  "oldAndNewSignaturesVerified",
+  "passkeyAssertionVerified",
+  "passkeyPublicKeyPreserved",
+  "retiredKeyRejected",
+];
 
 function sortedKeys(value) {
   return Object.keys(value).sort();
@@ -55,6 +75,11 @@ function scanValues(value, label = "report") {
   if (typeof value === "string") {
     assert.ok(!value.includes("@"), `${label} contains an email-like value`);
     assert.ok(!value.includes("://"), `${label} contains a URL`);
+    assert.ok(
+      !/(?:^|\D)(?:\d{1,3}\.){3}\d{1,3}(?:\D|$)/.test(value) &&
+        !value.includes("[::"),
+      `${label} contains an address-like value`,
+    );
     assert.ok(
       !/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/.test(value),
       `${label} contains a JWT-like value`,
@@ -106,9 +131,49 @@ export function validateClosedReport(report) {
   assert.equal(typeof report.ready, "boolean");
   assert.ok(["blocked", "synthetic_pass", "test_fixture"].includes(report.status));
   validateDependencies(report.dependencies);
+  if (report.kind === "continuity") {
+    exactKeys(report.checks, CONTINUITY_CHECK_KEYS, "continuity.checks");
+    for (const value of Object.values(report.checks)) assert.equal(typeof value, "boolean");
+    exactKeys(
+      report.cleanup,
+      ["listenerStopped", "temporarySqlRemoved", "temporaryStateRemoved"],
+      "continuity.cleanup",
+    );
+    exactKeys(report.export, ["bytes", "sha256"], "continuity.export");
+    exactKeys(
+      report.schema,
+      ["foreignKeys", "integrity", "sha256"],
+      "continuity.schema",
+    );
+    exactKeys(report.toolVersions, ["node", "pnpm", "wrangler"], "continuity.toolVersions");
+    assert.match(report.export.sha256, /^[a-f0-9]{64}$/);
+    assert.match(report.schema.sha256, /^[a-f0-9]{64}$/);
+    assert.ok(Number.isSafeInteger(report.export.bytes) && report.export.bytes > 0);
+    assert.equal(report.schema.integrity, "ok");
+    assert.equal(report.schema.foreignKeys, "ok");
+    for (const [table, count] of Object.entries(report.rowCounts)) {
+      assert.match(table, /^[A-Za-z_][A-Za-z0-9_]*$/);
+      assert.ok(Number.isSafeInteger(count) && count >= 0);
+    }
+  } else {
+    exactKeys(
+      report.cleanup,
+      ["listenerStopped", "temporaryStateRemoved"],
+      "drills.cleanup",
+    );
+    exactKeys(
+      report.profile,
+      ["concurrency", "durationMs", "requestsPerSecond", "totalRequests"],
+      "drills.profile",
+    );
+    assert.ok(Array.isArray(report.scenarios));
+  }
   if (report.ready) {
     assert.equal(report.status, "synthetic_pass");
     assert.ok(report.dependencies.every(({ status }) => status === "present"));
+    if (report.kind === "continuity") {
+      assert.ok(Object.values(report.checks).every(Boolean));
+    }
   }
   scanValues(report);
   return report;

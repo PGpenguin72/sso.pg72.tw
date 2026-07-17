@@ -137,24 +137,6 @@ const auditedAssignmentAllowances = new Map([
 
 const auditedAssignmentDigestAllowances = new Map([
   [
-    "artifact:static/assets/index-CiCTmOwF.js",
-    new Map([
-      [
-        "REFRESH_TOKEN_REQUIRES_OFFLINE_ACCESS",
-        new Set(["bbf58f13f3573e210bba2822828db86d1b334f38cb40c7892246fcc83e2b3726"]),
-      ],
-    ]),
-  ],
-  [
-    "apps/sso/src/App.tsx",
-    new Map([
-      [
-        "REFRESH_TOKEN_REQUIRES_OFFLINE_ACCESS",
-        new Set(["bbf58f13f3573e210bba2822828db86d1b334f38cb40c7892246fcc83e2b3726"]),
-      ],
-    ]),
-  ],
-  [
     "apps/sso/test/worker.spec.ts",
     new Map([
       [
@@ -164,6 +146,19 @@ const auditedAssignmentDigestAllowances = new Map([
     ]),
   ],
 ]);
+
+// This is a UI error-code mapping, not credential material. Keep the exception
+// bound to its AST shape and exact value digest while allowing Vite's content
+// hash to change when unrelated source moves the static entry bytes.
+const reviewedStaticErrorAssignment = Object.freeze({
+  assignmentKind: "PropertyAssignment",
+  artifactPath: /^artifact:static\/assets\/index-[A-Za-z0-9_-]{8}\.js$/,
+  forms: Object.freeze(["no-substitution-template", "string-literal"]),
+  key: "REFRESH_TOKEN_REQUIRES_OFFLINE_ACCESS",
+  keyKind: "Identifier",
+  sourcePath: "apps/sso/src/App.tsx",
+  valueDigest: "bbf58f13f3573e210bba2822828db86d1b334f38cb40c7892246fcc83e2b3726",
+});
 
 const auditedStaticLiteralAllowances = new Map([
   ...[
@@ -246,6 +241,25 @@ function isAuditedFixture(relativePath, normalizedKey, value) {
         .get(relativePath)
         ?.get(normalizedKey)
         ?.has(sha256(value)) === true)
+  );
+}
+
+function reviewedStaticErrorAssignmentAllowed(
+  relativePath,
+  normalizedKey,
+  value,
+  { assignmentKind, form, keyKind },
+) {
+  const reviewedPath =
+    relativePath === reviewedStaticErrorAssignment.sourcePath ||
+    reviewedStaticErrorAssignment.artifactPath.test(relativePath);
+  return (
+    reviewedPath &&
+    assignmentKind === reviewedStaticErrorAssignment.assignmentKind &&
+    keyKind === reviewedStaticErrorAssignment.keyKind &&
+    normalizedKey === reviewedStaticErrorAssignment.key &&
+    reviewedStaticErrorAssignment.forms.includes(form) &&
+    sha256(value) === reviewedStaticErrorAssignment.valueDigest
   );
 }
 
@@ -489,7 +503,7 @@ function generatedFallbackAssignmentAllowed(relativePath, normalizedKey, value, 
 function scanTypeScript(content, relativePath, findings, enforceGeneratedLiteralContract) {
   const analysis = analyzeTypeScriptStaticValues(content, { relativePath });
   if (analysis.parseErrors > 0) findings.add("typescript-parse-error");
-  for (const { key, evaluation, form } of analysis.assignments) {
+  for (const { assignmentKind, key, keyKind, evaluation, form } of analysis.assignments) {
     const normalizedKey = normalizeAssignmentKey(key);
     if (!isSecretAssignmentKey(normalizedKey)) continue;
     if (evaluation.status === "overflow") {
@@ -505,6 +519,11 @@ function scanTypeScript(content, relativePath, findings, enforceGeneratedLiteral
     }
     if (
       !isAuditedFixture(relativePath, normalizedKey, evaluation.value) &&
+      !reviewedStaticErrorAssignmentAllowed(relativePath, normalizedKey, evaluation.value, {
+        assignmentKind,
+        form,
+        keyKind,
+      }) &&
       !generatedFallbackAssignmentAllowed(relativePath, normalizedKey, evaluation.value, form)
     ) {
       findings.add("assigned-secret");

@@ -2,6 +2,7 @@ import { getSessionCookie } from "better-auth/cookies";
 import { constantTimeEqual, makeSignature } from "better-auth/crypto";
 
 import {
+  auditEventMutationCommitted,
   createAuditEvent,
   type SecurityEvent,
 } from "./audit";
@@ -202,7 +203,7 @@ export async function deleteOwnAccountAtomically(
   ]);
 
   const committed =
-    results[0]?.meta.changes === 1 &&
+    auditEventMutationCommitted(results[0]) &&
     results[results.length - 1]?.results.length === 1;
   return {
     committed,

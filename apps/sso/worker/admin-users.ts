@@ -3,6 +3,7 @@ import { Hono, type Context } from "hono";
 import type { AccountAccessLevel } from "./account-access";
 import { requireAdminPermission, type AdminActor } from "./admin-gate";
 import {
+  auditEventMutationCommitted,
   auditInsertForExistingUserStatement,
   createAuditEvent,
   enqueueSecurityEvent,
@@ -270,7 +271,10 @@ async function applyRoleChange(
       updatedAt: now,
     }),
   ]);
-  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+  if (
+    !auditEventMutationCommitted(results[0]) ||
+    results[1]?.meta.changes !== 1
+  ) {
     return null;
   }
   await enqueueSecurityEvent(c.env, event, c.executionCtx);
@@ -480,7 +484,10 @@ adminUserRoutes.post("/:userId/status", async (c) => {
   }
 
   const results = await c.env.PG72_ID_DB.batch(statements);
-  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+  if (
+    !auditEventMutationCommitted(results[0]) ||
+    results[1]?.meta.changes !== 1
+  ) {
     return c.json({ error: "user_state_changed" }, 409);
   }
   await enqueueSecurityEvent(c.env, event, c.executionCtx);
@@ -587,7 +594,10 @@ adminUserRoutes.post("/:userId/access", async (c) => {
   }
 
   const results = await c.env.PG72_ID_DB.batch(statements);
-  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+  if (
+    !auditEventMutationCommitted(results[0]) ||
+    results[1]?.meta.changes !== 1
+  ) {
     return c.json({ error: "user_state_changed" }, 409);
   }
   await enqueueSecurityEvent(c.env, event, c.executionCtx);
@@ -659,7 +669,7 @@ adminUserRoutes.post("/:userId/revoke-sessions", async (c) => {
         RETURNING id`,
     ).bind(userId, event.eventId),
   ]);
-  if (results[0]?.meta.changes !== 1) {
+  if (!auditEventMutationCommitted(results[0])) {
     return c.json({ error: "user_state_changed" }, 409);
   }
   await enqueueSecurityEvent(c.env, event, c.executionCtx);
@@ -739,7 +749,7 @@ adminUserRoutes.delete("/:userId", async (c) => {
       userId,
     ),
   ]);
-  if (results[0]?.meta.changes !== 1) {
+  if (!auditEventMutationCommitted(results[0])) {
     return c.json({ error: "user_state_changed" }, 409);
   }
   // meta.changes includes cascaded rows, so only zero means missing.

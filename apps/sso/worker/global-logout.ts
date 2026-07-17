@@ -1,4 +1,5 @@
 import {
+  auditEventMutationCommitted,
   createAuditEvent,
   enqueueSecurityEvent,
   type SecurityEvent,
@@ -296,7 +297,7 @@ export async function revokeCentralSessions(
     accessTokenRevocationStatement(env, event.eventId, input.selector),
     sessionRevocationStatement(env, event.eventId, input.selector),
   ]);
-  const committed = results[0]?.meta.changes === 1;
+  const committed = auditEventMutationCommitted(results[0]);
   if (committed) {
     await enqueueSecurityEvent(env, event, executionCtx);
     await scheduleLogoutDeliveryDispatch(env, executionCtx);

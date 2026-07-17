@@ -6,6 +6,7 @@ import {
 import { Hono } from "hono";
 
 import {
+  auditEventMutationCommitted,
   createAuditEvent,
   enqueueSecurityEvent,
   recordAudit,
@@ -525,7 +526,7 @@ passkeyStepUpRoutes.post("/api/account/passkey-step-up/verify", async (c) => {
     ),
   ]);
   if (
-    results[0]?.meta.changes === 1 &&
+    auditEventMutationCommitted(results[0]) &&
     results[1]?.meta.changes === 1 &&
     results[2]?.meta.changes === 0
   ) {
@@ -543,7 +544,7 @@ passkeyStepUpRoutes.post("/api/account/passkey-step-up/verify", async (c) => {
   // The timestamp depends on the exact success audit and credential counter.
   // The final statement removes that audit in the same transaction whenever
   // the timestamp guard fails, so no response can expose a partial success.
-  if (results[0]?.meta.changes !== 1) {
+  if (!auditEventMutationCommitted(results[0])) {
     if (
       results[1]?.meta.changes !== 0 ||
       results[2]?.meta.changes !== 0
@@ -568,7 +569,7 @@ passkeyStepUpRoutes.post("/api/account/passkey-step-up/verify", async (c) => {
   }
   if (
     results[1]?.meta.changes !== 0 ||
-    results[2]?.meta.changes !== 1
+    !auditEventMutationCommitted(results[2])
   ) {
     throw new Error("Passkey step-up finalization invariant failed");
   }

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 
 import { requireAdminPermission } from "./admin-gate";
 import {
+  auditEventMutationCommitted,
   createAuditEvent,
   enqueueSecurityEvent,
   type SecurityEvent,
@@ -189,7 +190,10 @@ adminLogoutDeliveryRoutes.post("/:deliveryKey/replay", async (c) => {
     ),
     replayAuditStatement(c.env, event, deliveryKey, replayCount, now),
   ]);
-  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+  if (
+    results[0]?.meta.changes !== 1 ||
+    !auditEventMutationCommitted(results[1])
+  ) {
     return c.json({ error: "delivery_state_changed" }, 409);
   }
 

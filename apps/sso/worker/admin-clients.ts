@@ -7,6 +7,7 @@ import {
 } from "./admin-commit";
 import { requireAdminPermission, type AdminActor } from "./admin-gate";
 import {
+  auditEventMutationCommitted,
   auditInsertForExistingClientStatement,
   createAuditEvent,
   enqueueSecurityEvent,
@@ -569,7 +570,7 @@ adminClientRoutes.post("/provision-mail-introspector", async (c) => {
     ]);
     if (
       results[0]?.meta.changes !== 1 ||
-      results[1]?.meta.changes !== 1
+      !auditEventMutationCommitted(results[1])
     ) {
       return c.json({ error: "management_state_changed" }, 409);
     }
@@ -853,7 +854,7 @@ adminClientRoutes.post("/", async (c) => {
     ]);
     if (
       results[0]?.meta.changes !== 1 ||
-      results[1]?.meta.changes !== 1
+      !auditEventMutationCommitted(results[1])
     ) {
       return c.json({ error: "management_state_changed" }, 409);
     }
@@ -1215,8 +1216,10 @@ adminClientRoutes.patch("/:clientId", async (c) => {
   const updateStatementIndex = statements.length;
   statements.push(update);
   const results = await c.env.PG72_ID_DB.batch(statements);
+  // Preserve the deliberate tolerance for other transaction-local audit
+  // triggers while requiring both the audit row and its archive-source row.
   if (
-    (results[0]?.meta.changes ?? 0) < 1 ||
+    (results[0]?.meta.changes ?? 0) < 2 ||
     results[updateStatementIndex]?.meta.changes !== 1
   ) {
     return c.json({ error: "management_state_changed" }, 409);
@@ -1283,7 +1286,7 @@ adminClientRoutes.post("/:clientId/rotate-secret", async (c) => {
   ]);
   if (
     results[0]?.meta.changes !== 1 ||
-    results[1]?.meta.changes !== 1
+    !auditEventMutationCommitted(results[1])
   ) {
     return c.json({ error: "management_state_changed" }, 409);
   }
@@ -1371,7 +1374,7 @@ adminClientRoutes.post("/:clientId/status", async (c) => {
   const results = await c.env.PG72_ID_DB.batch(statements);
   if (
     results[0]?.meta.changes !== 1 ||
-    results[auditStatementIndex]?.meta.changes !== 1
+    !auditEventMutationCommitted(results[auditStatementIndex])
   ) {
     return c.json({ error: "management_state_changed" }, 409);
   }
@@ -1419,7 +1422,7 @@ adminClientRoutes.delete("/:clientId", async (c) => {
   // meta.changes includes rows removed by ON DELETE CASCADE, so only a zero
   // count means the client did not exist.
   if (
-    results[1]?.meta.changes !== 1 ||
+    !auditEventMutationCommitted(results[1]) ||
     !results[2]?.meta.changes
   ) {
     return c.json({ error: "management_state_changed" }, 409);

@@ -1,9 +1,11 @@
 # Alert observability source boundary
 
-> Status: local schema plus pure evaluator/parser and archive-crypto source.
-> None is wired into the Worker runtime. There is no alert repository/Cron,
-> Queue/Email/admin delivery, same-run proof, `0021` R2 archive implementation,
-> or deployment. Production records remain through migration `0012`.
+> Status: local schema, pure evaluator/parser, evaluator runtime repository,
+> archive crypto, and `0021` archive-ledger source. The alert modules are not
+> wired into the Worker entry point. Metric-source/state/incident/outbox repositories,
+> Cron, Queue/Email/admin delivery, same-run proof, R2 archive runtime, restore,
+> external backup, and deployment remain absent. Production records remain
+> through migration `0012`.
 
 ## What `0020` provides
 
@@ -69,17 +71,18 @@ sample increments only at an exact 60-second interval, a late/missing sample
 restarts at one, and zero resets both continuity fields. Schema presence does
 not prove that the sampling loop exists. In particular, D1 cannot prove that an
 inserted `healthy`/`last_success_at` pair came from executed evaluator work. The
-future repository runtime must start the evaluator component as `disabled` with
-null history. On its first repository-controlled success, one ordered D1 batch
-must update the runtime row to `healthy` with non-null success evidence, then
-insert
+local runtime repository starts the evaluator component as `disabled` with null
+history. On its first repository-controlled success, one ordered D1 batch must
+update the runtime row to `healthy` with non-null success evidence, then insert
 `alert_evaluator_bootstrap` with `INSERT ... SELECT` from that exact runtime row.
 The anchor is immutable and its parent runtime row cannot be deleted or
 replaced. This proves the persisted repository transition, not the external
 work itself; status, generation, or revision alone is never bootstrap evidence.
-No such repository writer exists in the current source.
+`alert-runtime-repository.ts` implements this lease/bootstrap lifecycle, but it
+is not imported by the Worker, scheduled, or linked to metric collection or a
+same-run execution proof.
 
-The pure parser fixes this exact future repository projection and column order:
+The pure parser fixes this exact repository-owned projection and column order:
 
 ```sql
 SELECT
@@ -214,40 +217,45 @@ at or after expiry, only `lease_expired` may consume the claim.
 
 ## Audit cursor decision
 
-`0020` does not add an `audit_event` sequence or backfill. Existing audit IDs
-are UUIDs, and guarded mutations may insert then delete an audit row in the same
-D1 batch when a later condition fails. Creating an archive cursor here would
-either leave phantom sequence state or prematurely define retention semantics.
+`0020` itself does not add an `audit_event` sequence or backfill. The additive
+local `0021_audit_archive.sql` slice now owns that separate ledger while
+preserving compensation deletion before an event is snapshotted.
 
 Instead, `0020` adds
 `audit_event_type_subject_time_bounded_idx(event_type, subject_id,
 occurred_at DESC, id)` for deterministic bounded per-subject scans. The existing
 type/time index remains available. Additional covering indexes close the exact
 global/type/actor audit, OAuth reporter, logout delivery, and logout-attempt
-cohort paths described by the pure evaluator's source contracts. A future D1
-repository must execute those queries and prove their completeness.
+cohort paths described by the pure evaluator's source contracts. The local
+runtime repository owns only evaluator lease/status/bootstrap state; it does not
+execute these metric-source queries or persist alert state, incidents, or
+outbox work.
 
 The local archive-crypto module separately seals and opens bounded canonical v1
 records. It preserves the nullable `actorRef`/`actorRefHashVersion` pair and
 authenticates `checkpointFromSequence` across the header, manifest, and AES-GCM
-AAD. This is a record/envelope primitive, not an archive service. Migration
-`0021` must still define the monotonic source ledger, immutable batch membership,
-KEK custody/sentinel, trigger-coupled finalization/checkpoint/BLOB cleanup, and
-the repository contract. The R2 writer/restore path, Queue/DLQ, retention and
-external backup are also absent. There is no `audit-archive.ts` runtime module or
-`AUDIT_ARCHIVE` R2 binding, so `encrypted_r2_archive` remains
-`dependency_missing`.
+AAD. Migration `0021` now owns the monotonic source ledger, deterministic
+backfill, immutable batch snapshots, archive-key sentinel schema, and terminal
+checkpoint/BLOB-cleanup transaction described in
+[`audit-archive.md`](./audit-archive.md). The crypto and ledger remain source
+contracts, not an archive service: there is no `audit-archive.ts` runtime
+module, `AUDIT_ARCHIVE` R2 binding/writer, Queue/DLQ, Cron, bounded restore,
+retention exercise, or external backup. `encrypted_r2_archive` therefore
+remains `dependency_missing`.
 
 ## Local verification
 
 From a clean worktree with the frozen dependency set:
 
 ```bash
-pnpm --filter @pg72/id exec vitest run test/observability-schema.spec.ts
+pnpm --filter @pg72/id exec vitest run \
+  test/observability-schema.spec.ts test/alert-runtime-repository.spec.ts \
+  test/audit-archive-schema.spec.ts
 pnpm --filter @pg72/id exec vitest run \
   test/alert-evaluator.spec.ts test/alert-rules.spec.ts \
   test/audit-archive-crypto.spec.ts
-node --test scripts/public-readiness/d1-manifest.test.mjs \
+node --test scripts/public-readiness/audit-archive-migration.test.mjs \
+  scripts/public-readiness/d1-manifest.test.mjs \
   scripts/public-readiness/dependency-contracts.test.mjs \
   scripts/public-readiness/report.test.mjs
 pnpm test:public-readiness
@@ -256,7 +264,7 @@ pnpm --filter @pg72/test-rp test
 git diff --check
 ```
 
-The focused schema suite applies all migrations through `0020` and rejects
+The focused observability schema suite validates `0020` and rejects
 invalid enums/metrics, provenance mismatch, duplicate unresolved incidents,
 duplicate notification/idempotency/attempt tuples, malformed leases, mutable
 payloads, invalid incident/delivery transitions, unsupported channels,
@@ -264,24 +272,28 @@ fabricated snapshot evidence, and attempt evidence that does not match the exact
 active outbox lease. It also rejects invented primary domains, missing ratio
 minimum numerators, fictitious severity thresholds, partial or below-threshold
 secondary components, and evidence that changes between incident and outbox.
-The suite proves the existing audit insert/delete compensation still works and
-no sequence table was introduced. The pure evaluator suites verify the exact
+It proves the existing audit insert/delete compensation still works before the
+separate source ledger is added. The archive schema/migration suites apply the
+ordered ledger through `0021`, verify its six-table transaction contract, and
+retain that compensation behavior. The pure evaluator suites verify the exact
 15-rule matrix, redacted dimensions, source projections, deterministic lifecycle
-and persistence shape without performing D1 writes or scheduling work. The
-archive suite verifies the record/envelope crypto and checkpoint binding without
-D1, R2 or Queue I/O.
+and persistence shape without scheduling work. The runtime repository suite
+verifies only D1 lease/status/bootstrap persistence. The archive-crypto suite
+verifies the record/envelope and checkpoint binding without R2 or Queue I/O.
 
 ## Remaining gates
 
-Schema plus pure evaluator/parser presence must report observability as
-`source_present_unverified`, leaving continuity and drills blocked. A later
-reviewed slice must add the D1 source repository/CAS runtime,
-repository-controlled successful-run writer and same-run proof, evaluator Cron,
-dedicated alert Queue/DLQ, Email Service adapter, admin
-acknowledge/resolve/replay operations, and redaction/race/failure tests. Pure
-archive crypto does not satisfy the separate encrypted archive dependency;
-`encrypted_r2_archive` remains `dependency_missing` until the `0021` repository,
-R2 writer/restore, Queue/DLQ and external-backup exercise exist.
+Schema, pure evaluator/parser, and the unwired runtime repository must still
+report observability as `source_present_unverified`, leaving continuity and
+drills blocked. A later reviewed slice must add complete metric-source
+aggregation, alert-state/incident/outbox CAS repositories, Worker/Cron wiring,
+repository-controlled same-run proof, dedicated alert Queue/DLQ, Email Service
+adapter, admin acknowledge/resolve/replay operations, and
+redaction/race/failure tests. Archive crypto plus the `0021` ledger does not
+satisfy the separate encrypted archive dependency; `encrypted_r2_archive`
+remains `dependency_missing` until the disabled repository, R2 writer/bounded
+restore, Queue/DLQ, Cron redrive, retention proof, and external-backup exercise
+exist.
 
 Isolated Preview must then apply the ordered migration ledger, tune thresholds,
 exercise exact D1 and approximate Queue evidence, prove real Email receipt and

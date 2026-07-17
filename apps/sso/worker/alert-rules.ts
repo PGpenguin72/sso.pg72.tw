@@ -151,6 +151,44 @@ function exactRecord(
   return record;
 }
 
+export interface AlertRuntimeSourceEligibility {
+  component: "evaluator";
+  successfulRunAt: string;
+}
+
+// Repository code uses this once to enable runtime thresholds. The timestamped
+// proof is never accepted as observation evidence.
+export function parseAlertRuntimeSourceCompleteness(
+  value: unknown,
+  asOf: string,
+): AlertRuntimeSourceEligibility | null {
+  const evaluationTime = new Date(canonicalTimestamp(asOf, "asOf")).getTime();
+  if (value === null) return null;
+  const record = exactRecord(
+    value,
+    ["component", "lastSuccessAt", "status"],
+    "alert runtime source projection",
+  );
+  if (
+    record.component !== "evaluator" ||
+    record.status !== "healthy" ||
+    record.lastSuccessAt === null
+  ) {
+    return null;
+  }
+  let successfulRunAt: string;
+  try {
+    successfulRunAt = canonicalTimestamp(
+      record.lastSuccessAt,
+      "runtime lastSuccessAt",
+    );
+  } catch {
+    return null;
+  }
+  if (new Date(successfulRunAt).getTime() > evaluationTime) return null;
+  return { component: "evaluator", successfulRunAt };
+}
+
 export function isHashedAlertReference(
   value: unknown,
 ): value is HashedAlertReference {
@@ -429,12 +467,27 @@ export type AlertSourceDescriptor =
       dimension: "global";
       evaluator: Readonly<{
         ageSecondsSemantics: "as_of_minus_last_success_at_floor_seconds";
-        bootstrapRequirement: "enabled_row_created_before_rule_evaluation";
+        bootstrap: Readonly<{
+          completionStatus: "healthy";
+          completenessLayer: "repository_source";
+          completenessParser: "parseAlertRuntimeSourceCompleteness";
+          enablement: "one_way_after_valid_success_evidence";
+          evidenceColumn: "last_success_at";
+          evidenceWrite: "repository_controlled_successful_run_only";
+          eligibilityProof: "canonical_successful_run_timestamp";
+          preBootstrapDisposition: "exclude_without_threshold_input";
+          sourceProjection: Readonly<{
+            component: "component";
+            lastSuccessAt: "last_success_at";
+            status: "status";
+          }>;
+          statusAlone: "never_sufficient";
+        }>;
         component: "evaluator";
         componentColumn: "component";
         enabledStatuses: readonly ["healthy", "degraded", "failing", "unavailable"];
         lastSuccessAtColumn: "last_success_at";
-        nullAgeSemantics: "last_success_at_is_null";
+        nullAgeSemantics: "post_bootstrap_evaluator_missing_only";
         statusColumn: "status";
       }>;
       mode: "alert_runtime";
@@ -451,6 +504,11 @@ export type AlertSourceDescriptor =
         table: "alert_outbox";
       }>;
       runtimeTable: "alert_runtime_status";
+      thresholdInput: Readonly<{
+        bootstrapFields: "forbidden";
+        evaluatorAgeSecondsNull: "post_bootstrap_missing_immediate";
+        preBootstrap: "no_observation";
+      }>;
     }>
   | Readonly<{
       backlogBytesBindingField: "backlogBytes";
@@ -1053,12 +1111,27 @@ export const ALERT_RULE_DEFINITIONS = {
       dimension: "global",
       evaluator: {
         ageSecondsSemantics: "as_of_minus_last_success_at_floor_seconds",
-        bootstrapRequirement: "enabled_row_created_before_rule_evaluation",
+        bootstrap: {
+          completionStatus: "healthy",
+          completenessLayer: "repository_source",
+          completenessParser: "parseAlertRuntimeSourceCompleteness",
+          enablement: "one_way_after_valid_success_evidence",
+          evidenceColumn: "last_success_at",
+          evidenceWrite: "repository_controlled_successful_run_only",
+          eligibilityProof: "canonical_successful_run_timestamp",
+          preBootstrapDisposition: "exclude_without_threshold_input",
+          sourceProjection: {
+            component: "component",
+            lastSuccessAt: "last_success_at",
+            status: "status",
+          },
+          statusAlone: "never_sufficient",
+        },
         component: "evaluator",
         componentColumn: "component",
         enabledStatuses: ["healthy", "degraded", "failing", "unavailable"],
         lastSuccessAtColumn: "last_success_at",
-        nullAgeSemantics: "last_success_at_is_null",
+        nullAgeSemantics: "post_bootstrap_evaluator_missing_only",
         statusColumn: "status",
       },
       mode: "alert_runtime",
@@ -1075,6 +1148,11 @@ export const ALERT_RULE_DEFINITIONS = {
         table: "alert_outbox",
       },
       runtimeTable: "alert_runtime_status",
+      thresholdInput: {
+        bootstrapFields: "forbidden",
+        evaluatorAgeSecondsNull: "post_bootstrap_missing_immediate",
+        preBootstrap: "no_observation",
+      },
     },
     sourceKind: d1Exact,
     thresholds: {

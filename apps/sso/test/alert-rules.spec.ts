@@ -14,6 +14,7 @@ import {
   isHashedAlertReference,
   OAUTH_REPORT_REASONS,
   parseAlertObservation,
+  parseAlertRuntimeSourceCompleteness,
   parseAlertSelectedEvidence,
   RESTRICTED_ALERT_SURFACES,
   alertWindowsAt,
@@ -502,12 +503,27 @@ const EXPECTED_SOURCES = {
     dimension: "global",
     evaluator: {
       ageSecondsSemantics: "as_of_minus_last_success_at_floor_seconds",
-      bootstrapRequirement: "enabled_row_created_before_rule_evaluation",
+      bootstrap: {
+        completionStatus: "healthy",
+        completenessLayer: "repository_source",
+        completenessParser: "parseAlertRuntimeSourceCompleteness",
+        enablement: "one_way_after_valid_success_evidence",
+        evidenceColumn: "last_success_at",
+        evidenceWrite: "repository_controlled_successful_run_only",
+        eligibilityProof: "canonical_successful_run_timestamp",
+        preBootstrapDisposition: "exclude_without_threshold_input",
+        sourceProjection: {
+          component: "component",
+          lastSuccessAt: "last_success_at",
+          status: "status",
+        },
+        statusAlone: "never_sufficient",
+      },
       component: "evaluator",
       componentColumn: "component",
       enabledStatuses: ["healthy", "degraded", "failing", "unavailable"],
       lastSuccessAtColumn: "last_success_at",
-      nullAgeSemantics: "last_success_at_is_null",
+      nullAgeSemantics: "post_bootstrap_evaluator_missing_only",
       statusColumn: "status",
     },
     mode: "alert_runtime",
@@ -524,6 +540,11 @@ const EXPECTED_SOURCES = {
       table: "alert_outbox",
     },
     runtimeTable: "alert_runtime_status",
+    thresholdInput: {
+      bootstrapFields: "forbidden",
+      evaluatorAgeSecondsNull: "post_bootstrap_missing_immediate",
+      preBootstrap: "no_observation",
+    },
   },
   "pgid.queue.dlq_approximate.v1": {
     backlogBytesBindingField: "backlogBytes",
@@ -810,6 +831,72 @@ describe("redacted observation parsing", () => {
       .rejects.toThrow("32-byte");
     await expect(deriveAlertReferenceV1("short", "subject_hmac", "subject-1"))
       .rejects.toThrow("32-byte");
+  });
+
+  it("enables runtime thresholds only after repository-controlled bootstrap success", () => {
+    const enabledStatuses = ["healthy", "degraded", "failing", "unavailable"];
+    expect(parseAlertRuntimeSourceCompleteness(null, AS_OF)).toBeNull();
+    for (const status of enabledStatuses) {
+      expect(parseAlertRuntimeSourceCompleteness({
+        component: "evaluator",
+        lastSuccessAt: null,
+        status,
+      }, AS_OF)).toBeNull();
+    }
+    expect(parseAlertRuntimeSourceCompleteness({
+      component: "evaluator",
+      lastSuccessAt: "2026-07-17T11:59:00.000Z",
+      status: "degraded",
+    }, AS_OF)).toBeNull();
+    expect(parseAlertRuntimeSourceCompleteness({
+      component: "delivery",
+      lastSuccessAt: "2026-07-17T11:59:00.000Z",
+      status: "healthy",
+    }, AS_OF)).toBeNull();
+    expect(parseAlertRuntimeSourceCompleteness({
+      component: "evaluator",
+      lastSuccessAt: "2026-07-17T12:00:01.000Z",
+      status: "healthy",
+    }, AS_OF)).toBeNull();
+    expect(parseAlertRuntimeSourceCompleteness({
+      component: "evaluator",
+      lastSuccessAt: "2026-07-17T11:59:00Z",
+      status: "healthy",
+    }, AS_OF)).toBeNull();
+
+    expect(parseAlertRuntimeSourceCompleteness({
+      component: "evaluator",
+      lastSuccessAt: "2026-07-17T11:59:00.000Z",
+      status: "healthy",
+    }, AS_OF)).toEqual({
+      component: "evaluator",
+      successfulRunAt: "2026-07-17T11:59:00.000Z",
+    });
+    expect(() => parseAlertRuntimeSourceCompleteness({
+      bootstrapComplete: true,
+      component: "evaluator",
+      lastSuccessAt: "2026-07-17T11:59:00.000Z",
+      status: "healthy",
+    }, AS_OF)).toThrow("canonical keys");
+
+    const postBootstrapMissing = runtimeObservation(null, null);
+    expect(evaluateAlertRule(postBootstrapMissing)).toMatchObject({
+      immediateCritical: true,
+      selectedEvidence: { metricName: "evaluator_missing" },
+      severity: "critical",
+    });
+    expect(evaluateAlertRule(runtimeObservation(301, null))).toMatchObject({
+      immediateCritical: false,
+      selectedEvidence: { metricName: "evaluator_age_seconds" },
+      severity: "critical",
+    });
+    expect(() => parseAlertObservation({
+      ...postBootstrapMissing,
+      snapshot: {
+        ...postBootstrapMissing.snapshot,
+        bootstrapComplete: true,
+      },
+    })).toThrow("canonical keys");
   });
 
   it("accepts only exact HMAC reference objects", () => {

@@ -1,9 +1,12 @@
 # Alert observability source boundary
 
-> Status: local schema plus pure evaluator/parser and archive-crypto source.
-> None is wired into the Worker runtime. There is no alert repository/Cron,
-> Queue/Email/admin delivery, same-run proof, `0021` R2 archive implementation,
-> or deployment. Production records remain through migration `0012`.
+> Status: local schema, pure evaluator/parser and archive-crypto source, plus an
+> evaluator runtime-status/lease/bootstrap repository. That repository is not
+> imported by the Worker entry point or a scheduler. Full audit and other
+> metric-source aggregation, `alert_state`/`security_alert`/`alert_outbox` CAS,
+> Cron, Queue/Email/admin delivery,
+> same-run proof, the `0021` R2 archive implementation, and deployment remain
+> absent. Production records remain through migration `0012`.
 
 ## What `0020` provides
 
@@ -69,17 +72,20 @@ sample increments only at an exact 60-second interval, a late/missing sample
 restarts at one, and zero resets both continuity fields. Schema presence does
 not prove that the sampling loop exists. In particular, D1 cannot prove that an
 inserted `healthy`/`last_success_at` pair came from executed evaluator work. The
-future repository runtime must start the evaluator component as `disabled` with
-null history. On its first repository-controlled success, one ordered D1 batch
-must update the runtime row to `healthy` with non-null success evidence, then
-insert
+local evaluator runtime repository starts the evaluator component as `disabled`
+with null history. It acquires and renews the bounded evaluator lease and records
+terminal success or failure by exact generation/revision/lease compare-and-swap.
+On its first repository-controlled success, one ordered D1 batch updates the
+runtime row to `healthy` with non-null success evidence, then inserts
 `alert_evaluator_bootstrap` with `INSERT ... SELECT` from that exact runtime row.
 The anchor is immutable and its parent runtime row cannot be deleted or
 replaced. This proves the persisted repository transition, not the external
 work itself; status, generation, or revision alone is never bootstrap evidence.
-No such repository writer exists in the current source.
+The repository also owns the exact projection read below. It is local source
+only: the Worker entry point and scheduler do not import or invoke it, and no
+full audit/other metric-source evaluation or same-run execution proof exists.
 
-The pure parser fixes this exact future repository projection and column order:
+The pure parser fixes this exact repository-owned projection and column order:
 
 ```sql
 SELECT
@@ -273,10 +279,12 @@ D1, R2 or Queue I/O.
 
 ## Remaining gates
 
-Schema plus pure evaluator/parser presence must report observability as
-`source_present_unverified`, leaving continuity and drills blocked. A later
-reviewed slice must add the D1 source repository/CAS runtime,
-repository-controlled successful-run writer and same-run proof, evaluator Cron,
+Schema, pure evaluator/parser, and the unwired evaluator runtime-status
+repository must still report observability as `source_present_unverified`,
+leaving continuity and drills blocked. A later reviewed slice must add the full
+D1 audit/other metric-source aggregation and
+`alert_state`/`security_alert`/`alert_outbox` CAS repositories,
+wire the runtime repository into evaluator Cron with same-run proof, and add the
 dedicated alert Queue/DLQ, Email Service adapter, admin
 acknowledge/resolve/replay operations, and redaction/race/failure tests. Pure
 archive crypto does not satisfy the separate encrypted archive dependency;

@@ -58,9 +58,77 @@ function createDependencyFixture() {
   );
   writeFixture(
     path.join(identityRoot, "migrations", "0020_alert_observability.sql"),
-    `CREATE TABLE "alert_state" (id text);
+    `ALTER TABLE "audit_event" ADD COLUMN "actor_ref" text;
+     ALTER TABLE "audit_event" ADD COLUMN "actor_ref_hash_version" integer;
+     ALTER TABLE "oauth_client_report" ADD COLUMN "reporter_ref" text;
+     ALTER TABLE "oauth_client_report"
+       ADD COLUMN "reporter_ref_hash_version" integer;
+     CREATE TABLE "alert_hash_key_sentinel" (id integer);
+     CREATE TRIGGER "alert_hash_key_sentinel_insert_guard"
+       BEFORE INSERT ON "alert_hash_key_sentinel" BEGIN SELECT 1; END;
+     CREATE TRIGGER "audit_event_actor_identity_update_guard"
+       AFTER UPDATE ON "alert_hash_key_sentinel" BEGIN SELECT 1; END;
+     CREATE TRIGGER "oauth_client_report_identity_update_guard"
+       AFTER UPDATE ON "alert_hash_key_sentinel" BEGIN SELECT 1; END;
+     CREATE TABLE "alert_state" (
+       id text,
+       "minimum_numerator_count" integer,
+       "last_notification_scheduled_at" date
+     );
+     CREATE TABLE "security_alert" (id text);
      CREATE TABLE "alert_outbox" (id text);
-     CREATE INDEX "alert_outbox_due_idx" ON "alert_outbox" (id);`,
+     CREATE TABLE "alert_delivery_attempt" (id text);
+     CREATE TABLE "alert_runtime_status" (
+       id text,
+       "consecutive_nonzero_samples" integer
+     );
+     CREATE TABLE "alert_evaluator_bootstrap" (
+       "component" text,
+       "first_success_at" date,
+       "source_generation" integer,
+       "source_revision" integer,
+       FOREIGN KEY ("component") REFERENCES "alert_runtime_status" ("component")
+         ON DELETE RESTRICT
+     );
+     CREATE UNIQUE INDEX "alert_state_semantic_identity_idx"
+       ON "alert_state" (id);
+     CREATE UNIQUE INDEX "security_alert_unresolved_state_idx"
+       ON "security_alert" (id);
+     CREATE INDEX "alert_outbox_due_idx" ON "alert_outbox" (id);
+     CREATE TRIGGER "alert_state_initial_guard"
+       AFTER INSERT ON "alert_state" BEGIN SELECT 1; END;
+     CREATE TRIGGER "alert_state_transition_guard"
+       AFTER UPDATE ON "alert_state" BEGIN SELECT 1; END;
+     CREATE TRIGGER "security_alert_insert_state_guard"
+       AFTER INSERT ON "security_alert" BEGIN SELECT 1; END;
+     CREATE TRIGGER "alert_outbox_reminder_sequence_guard"
+       BEFORE INSERT ON "alert_outbox" BEGIN SELECT 1; END;
+     CREATE TRIGGER "alert_delivery_attempt_insert_guard"
+       AFTER INSERT ON "alert_delivery_attempt" BEGIN SELECT 1; END;
+     CREATE TRIGGER "alert_delivery_attempt_transition_guard"
+       AFTER UPDATE ON "alert_delivery_attempt" BEGIN SELECT 1; END;
+     CREATE TRIGGER "alert_runtime_status_transition_guard"
+       AFTER UPDATE ON "alert_runtime_status" BEGIN SELECT 1; END;
+     CREATE TRIGGER "alert_evaluator_bootstrap_insert_guard"
+       BEFORE INSERT ON "alert_evaluator_bootstrap" BEGIN SELECT 1; END;
+     CREATE TRIGGER "alert_evaluator_bootstrap_update_guard"
+       BEFORE UPDATE ON "alert_evaluator_bootstrap" BEGIN SELECT 1; END;
+     CREATE TRIGGER "alert_evaluator_bootstrap_delete_guard"
+       BEFORE DELETE ON "alert_evaluator_bootstrap" BEGIN SELECT 1; END;
+     CREATE INDEX "audit_event_type_subject_time_bounded_idx"
+       ON "alert_state" (id);
+     CREATE INDEX "audit_event_time_bounded_idx" ON "alert_state" (id);
+     CREATE INDEX "audit_event_type_actor_time_bounded_idx"
+       ON "alert_state" (id);
+     CREATE INDEX "audit_event_type_time_bounded_idx" ON "alert_state" (id);
+     CREATE INDEX "oauth_client_report_time_client_reason_reporter_bounded_idx"
+       ON "alert_state" (id);
+     CREATE INDEX "logout_delivery_time_client_status_bounded_idx"
+       ON "alert_state" (id);
+     CREATE INDEX "logout_delivery_status_client_time_bounded_idx"
+       ON "alert_state" (id);
+     CREATE INDEX "logout_delivery_attempt_completion_bounded_idx"
+       ON "alert_state" (id);`,
   );
   writeFixture(
     path.join(identityRoot, "worker", "audit-archive.ts"),
@@ -309,6 +377,10 @@ test("valid source remains unverified and caller assertions cannot promote it", 
     assert.ok(
       dependencies.every(({ status }) => status === "source_present_unverified"),
     );
+    assert.equal(
+      statusOf(dependencies, "observability_0020"),
+      "source_present_unverified",
+    );
     assert.deepEqual(readinessFromDependencies(dependencies), {
       ready: false,
       status: "blocked",
@@ -386,6 +458,10 @@ test("only same-run recovery and release checks produce their opaque proofs", ()
     });
     assert.equal(statusOf(dependencies, "recovery_0019"), "verified");
     assert.equal(statusOf(dependencies, "release_automation"), "verified");
+    assert.equal(
+      statusOf(dependencies, "observability_0020"),
+      "source_present_unverified",
+    );
     assert.ok(
       dependencies
         .filter(({ name }) => !["recovery_0019", "release_automation"].includes(name))

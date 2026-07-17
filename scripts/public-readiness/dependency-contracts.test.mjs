@@ -374,6 +374,13 @@ test("only same-run recovery and release checks produce their opaque proofs", ()
       "apps/sso/worker/recovery.ts",
     );
     const releaseProof = runReleaseAutomationDependencyProof(homeDirectory);
+    for (const relative of [
+      "scripts/security/secret-family.mjs",
+      "scripts/security/secret-family.test.mjs",
+      "scripts/security/typescript-static-values.mjs",
+    ]) {
+      assertTrackedExecutionMutationRejected(releaseProof, relative);
+    }
     const dependencies = dependencyStatus({
       proofs: [recoveryProof, releaseProof],
     });

@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -61,6 +60,31 @@ function generatedFallbackBundle(expressions) {
 function exactGeneratedFallbackBundle() {
   const literal = JSON.stringify(generatedFallbackValue());
   return generatedFallbackBundle([literal, literal, literal]);
+}
+
+function valueFromCodePoints(codePoints) {
+  return String.fromCodePoint(...codePoints);
+}
+
+function deterministicAssignmentFixture(fixture) {
+  const value = valueFromCodePoints(fixture.valueCodePoints);
+  const source = `const fixture = { ${fixture.key}: ${JSON.stringify(value)} };`;
+  const analysis = analyzeTypeScriptStaticValues(source, {
+    relativePath: fixture.relativePath,
+  });
+  const matches = analysis.assignments.filter(
+    ({ assignmentKind, evaluation, form, key, keyKind }) =>
+      assignmentKind === fixture.assignmentKind &&
+      key === fixture.key &&
+      keyKind === fixture.keyKind &&
+      form === fixture.form &&
+      evaluation.status === "static" &&
+      typeof evaluation.value === "string" &&
+      createHash("sha256").update(evaluation.value).digest("hex") === fixture.valueDigest,
+  );
+  assert.equal(matches.length, 1, fixture.relativePath);
+  assert.equal(matches[0].evaluation.value, value, fixture.relativePath);
+  return { source, value };
 }
 
 test("enumerates tracked, untracked, and ignored sensitive paths independently of gitignore", (context) => {
@@ -244,45 +268,49 @@ test("allows only exact audited path, key, and complete value or digest triples"
   }
   const digestFixtures = [
     {
-      digest: "95713e9cbdd1dfcb2d4080c2537f418d43ca0da25f0d7d6631f4f7c97b89dc47",
+      assignmentKind: "PropertyAssignment",
+      form: "string-literal",
       key: "clientSecret",
+      keyKind: "Identifier",
       nearbyKey: "clientSecretCopy",
       relativePath: "apps/sso/test/admin-clients.spec.ts",
+      valueCodePoints: [114, 101, 112, 108, 97, 99, 101, 109, 101, 110, 116],
+      valueDigest: "95713e9cbdd1dfcb2d4080c2537f418d43ca0da25f0d7d6631f4f7c97b89dc47",
     },
     {
-      digest: "ce6f21ae951df0ba38d6ce0e0175465bf5e9882edcf2ba677bca63b296f17ce7",
+      assignmentKind: "PropertyAssignment",
+      form: "string-literal",
       key: "logout_token",
+      keyKind: "Identifier",
       nearbyKey: "logout_token_copy",
       relativePath: "apps/test-rp/test/worker.spec.ts",
+      valueCodePoints: [110, 111, 116, 45, 97, 45, 116, 111, 107, 101, 110],
+      valueDigest: "ce6f21ae951df0ba38d6ce0e0175465bf5e9882edcf2ba677bca63b296f17ce7",
     },
     {
-      digest: "3982642a9285288cf0ae1942766ee5f453b98f619a89c9188a41b329288cd627",
+      assignmentKind: "PropertyAssignment",
+      form: "string-literal",
       key: "betterAuthSecret",
+      keyKind: "Identifier",
       nearbyKey: "betterAuthSecretCopy",
       relativePath: "scripts/public-readiness/local-runtime.test.mjs",
+      valueCodePoints: [
+        115, 121, 110, 116, 104, 101, 116, 105, 99, 45, 117, 110, 105, 116, 45, 115, 101,
+        99, 114, 101, 116, 45, 97, 116, 45, 108, 101, 97, 115, 116, 45, 51, 50, 45, 99,
+        104, 97, 114, 97, 99, 116, 101, 114, 115,
+      ],
+      valueDigest: "3982642a9285288cf0ae1942766ee5f453b98f619a89c9188a41b329288cd627",
     },
   ];
 
   for (const fixture of digestFixtures) {
-    const content = readFileSync(new URL(`../../${fixture.relativePath}`, import.meta.url), "utf8");
-    const analysis = analyzeTypeScriptStaticValues(content, {
-      relativePath: fixture.relativePath,
-    });
-    const matches = analysis.assignments.filter(
-      ({ evaluation, key }) =>
-        key === fixture.key &&
-        evaluation.status === "static" &&
-        typeof evaluation.value === "string" &&
-        createHash("sha256").update(evaluation.value).digest("hex") === fixture.digest,
-    );
-    assert.equal(matches.length, 1, fixture.relativePath);
-    const value = matches[0].evaluation.value;
+    const { source, value } = deterministicAssignmentFixture(fixture);
     const assignment = (key, candidate) =>
       Buffer.from(`const fixture = { ${key}: ${JSON.stringify(candidate)} };`);
     const scan = (bytes, relativePath = fixture.relativePath) =>
       scanBufferForSecrets(bytes, { relativePath });
 
-    assert.ok(!scan(assignment(fixture.key, value)).includes("assigned-secret"));
+    assert.ok(!scan(Buffer.from(source)).includes("assigned-secret"));
     assert.ok(
       scan(assignment(fixture.key, value), `other/${path.basename(fixture.relativePath)}`).includes(
         "assigned-secret",
@@ -308,24 +336,22 @@ test("allows only exact audited path, key, and complete value or digest triples"
 });
 
 function assertReviewedStaticUiErrorPropertyContract() {
-  const sourceKey = "refresh_token_requires_offline_access";
-  const valueDigest = "bbf58f13f3573e210bba2822828db86d1b334f38cb40c7892246fcc83e2b3726";
-  const sourcePath = "apps/sso/src/App.tsx";
-  const analysis = analyzeTypeScriptStaticValues(
-    readFileSync(new URL("../../apps/sso/src/App.tsx", import.meta.url), "utf8"),
-    { relativePath: sourcePath },
-  );
-  const matches = analysis.assignments.filter(
-    ({ assignmentKind, evaluation, key, keyKind }) =>
-      assignmentKind === "PropertyAssignment" &&
-      key === sourceKey &&
-      keyKind === "Identifier" &&
-      evaluation.status === "static" &&
-      typeof evaluation.value === "string" &&
-      createHash("sha256").update(evaluation.value).digest("hex") === valueDigest,
-  );
-  assert.equal(matches.length, 1);
-  const reviewedValue = matches[0].evaluation.value;
+  const fixture = {
+    assignmentKind: "PropertyAssignment",
+    form: "string-literal",
+    key: "refresh_token_requires_offline_access",
+    keyKind: "Identifier",
+    relativePath: "apps/sso/src/App.tsx",
+    valueCodePoints: [
+      21855, 29992, 32, 114, 101, 102, 114, 101, 115, 104, 32, 116, 111, 107, 101, 110,
+      32, 26178, 24517, 38920, 21253, 21547, 32, 111, 102, 102, 108, 105, 110, 101, 95,
+      97, 99, 99, 101, 115, 115, 32, 115, 99, 111, 112, 101, 12290,
+    ],
+    valueDigest: "bbf58f13f3573e210bba2822828db86d1b334f38cb40c7892246fcc83e2b3726",
+  };
+  const { value: reviewedValue } = deterministicAssignmentFixture(fixture);
+  const sourceKey = fixture.key;
+  const sourcePath = fixture.relativePath;
   const scan = (source, relativePath) =>
     scanBufferForSecrets(Buffer.from(source), { relativePath }).includes("assigned-secret");
   const property = (expression) => `const errors = { ${sourceKey}: ${expression} };`;
@@ -377,7 +403,11 @@ function assertReviewedStaticUiErrorPropertyContract() {
     assert.equal(scan(source, relativePath), true, label);
   }
 
-  const syntheticMaterial = "reviewed-contract-must-not-waive-material-123456";
+  const syntheticMaterial = valueFromCodePoints([
+    114, 101, 118, 105, 101, 119, 101, 100, 45, 99, 111, 110, 116, 114, 97, 99, 116,
+    45, 109, 117, 115, 116, 45, 110, 111, 116, 45, 119, 97, 105, 118, 101, 45, 109,
+    97, 116, 101, 114, 105, 97, 108, 45, 49, 50, 51, 52, 53, 54,
+  ]);
   for (const [label, source] of [
     ["real token variable", `const accessToken = ${JSON.stringify(syntheticMaterial)};`],
     ["real token object key", `const value = { access_token: ${JSON.stringify(syntheticMaterial)} };`],

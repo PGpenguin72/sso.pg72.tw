@@ -38,6 +38,26 @@ const MAX_QUEUE_BACKLOG_BYTES = 1_000_000_000_000;
 const HMAC_REFERENCE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const RULE_ID_SET = new Set<string>(ALERT_RULE_IDS);
 
+export const ALERT_RUNTIME_SOURCE_QUERY = `SELECT
+  b.component AS bootstrap_component,
+  b.first_success_at AS first_success_at,
+  b.source_generation AS source_generation,
+  b.source_revision AS source_revision,
+  r.component AS runtime_component,
+  r.status AS runtime_status,
+  r.generation AS runtime_generation,
+  r.revision AS runtime_revision,
+  r.last_started_at AS runtime_last_started_at,
+  r.last_success_at AS runtime_last_success_at,
+  r.last_error_at AS runtime_last_error_at,
+  r.last_error_code AS runtime_last_error_code,
+  r.updated_at AS runtime_updated_at
+FROM (SELECT 'evaluator' AS expected_component) AS e
+LEFT JOIN alert_evaluator_bootstrap AS b
+  ON b.component = e.expected_component
+LEFT JOIN alert_runtime_status AS r
+  ON r.component = e.expected_component`;
+
 export const ALERT_QUEUE_NAMES = [
   "security_events_dlq",
   "logout_deliveries_dlq",
@@ -151,86 +171,185 @@ function exactRecord(
   return record;
 }
 
-export interface AlertRuntimeSourceEligibility {
-  component: "evaluator";
-  successfulRunAt: string;
+export interface AlertRuntimeThresholdInput {
+  evaluatorAgeSeconds: number | null;
 }
 
-const ALERT_RUNTIME_ELIGIBLE_STATUSES = new Set([
+const ALERT_RUNTIME_STATUSES = new Set([
+  "disabled",
   "healthy",
   "degraded",
   "failing",
   "unavailable",
 ]);
+const ALERT_RUNTIME_ERROR_CODES = new Set([
+  "metrics_unavailable",
+  "evaluator_failed",
+  "delivery_failed",
+  "fanout_failed",
+  "logout_failed",
+  "source_incomplete",
+  "unknown",
+]);
+const ALERT_RUNTIME_SOURCE_PROJECTION_KEYS = [
+  "bootstrap_component",
+  "first_success_at",
+  "source_generation",
+  "source_revision",
+  "runtime_component",
+  "runtime_status",
+  "runtime_generation",
+  "runtime_revision",
+  "runtime_last_started_at",
+  "runtime_last_success_at",
+  "runtime_last_error_at",
+  "runtime_last_error_code",
+  "runtime_updated_at",
+] as const;
 
-function parseAlertRuntimeEligibilityProof(
-  value: unknown,
-  evaluationTime: number,
-): AlertRuntimeSourceEligibility | null {
-  if (value === null) return null;
-  const record = exactRecord(
-    value,
-    ["component", "successfulRunAt"],
-    "alert runtime eligibility proof",
-  );
-  if (record.component !== "evaluator") return null;
-  let successfulRunAt: string;
+function runtimeSourceTimestamp(value: unknown, name: string): string | null {
   try {
-    successfulRunAt = canonicalTimestamp(
-      record.successfulRunAt,
-      "runtime successfulRunAt",
-    );
+    return canonicalTimestamp(value, name);
   } catch {
     return null;
   }
-  if (new Date(successfulRunAt).getTime() > evaluationTime) return null;
-  return { component: "evaluator", successfulRunAt };
 }
 
-// Repository code retains the timestamped proof across later source failures.
-// Neither this proof nor a bootstrap boolean is accepted as observation evidence.
+function runtimeSourceInteger(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+): number | null {
+  return Number.isSafeInteger(value) &&
+      (value as number) >= minimum &&
+      (value as number) <= maximum
+    ? value as number
+    : null;
+}
+
+// The repository query and schema guards establish D1 provenance. This parser
+// only validates the exact projection shape and its bounded chronology.
 export function parseAlertRuntimeSourceCompleteness(
   value: unknown,
   asOf: string,
-  previousEligibility: unknown = null,
-): AlertRuntimeSourceEligibility | null {
+): AlertRuntimeThresholdInput | null {
+  if (arguments.length !== 2) {
+    throw new Error("alert runtime source parser accepts only projection and asOf");
+  }
   const evaluationTime = new Date(canonicalTimestamp(asOf, "asOf")).getTime();
-  const previous = parseAlertRuntimeEligibilityProof(
-    previousEligibility,
-    evaluationTime,
-  );
-  if (value === null) return previous;
   const record = exactRecord(
     value,
-    ["component", "lastSuccessAt", "status"],
+    ALERT_RUNTIME_SOURCE_PROJECTION_KEYS,
     "alert runtime source projection",
   );
+  const sentinelValues = [
+    record.bootstrap_component,
+    record.first_success_at,
+    record.source_generation,
+    record.source_revision,
+  ];
+  if (sentinelValues.every((entry) => entry === null)) return null;
+
+  const missing = (): AlertRuntimeThresholdInput => ({ evaluatorAgeSeconds: null });
+  const firstSuccessAt = runtimeSourceTimestamp(
+    record.first_success_at,
+    "bootstrap first_success_at",
+  );
+  const sourceGeneration = runtimeSourceInteger(
+    record.source_generation,
+    1,
+    MAX_RATIO_FIELD,
+  );
+  const sourceRevision = runtimeSourceInteger(
+    record.source_revision,
+    1,
+    MAX_EVIDENCE_VALUE,
+  );
   if (
-    record.component !== "evaluator" ||
-    typeof record.status !== "string" ||
-    !ALERT_RUNTIME_ELIGIBLE_STATUSES.has(record.status) ||
-    record.lastSuccessAt === null
+    record.bootstrap_component !== "evaluator" ||
+    firstSuccessAt === null ||
+    new Date(firstSuccessAt).getTime() > evaluationTime ||
+    sourceGeneration === null ||
+    sourceRevision === null
   ) {
-    return previous;
+    return missing();
   }
-  let successfulRunAt: string;
-  try {
-    successfulRunAt = canonicalTimestamp(
-      record.lastSuccessAt,
-      "runtime lastSuccessAt",
+
+  const runtimeGeneration = runtimeSourceInteger(
+    record.runtime_generation,
+    0,
+    MAX_RATIO_FIELD,
+  );
+  const runtimeRevision = runtimeSourceInteger(
+    record.runtime_revision,
+    0,
+    MAX_EVIDENCE_VALUE,
+  );
+  const lastStartedAt = runtimeSourceTimestamp(
+    record.runtime_last_started_at,
+    "runtime last_started_at",
+  );
+  const lastSuccessAt = runtimeSourceTimestamp(
+    record.runtime_last_success_at,
+    "runtime last_success_at",
+  );
+  const updatedAt = runtimeSourceTimestamp(
+    record.runtime_updated_at,
+    "runtime updated_at",
+  );
+  if (
+    record.runtime_component !== "evaluator" ||
+    typeof record.runtime_status !== "string" ||
+    !ALERT_RUNTIME_STATUSES.has(record.runtime_status) ||
+    runtimeGeneration === null ||
+    runtimeGeneration < sourceGeneration ||
+    runtimeRevision === null ||
+    runtimeRevision < sourceRevision ||
+    lastStartedAt === null ||
+    lastSuccessAt === null ||
+    updatedAt === null
+  ) {
+    return missing();
+  }
+
+  const firstSuccessTime = new Date(firstSuccessAt).getTime();
+  const lastStartedTime = new Date(lastStartedAt).getTime();
+  const lastSuccessTime = new Date(lastSuccessAt).getTime();
+  const updatedTime = new Date(updatedAt).getTime();
+  if (
+    firstSuccessTime > updatedTime ||
+    lastStartedTime > updatedTime ||
+    lastSuccessTime < firstSuccessTime ||
+    lastSuccessTime > updatedTime ||
+    updatedTime > evaluationTime
+  ) {
+    return missing();
+  }
+
+  const hasErrorAt = record.runtime_last_error_at !== null;
+  const hasErrorCode = record.runtime_last_error_code !== null;
+  if (hasErrorAt !== hasErrorCode) return missing();
+  if (hasErrorAt) {
+    const lastErrorAt = runtimeSourceTimestamp(
+      record.runtime_last_error_at,
+      "runtime last_error_at",
     );
-  } catch {
-    return previous;
+    if (
+      lastErrorAt === null ||
+      typeof record.runtime_last_error_code !== "string" ||
+      !ALERT_RUNTIME_ERROR_CODES.has(record.runtime_last_error_code) ||
+      new Date(lastErrorAt).getTime() > updatedTime
+    ) {
+      return missing();
+    }
   }
-  if (new Date(successfulRunAt).getTime() > evaluationTime) return previous;
-  if (
-    previous !== null &&
-    new Date(successfulRunAt).getTime() <
-      new Date(previous.successfulRunAt).getTime()
-  ) {
-    return previous;
-  }
-  return { component: "evaluator", successfulRunAt };
+
+  const evaluatorAgeSeconds = Math.floor(
+    (evaluationTime - lastSuccessTime) / 1_000,
+  );
+  return evaluatorAgeSeconds <= MAX_EVIDENCE_VALUE
+    ? { evaluatorAgeSeconds }
+    : missing();
 }
 
 export function isHashedAlertReference(
@@ -512,35 +631,74 @@ export type AlertSourceDescriptor =
       evaluator: Readonly<{
         ageSecondsSemantics: "as_of_minus_last_success_at_floor_seconds";
         bootstrap: Readonly<{
-          completionStatus: "healthy";
           completenessLayer: "repository_source";
           completenessParser: "parseAlertRuntimeSourceCompleteness";
-          enablement: "one_way_after_valid_success_evidence";
-          evidenceColumn: "last_success_at";
-          evidenceWrite: "repository_controlled_successful_run_only";
-          eligibilityProof: "canonical_successful_run_timestamp";
-          eligibilityRetention: "monotonic_across_status_or_row_failure";
-          postBootstrapMissingDisposition: "retain_and_emit_missing_threshold_input";
+          enablement: "one_way_immutable_repository_sentinel";
+          insertion: "same_atomic_d1_batch_repository_insert_select_after_controlled_success";
+          parserAttestation: "shape_and_chronology_only";
+          postBootstrapInvalidDisposition: "emit_missing_threshold_input";
           postBootstrapStatuses: readonly [
+            "disabled",
             "healthy",
             "degraded",
             "failing",
             "unavailable",
           ];
           preBootstrapDisposition: "exclude_without_threshold_input";
-          previousEligibilityInput: "optional_canonical_timestamp_proof";
-          sourceProjection: Readonly<{
-            component: "component";
-            lastSuccessAt: "last_success_at";
-            status: "status";
+          provenance: "schema_guards_and_repository_query";
+          query: Readonly<{
+            access: "repository_only";
+            anchor: "SELECT 'evaluator' AS expected_component";
+            bootstrapJoin: "LEFT JOIN alert_evaluator_bootstrap AS b ON b.component = e.expected_component";
+            projection: Readonly<{
+              bootstrapComponent: "b.component AS bootstrap_component";
+              firstSuccessAt: "b.first_success_at AS first_success_at";
+              runtimeComponent: "r.component AS runtime_component";
+              runtimeGeneration: "r.generation AS runtime_generation";
+              runtimeLastErrorAt: "r.last_error_at AS runtime_last_error_at";
+              runtimeLastErrorCode: "r.last_error_code AS runtime_last_error_code";
+              runtimeLastStartedAt: "r.last_started_at AS runtime_last_started_at";
+              runtimeLastSuccessAt: "r.last_success_at AS runtime_last_success_at";
+              runtimeRevision: "r.revision AS runtime_revision";
+              runtimeStatus: "r.status AS runtime_status";
+              runtimeUpdatedAt: "r.updated_at AS runtime_updated_at";
+              sourceGeneration: "b.source_generation AS source_generation";
+              sourceRevision: "b.source_revision AS source_revision";
+            }>;
+            repositoryQuery: typeof ALERT_RUNTIME_SOURCE_QUERY;
+            runtimeJoin: "LEFT JOIN alert_runtime_status AS r ON r.component = e.expected_component";
+          }>;
+          sentinel: Readonly<{
+            columns: Readonly<{
+              component: "component";
+              firstSuccessAt: "first_success_at";
+              sourceGeneration: "source_generation";
+              sourceRevision: "source_revision";
+            }>;
+            component: "evaluator";
+            foreignKey: Readonly<{
+              column: "component";
+              onDelete: "restrict";
+              referencedColumn: "component";
+              referencedTable: "alert_runtime_status";
+            }>;
+            immutable: true;
+            singleton: true;
+            table: "alert_evaluator_bootstrap";
           }>;
           statusAlone: "never_sufficient";
         }>;
         component: "evaluator";
         componentColumn: "component";
-        enabledStatuses: readonly ["healthy", "degraded", "failing", "unavailable"];
         lastSuccessAtColumn: "last_success_at";
         nullAgeSemantics: "post_bootstrap_evaluator_missing_only";
+        runtimeStatuses: readonly [
+          "disabled",
+          "healthy",
+          "degraded",
+          "failing",
+          "unavailable",
+        ];
         statusColumn: "status";
       }>;
       mode: "alert_runtime";
@@ -1165,30 +1323,79 @@ export const ALERT_RULE_DEFINITIONS = {
       evaluator: {
         ageSecondsSemantics: "as_of_minus_last_success_at_floor_seconds",
         bootstrap: {
-          completionStatus: "healthy",
           completenessLayer: "repository_source",
           completenessParser: "parseAlertRuntimeSourceCompleteness",
-          enablement: "one_way_after_valid_success_evidence",
-          evidenceColumn: "last_success_at",
-          evidenceWrite: "repository_controlled_successful_run_only",
-          eligibilityProof: "canonical_successful_run_timestamp",
-          eligibilityRetention: "monotonic_across_status_or_row_failure",
-          postBootstrapMissingDisposition: "retain_and_emit_missing_threshold_input",
-          postBootstrapStatuses: ["healthy", "degraded", "failing", "unavailable"],
+          enablement: "one_way_immutable_repository_sentinel",
+          insertion: "same_atomic_d1_batch_repository_insert_select_after_controlled_success",
+          parserAttestation: "shape_and_chronology_only",
+          postBootstrapInvalidDisposition: "emit_missing_threshold_input",
+          postBootstrapStatuses: [
+            "disabled",
+            "healthy",
+            "degraded",
+            "failing",
+            "unavailable",
+          ],
           preBootstrapDisposition: "exclude_without_threshold_input",
-          previousEligibilityInput: "optional_canonical_timestamp_proof",
-          sourceProjection: {
-            component: "component",
-            lastSuccessAt: "last_success_at",
-            status: "status",
+          provenance: "schema_guards_and_repository_query",
+          query: {
+            access: "repository_only",
+            anchor: "SELECT 'evaluator' AS expected_component",
+            bootstrapJoin:
+              "LEFT JOIN alert_evaluator_bootstrap AS b ON b.component = e.expected_component",
+            projection: {
+              bootstrapComponent: "b.component AS bootstrap_component",
+              firstSuccessAt: "b.first_success_at AS first_success_at",
+              runtimeComponent: "r.component AS runtime_component",
+              runtimeGeneration: "r.generation AS runtime_generation",
+              runtimeLastErrorAt: "r.last_error_at AS runtime_last_error_at",
+              runtimeLastErrorCode:
+                "r.last_error_code AS runtime_last_error_code",
+              runtimeLastStartedAt:
+                "r.last_started_at AS runtime_last_started_at",
+              runtimeLastSuccessAt:
+                "r.last_success_at AS runtime_last_success_at",
+              runtimeRevision: "r.revision AS runtime_revision",
+              runtimeStatus: "r.status AS runtime_status",
+              runtimeUpdatedAt: "r.updated_at AS runtime_updated_at",
+              sourceGeneration: "b.source_generation AS source_generation",
+              sourceRevision: "b.source_revision AS source_revision",
+            },
+            repositoryQuery: ALERT_RUNTIME_SOURCE_QUERY,
+            runtimeJoin:
+              "LEFT JOIN alert_runtime_status AS r ON r.component = e.expected_component",
+          },
+          sentinel: {
+            columns: {
+              component: "component",
+              firstSuccessAt: "first_success_at",
+              sourceGeneration: "source_generation",
+              sourceRevision: "source_revision",
+            },
+            component: "evaluator",
+            foreignKey: {
+              column: "component",
+              onDelete: "restrict",
+              referencedColumn: "component",
+              referencedTable: "alert_runtime_status",
+            },
+            immutable: true,
+            singleton: true,
+            table: "alert_evaluator_bootstrap",
           },
           statusAlone: "never_sufficient",
         },
         component: "evaluator",
         componentColumn: "component",
-        enabledStatuses: ["healthy", "degraded", "failing", "unavailable"],
         lastSuccessAtColumn: "last_success_at",
         nullAgeSemantics: "post_bootstrap_evaluator_missing_only",
+        runtimeStatuses: [
+          "disabled",
+          "healthy",
+          "degraded",
+          "failing",
+          "unavailable",
+        ],
         statusColumn: "status",
       },
       mode: "alert_runtime",

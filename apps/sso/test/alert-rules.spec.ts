@@ -504,30 +504,94 @@ const EXPECTED_SOURCES = {
     evaluator: {
       ageSecondsSemantics: "as_of_minus_last_success_at_floor_seconds",
       bootstrap: {
-        completionStatus: "healthy",
         completenessLayer: "repository_source",
         completenessParser: "parseAlertRuntimeSourceCompleteness",
-        enablement: "one_way_after_valid_success_evidence",
-        evidenceColumn: "last_success_at",
-        evidenceWrite: "repository_controlled_successful_run_only",
-        eligibilityProof: "canonical_successful_run_timestamp",
-        eligibilityRetention: "monotonic_across_status_or_row_failure",
-        postBootstrapMissingDisposition: "retain_and_emit_missing_threshold_input",
-        postBootstrapStatuses: ["healthy", "degraded", "failing", "unavailable"],
+        enablement: "one_way_immutable_repository_sentinel",
+        insertion: "same_atomic_d1_batch_repository_insert_select_after_controlled_success",
+        parserAttestation: "shape_and_chronology_only",
+        postBootstrapInvalidDisposition: "emit_missing_threshold_input",
+        postBootstrapStatuses: [
+          "disabled",
+          "healthy",
+          "degraded",
+          "failing",
+          "unavailable",
+        ],
         preBootstrapDisposition: "exclude_without_threshold_input",
-        previousEligibilityInput: "optional_canonical_timestamp_proof",
-        sourceProjection: {
-          component: "component",
-          lastSuccessAt: "last_success_at",
-          status: "status",
+        provenance: "schema_guards_and_repository_query",
+        query: {
+          access: "repository_only",
+          anchor: "SELECT 'evaluator' AS expected_component",
+          bootstrapJoin:
+            "LEFT JOIN alert_evaluator_bootstrap AS b ON b.component = e.expected_component",
+          projection: {
+            bootstrapComponent: "b.component AS bootstrap_component",
+            firstSuccessAt: "b.first_success_at AS first_success_at",
+            runtimeComponent: "r.component AS runtime_component",
+            runtimeGeneration: "r.generation AS runtime_generation",
+            runtimeLastErrorAt: "r.last_error_at AS runtime_last_error_at",
+            runtimeLastErrorCode: "r.last_error_code AS runtime_last_error_code",
+            runtimeLastStartedAt: "r.last_started_at AS runtime_last_started_at",
+            runtimeLastSuccessAt: "r.last_success_at AS runtime_last_success_at",
+            runtimeRevision: "r.revision AS runtime_revision",
+            runtimeStatus: "r.status AS runtime_status",
+            runtimeUpdatedAt: "r.updated_at AS runtime_updated_at",
+            sourceGeneration: "b.source_generation AS source_generation",
+            sourceRevision: "b.source_revision AS source_revision",
+          },
+          repositoryQuery: `SELECT
+  b.component AS bootstrap_component,
+  b.first_success_at AS first_success_at,
+  b.source_generation AS source_generation,
+  b.source_revision AS source_revision,
+  r.component AS runtime_component,
+  r.status AS runtime_status,
+  r.generation AS runtime_generation,
+  r.revision AS runtime_revision,
+  r.last_started_at AS runtime_last_started_at,
+  r.last_success_at AS runtime_last_success_at,
+  r.last_error_at AS runtime_last_error_at,
+  r.last_error_code AS runtime_last_error_code,
+  r.updated_at AS runtime_updated_at
+FROM (SELECT 'evaluator' AS expected_component) AS e
+LEFT JOIN alert_evaluator_bootstrap AS b
+  ON b.component = e.expected_component
+LEFT JOIN alert_runtime_status AS r
+  ON r.component = e.expected_component`,
+          runtimeJoin:
+            "LEFT JOIN alert_runtime_status AS r ON r.component = e.expected_component",
+        },
+        sentinel: {
+          columns: {
+            component: "component",
+            firstSuccessAt: "first_success_at",
+            sourceGeneration: "source_generation",
+            sourceRevision: "source_revision",
+          },
+          component: "evaluator",
+          foreignKey: {
+            column: "component",
+            onDelete: "restrict",
+            referencedColumn: "component",
+            referencedTable: "alert_runtime_status",
+          },
+          immutable: true,
+          singleton: true,
+          table: "alert_evaluator_bootstrap",
         },
         statusAlone: "never_sufficient",
       },
       component: "evaluator",
       componentColumn: "component",
-      enabledStatuses: ["healthy", "degraded", "failing", "unavailable"],
       lastSuccessAtColumn: "last_success_at",
       nullAgeSemantics: "post_bootstrap_evaluator_missing_only",
+      runtimeStatuses: [
+        "disabled",
+        "healthy",
+        "degraded",
+        "failing",
+        "unavailable",
+      ],
       statusColumn: "status",
     },
     mode: "alert_runtime",
@@ -837,95 +901,166 @@ describe("redacted observation parsing", () => {
       .rejects.toThrow("32-byte");
   });
 
-  it("enables runtime thresholds only after repository-controlled bootstrap success", () => {
-    const enabledStatuses = ["healthy", "degraded", "failing", "unavailable"];
-    expect(parseAlertRuntimeSourceCompleteness(null, AS_OF)).toBeNull();
-    for (const status of enabledStatuses) {
-      expect(parseAlertRuntimeSourceCompleteness({
-        component: "evaluator",
-        lastSuccessAt: null,
-        status,
-      }, AS_OF)).toBeNull();
-    }
+  it("derives runtime threshold input only from the repository LEFT JOIN sentinel", () => {
+    const validProjection = {
+      bootstrap_component: "evaluator",
+      first_success_at: "2026-07-17T11:55:00.000Z",
+      runtime_component: "evaluator",
+      runtime_generation: 2,
+      runtime_last_error_at: null,
+      runtime_last_error_code: null,
+      runtime_last_started_at: "2026-07-17T11:59:30.000Z",
+      runtime_last_success_at: "2026-07-17T11:59:00.000Z",
+      runtime_revision: 5,
+      runtime_status: "healthy",
+      runtime_updated_at: "2026-07-17T11:59:45.000Z",
+      source_generation: 1,
+      source_revision: 2,
+    };
+    const sentinelAbsent = {
+      ...validProjection,
+      bootstrap_component: null,
+      first_success_at: null,
+      source_generation: null,
+      source_revision: null,
+    };
     expect(parseAlertRuntimeSourceCompleteness({
-      component: "evaluator",
-      lastSuccessAt: "2026-07-17T11:59:00.000Z",
-      status: "disabled",
-    }, AS_OF)).toBeNull();
-    expect(parseAlertRuntimeSourceCompleteness({
-      component: "delivery",
-      lastSuccessAt: "2026-07-17T11:59:00.000Z",
-      status: "healthy",
-    }, AS_OF)).toBeNull();
-    expect(parseAlertRuntimeSourceCompleteness({
-      component: "evaluator",
-      lastSuccessAt: "2026-07-17T12:00:01.000Z",
-      status: "healthy",
-    }, AS_OF)).toBeNull();
-    expect(parseAlertRuntimeSourceCompleteness({
-      component: "evaluator",
-      lastSuccessAt: "2026-07-17T11:59:00Z",
-      status: "healthy",
+      ...sentinelAbsent,
+      runtime_component: null,
+      runtime_generation: null,
+      runtime_last_started_at: null,
+      runtime_last_success_at: null,
+      runtime_revision: null,
+      runtime_status: null,
+      runtime_updated_at: null,
     }, AS_OF)).toBeNull();
 
-    const successfulProjection = {
-      component: "evaluator",
-      lastSuccessAt: "2026-07-17T11:59:00.000Z",
-      status: "healthy",
-    };
-    const eligibility = parseAlertRuntimeSourceCompleteness(
-      successfulProjection,
-      AS_OF,
-    );
-    expect(eligibility).toEqual({
-      component: "evaluator",
-      successfulRunAt: "2026-07-17T11:59:00.000Z",
-    });
-    for (const status of enabledStatuses) {
-      const postBootstrapProjection = {
-        ...successfulProjection,
-        status,
-      };
-      expect(parseAlertRuntimeSourceCompleteness(
-        postBootstrapProjection,
-        AS_OF,
-      )).toEqual(eligibility);
-      const retained = parseAlertRuntimeSourceCompleteness(
-        postBootstrapProjection,
-        AS_OF,
-        eligibility,
-      );
-      expect(retained).toEqual(eligibility);
-      expect(evaluateAlertRule(runtimeObservation(301, null))).toMatchObject({
+    const runtimeStatuses = [
+      "disabled",
+      "healthy",
+      "degraded",
+      "failing",
+      "unavailable",
+    ];
+    for (const status of runtimeStatuses) {
+      expect(parseAlertRuntimeSourceCompleteness({
+        ...sentinelAbsent,
+        runtime_status: status,
+      }, AS_OF)).toBeNull();
+      const input = parseAlertRuntimeSourceCompleteness({
+        ...validProjection,
+        runtime_status: status,
+      }, AS_OF);
+      expect(input).toEqual({ evaluatorAgeSeconds: 60 });
+      expect(evaluateAlertRule(runtimeObservation(
+        input?.evaluatorAgeSeconds ?? null,
+        null,
+      )).severity).toBe("none");
+      const staleInput = parseAlertRuntimeSourceCompleteness({
+        ...validProjection,
+        first_success_at: "2026-07-17T11:50:00.000Z",
+        runtime_last_success_at: "2026-07-17T11:54:59.000Z",
+        runtime_status: status,
+      }, AS_OF);
+      expect(staleInput).toEqual({ evaluatorAgeSeconds: 301 });
+      expect(evaluateAlertRule(runtimeObservation(
+        staleInput?.evaluatorAgeSeconds ?? null,
+        null,
+      ))).toMatchObject({
         immediateCritical: false,
         selectedEvidence: { metricName: "evaluator_age_seconds" },
         severity: "critical",
       });
     }
-    expect(parseAlertRuntimeSourceCompleteness(null, AS_OF, eligibility))
-      .toEqual(eligibility);
     expect(parseAlertRuntimeSourceCompleteness({
-      component: "evaluator",
-      lastSuccessAt: null,
-      status: "failing",
-    }, AS_OF, eligibility)).toEqual(eligibility);
-    expect(parseAlertRuntimeSourceCompleteness(null, AS_OF, {
-      component: "evaluator",
-      successfulRunAt: "2026-07-17T12:00:01.000Z",
-    })).toBeNull();
-    expect(() => parseAlertRuntimeSourceCompleteness({
-      bootstrapComplete: true,
-      component: "evaluator",
-      lastSuccessAt: "2026-07-17T11:59:00.000Z",
-      status: "healthy",
-    }, AS_OF)).toThrow("canonical keys");
+      ...validProjection,
+      runtime_last_error_at: "2026-07-17T11:59:40.000Z",
+      runtime_last_error_code: "evaluator_failed",
+      runtime_status: "failing",
+    }, AS_OF)).toEqual({ evaluatorAgeSeconds: 60 });
+    expect(parseAlertRuntimeSourceCompleteness({
+      ...validProjection,
+      runtime_generation: validProjection.source_generation,
+      runtime_revision: validProjection.source_revision,
+    }, AS_OF)).toEqual({ evaluatorAgeSeconds: 60 });
 
-    const postBootstrapMissing = runtimeObservation(null, null);
-    expect(evaluateAlertRule(postBootstrapMissing)).toMatchObject({
+    const runtimeMissing = {
+      ...validProjection,
+      runtime_component: null,
+      runtime_generation: null,
+      runtime_last_error_at: null,
+      runtime_last_error_code: null,
+      runtime_last_started_at: null,
+      runtime_last_success_at: null,
+      runtime_revision: null,
+      runtime_status: null,
+      runtime_updated_at: null,
+    };
+    const missingInput = parseAlertRuntimeSourceCompleteness(runtimeMissing, AS_OF);
+    expect(missingInput).toEqual({ evaluatorAgeSeconds: null });
+    expect(evaluateAlertRule(runtimeObservation(
+      missingInput?.evaluatorAgeSeconds ?? null,
+      null,
+    ))).toMatchObject({
       immediateCritical: true,
       selectedEvidence: { metricName: "evaluator_missing" },
       severity: "critical",
     });
+
+    const corruptions = [
+      { bootstrap_component: null },
+      { bootstrap_component: "delivery" },
+      { first_success_at: null },
+      { first_success_at: "2026-07-17T12:00:01.000Z" },
+      { first_success_at: "2026-07-17T11:55:00Z" },
+      { runtime_component: null },
+      { runtime_component: "delivery" },
+      { runtime_generation: 0 },
+      { runtime_generation: 1.5 },
+      { runtime_last_error_at: "2026-07-17T11:59:40.000Z" },
+      { runtime_last_error_code: "evaluator_failed" },
+      {
+        runtime_last_error_at: "2026-07-17T11:59:40.000Z",
+        runtime_last_error_code: "not_an_error_code",
+      },
+      { runtime_last_started_at: null },
+      { runtime_last_started_at: "2026-07-17T12:00:01.000Z" },
+      { runtime_last_success_at: null },
+      { runtime_last_success_at: "2026-07-17T11:54:59.000Z" },
+      { runtime_last_success_at: "2026-07-17T11:59:00Z" },
+      { runtime_revision: 1 },
+      { runtime_status: "unknown" },
+      { runtime_updated_at: "2026-07-17T12:00:01.000Z" },
+      { source_generation: 0 },
+      { source_generation: 1_000_001 },
+      { source_revision: 0 },
+      { source_revision: 1_000_000_001 },
+    ];
+    for (const corruption of corruptions) {
+      expect(parseAlertRuntimeSourceCompleteness({
+        ...validProjection,
+        ...corruption,
+      }, AS_OF)).toEqual({ evaluatorAgeSeconds: null });
+    }
+
+    expect(() => Reflect.apply(parseAlertRuntimeSourceCompleteness, undefined, [
+      validProjection,
+      AS_OF,
+      { component: "evaluator", successfulRunAt: validProjection.first_success_at },
+    ])).toThrow("only projection and asOf");
+    expect(() => parseAlertRuntimeSourceCompleteness({
+      ...validProjection,
+      bootstrapComplete: true,
+    }, AS_OF)).toThrow("canonical keys");
+    expect(() => parseAlertRuntimeSourceCompleteness({
+      component: "evaluator",
+      successfulRunAt: validProjection.first_success_at,
+    }, AS_OF)).toThrow("canonical keys");
+    const { runtime_updated_at: _removed, ...missingKey } = validProjection;
+    expect(() => parseAlertRuntimeSourceCompleteness(missingKey, AS_OF))
+      .toThrow("canonical keys");
+
+    const postBootstrapMissing = runtimeObservation(null, null);
     expect(() => parseAlertObservation({
       ...postBootstrapMissing,
       snapshot: {

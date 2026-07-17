@@ -506,6 +506,44 @@ test("requires all three generated fallback literals at exact digest, form, and 
   );
 });
 
+test("allows generated high-entropy module metadata only at exact paths and digests", () => {
+  const specifier = ["./kysely-migration-tables-", "JkVUjPF_-C8NcCDsj.js"].join("");
+  const source = Buffer.from(`import {} from ${JSON.stringify(specifier)};`);
+  const relativePath = [
+    "artifact:worker/assets/bun-sqlite-dialect-",
+    "BW9W1_Ps-CEGSsx26.js",
+  ].join("");
+  assert.deepEqual(scanBufferForSecrets(source, { relativePath }), []);
+  assert.ok(
+    scanBufferForSecrets(source, { relativePath: "artifact:worker/assets/other.js" }).includes(
+      "high-entropy-string",
+    ),
+  );
+  assert.ok(
+    scanBufferForSecrets(
+      Buffer.from(`import {} from ${JSON.stringify(`${specifier}-changed`)};`),
+      { relativePath },
+    ).includes("high-entropy-string"),
+  );
+});
+
+test("treats only the exact Fetch credentials enums as non-secret metadata", () => {
+  for (const value of ["include", "omit", "same-origin"]) {
+    assert.deepEqual(
+      scanBufferForSecrets(Buffer.from(`const init = { credentials: "${value}" };`), {
+        relativePath: "fixture.ts",
+      }),
+      [],
+    );
+  }
+  assert.ok(
+    scanBufferForSecrets(
+      Buffer.from('const init = { credentials: "signed-cookie-material" };'),
+      { relativePath: "fixture.ts" },
+    ).includes("assigned-secret"),
+  );
+});
+
 test("hashes secret-family, sensitive, outside, and terminal-unsafe diagnostic paths", () => {
   const token = ["xoxb", "135791357913579135791357"].join("-");
   const unsafePaths = [

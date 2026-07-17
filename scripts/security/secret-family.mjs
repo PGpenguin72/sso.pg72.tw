@@ -137,6 +137,15 @@ const auditedAssignmentAllowances = new Map([
 
 const auditedAssignmentDigestAllowances = new Map([
   [
+    "artifact:static/assets/index-CiCTmOwF.js",
+    new Map([
+      [
+        "REFRESH_TOKEN_REQUIRES_OFFLINE_ACCESS",
+        new Set(["bbf58f13f3573e210bba2822828db86d1b334f38cb40c7892246fcc83e2b3726"]),
+      ],
+    ]),
+  ],
+  [
     "apps/sso/src/App.tsx",
     new Map([
       [
@@ -157,6 +166,19 @@ const auditedAssignmentDigestAllowances = new Map([
 ]);
 
 const auditedStaticLiteralAllowances = new Map([
+  ...[
+    ["bun-sqlite-dialect-", "BW9W1_Ps-CEGSsx26.js"],
+    ["d1-sqlite-dialect-", "BLC8LXE6-CEeUW2oa.js"],
+    ["node-sqlite-dialect-", "CIcN7kNh.js"],
+  ].map((filenameParts) => [
+    `artifact:worker/assets/${filenameParts.join("")}`,
+    new Map([
+      [
+        "high-entropy-string",
+        new Set(["6e46cb416c48d0b8da63074830529c2a261c3f4818828d9dc910d5384eeb0086"]),
+      ],
+    ]),
+  ]),
   [
     "artifact:worker/index.js",
     new Map([
@@ -211,6 +233,12 @@ function isSecretAssignmentKey(normalizedKey) {
 }
 
 function isAuditedFixture(relativePath, normalizedKey, value) {
+  if (
+    normalizedKey === "CREDENTIALS" &&
+    ["include", "omit", "same-origin"].includes(value)
+  ) {
+    return true;
+  }
   return (
     typeof relativePath === "string" &&
     (auditedAssignmentAllowances.get(relativePath)?.get(normalizedKey)?.has(value) === true ||

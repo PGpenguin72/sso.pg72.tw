@@ -15,5 +15,5 @@ export const PUBLIC_PRODUCT_COPY = {
   passkeyAccess:
     "Passkey 只能由已登入的既有 PGID 帳號註冊，不能用來建立帳號或繞過邀請。",
   recovery:
-    "PGID 目前尚未提供自助帳號復原流程；請保留至少一種可用的登入方式。",
+    "若帳號中心顯示復原碼，請先建立並離線保存；無論是否啟用復原功能，都請保留至少一種可用的登入方式。",
 } as const;

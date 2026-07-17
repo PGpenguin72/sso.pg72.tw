@@ -2,9 +2,11 @@ import {
   Activity,
   AlertTriangle,
   ArrowLeft,
+  ArrowRight,
   BookOpen,
   Check,
   Code2,
+  Download,
   ExternalLink,
   FileText,
   Flag,
@@ -40,8 +42,11 @@ import {
 import type { Passkey } from "@better-auth/passkey";
 import {
   startAuthentication,
+  startRegistration,
   type AuthenticationResponseJSON,
+  type PublicKeyCredentialCreationOptionsJSON,
   type PublicKeyCredentialRequestOptionsJSON,
+  type RegistrationResponseJSON,
 } from "@simplewebauthn/browser";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -79,6 +84,30 @@ interface PublicRegistrationOptions {
 interface RegistrationConfig {
   mode: "invite" | "public";
   publicRegistration: PublicRegistrationOptions | null;
+  recoveryEnabled: boolean;
+}
+
+interface RecoveryCodeStatus {
+  configured: boolean;
+  count: number;
+  expiresAt: string | null;
+  formatVersion: number;
+  generation: number | null;
+  remaining: number;
+}
+
+interface RecoveryCodeIssue {
+  codes: string[];
+  count: number;
+  expiresAt: null;
+  formatVersion: number;
+  generation: number;
+}
+
+interface RecoveryPasskeyOptions {
+  challengeId: string;
+  expiresAt: string;
+  options: PublicKeyCredentialCreationOptionsJSON;
 }
 
 interface SocialRedirectPayload {
@@ -433,6 +462,8 @@ interface LoginMethodProvider {
   provider: string;
   createdAt: string;
   canUnlink: boolean;
+  recoveryCodeRequired?: boolean;
+  recoveryUnavailable?: boolean;
 }
 
 interface LoginMethodsResponse {
@@ -567,6 +598,24 @@ function messageFrom(error: unknown, fallback: string): string {
     return error.message;
   }
   return fallback;
+}
+
+function downloadRecoveryCodes(codes: string[], generation: number): void {
+  const body = [
+    "PGID recovery codes",
+    `Generation ${generation}`,
+    "",
+    ...codes,
+    "",
+  ].join("\n");
+  const url = URL.createObjectURL(
+    new Blob([body], { type: "text/plain;charset=utf-8" }),
+  );
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `PGID-recovery-codes-generation-${generation}.txt`;
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
 
 export async function runSocialAuthenticationStart(
@@ -756,6 +805,334 @@ function TelegramLogin({
   );
 }
 
+export function RecoveryView() {
+  const [checking, setChecking] = useState(true);
+  const [available, setAvailable] = useState(true);
+  const [active, setActive] = useState(false);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [issued, setIssued] = useState<RecoveryCodeIssue | null>(null);
+  const [announcement, setAnnouncement] = useState(
+    "正在檢查帳號復原狀態。",
+  );
+  const activeHeadingRef = useRef<HTMLHeadingElement>(null);
+  const issuedHeadingRef = useRef<HTMLHeadingElement>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/recovery/session", {
+      credentials: "include",
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    })
+      .then((response) => {
+        if (cancelled) return;
+        if (response.status === 404) {
+          setAvailable(false);
+          setActive(false);
+          setAnnouncement("帳號復原目前未啟用。");
+          return;
+        }
+        setActive(response.ok);
+        setAnnouncement(
+          response.ok
+            ? "復原工作階段有效，請建立新的 Passkey。"
+            : "請輸入復原碼。",
+        );
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setError("帳號復原暫時無法使用。");
+          setAnnouncement("帳號復原暫時無法使用。");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setChecking(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (issued) {
+      issuedHeadingRef.current?.focus();
+    } else if (!checking && active) {
+      activeHeadingRef.current?.focus();
+    }
+  }, [active, checking, issued]);
+
+  const start = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/recovery/start", {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ code }),
+      });
+      if (!response.ok) {
+        if (response.status === 404) {
+          setAvailable(false);
+          setError(null);
+          setAnnouncement("帳號復原目前未啟用。");
+          return;
+        }
+        setError(
+          response.status === 429
+            ? "嘗試次數過多，請稍後再試。"
+            : response.status === 503
+              ? "帳號復原暫時無法使用。"
+              : "無法使用這組復原碼。",
+        );
+        return;
+      }
+      setCode("");
+      setActive(true);
+      setAnnouncement("復原碼已接受，請建立新的 Passkey。");
+    } catch {
+      setError("帳號復原暫時無法使用。");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const registerRecoveredPasskey = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const optionsResponse = await fetch("/api/recovery/passkey/options", {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: "{}",
+      });
+      const options = (await optionsResponse
+        .json()
+        .catch(() => ({}))) as Partial<RecoveryPasskeyOptions>;
+      if (!optionsResponse.ok || !options.challengeId || !options.options) {
+        if (optionsResponse.status === 404) {
+          setAvailable(false);
+          setActive(false);
+          setAnnouncement("帳號復原目前未啟用。");
+          return;
+        }
+        setError("無法開始 Passkey 註冊，請重新輸入復原碼。");
+        if (optionsResponse.status === 401) setActive(false);
+        return;
+      }
+
+      let registration: RegistrationResponseJSON;
+      try {
+        registration = await startRegistration({ optionsJSON: options.options });
+      } catch {
+        setError("Passkey 註冊已取消或未完成。");
+        return;
+      }
+      const verifyResponse = await fetch("/api/recovery/passkey/verify", {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          challengeId: options.challengeId,
+          response: registration,
+        }),
+      });
+      const result = (await verifyResponse
+        .json()
+        .catch(() => ({}))) as Partial<RecoveryCodeIssue> & {
+        completed?: boolean;
+      };
+      if (
+        !verifyResponse.ok ||
+        result.completed !== true ||
+        !Array.isArray(result.codes) ||
+        typeof result.generation !== "number"
+      ) {
+        setError("Passkey 驗證失敗，請重新開始註冊。");
+        return;
+      }
+      setIssued(result as RecoveryCodeIssue);
+      setActive(false);
+      setAnnouncement(
+        `Passkey 已建立，新的 Generation ${result.generation} 復原碼已顯示。`,
+      );
+    } catch {
+      setError("帳號復原暫時無法使用。");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cancel = async () => {
+    setBusy(true);
+    try {
+      await fetch("/api/recovery/session", {
+        method: "DELETE",
+        credentials: "include",
+        headers: { Accept: "application/json" },
+      });
+    } finally {
+      window.location.assign("/sign-in");
+    }
+  };
+
+  return (
+    <>
+      <ThemeToggle floating />
+      <main className="sign-in-shell recovery-shell">
+        <p
+          className="visually-hidden"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          {announcement}
+        </p>
+        <div className="sign-in-heading">
+          <Brand />
+          <span className="eyebrow">Account recovery</span>
+          <h1>復原 PGID 帳號</h1>
+        </div>
+
+        {issued ? (
+          <section className="recovery-result" aria-labelledby="new-recovery-codes">
+            <div className="section-heading">
+              <div>
+                <span className="eyebrow">Generation {issued.generation}</span>
+                <h2
+                  id="new-recovery-codes"
+                  ref={issuedHeadingRef}
+                  tabIndex={-1}
+                >
+                  新的復原碼
+                </h2>
+              </div>
+            </div>
+            <ol className="recovery-code-grid">
+              {issued.codes.map((recoveryCode) => (
+                <li key={recoveryCode}>
+                  <code>{recoveryCode}</code>
+                </li>
+              ))}
+            </ol>
+            <div className="recovery-actions">
+              <button
+                type="button"
+                className="button button-secondary"
+                onClick={() =>
+                  downloadRecoveryCodes(issued.codes, issued.generation)
+                }
+              >
+                <Download aria-hidden="true" />
+                下載
+              </button>
+              <a className="button button-primary" href="/sign-in">
+                <LogIn aria-hidden="true" />
+                重新登入
+              </a>
+            </div>
+          </section>
+        ) : checking ? (
+          <div className="empty-state">
+            <RefreshCw aria-hidden="true" className="is-spinning" />
+            <span>檢查復原狀態...</span>
+          </div>
+        ) : !available ? (
+          <div className="empty-state">
+            <ShieldOff aria-hidden="true" />
+            <span>帳號復原目前未啟用。</span>
+          </div>
+        ) : active ? (
+          <div className="recovery-entry">
+            <div className="recovery-symbol" aria-hidden="true">
+              <KeyRound />
+            </div>
+            <h2 ref={activeHeadingRef} tabIndex={-1}>
+              建立新的 Passkey
+            </h2>
+            <div className="recovery-actions">
+              <button
+                type="button"
+                className="button button-primary button-wide"
+                disabled={busy}
+                onClick={() => void registerRecoveredPasskey()}
+              >
+                <Plus aria-hidden="true" />
+                {busy ? "等待驗證..." : "新增 Passkey"}
+              </button>
+              <button
+                type="button"
+                className="button button-secondary button-wide"
+                disabled={busy}
+                onClick={() => void cancel()}
+              >
+                <X aria-hidden="true" />
+                取消
+              </button>
+            </div>
+          </div>
+        ) : (
+          <form
+            className="recovery-entry"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void start();
+            }}
+          >
+            <label htmlFor="recovery-code">復原碼</label>
+            <input
+              id="recovery-code"
+              className="recovery-code-input"
+              value={code}
+              autoComplete="off"
+              autoCapitalize="characters"
+              spellCheck={false}
+              required
+              maxLength={128}
+              onChange={(event) => setCode(event.target.value)}
+            />
+            <button
+              type="submit"
+              className="button button-primary button-wide"
+              disabled={busy || code.trim().length === 0}
+            >
+              <ArrowRight aria-hidden="true" />
+              {busy ? "驗證中..." : "繼續"}
+            </button>
+          </form>
+        )}
+
+        {error ? (
+          <div className="notice notice-error" role="alert">
+            {error}
+          </div>
+        ) : null}
+        {!issued ? (
+          <a className="recovery-back-link" href="/sign-in">
+            <ArrowLeft aria-hidden="true" />
+            返回登入
+          </a>
+        ) : null}
+      </main>
+    </>
+  );
+}
+
 export function SignInView({ pending }: { pending: boolean }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -798,14 +1175,18 @@ export function SignInView({ pending }: { pending: boolean }) {
       .then((response) =>
         response.ok
           ? response.json()
-          : { mode: "invite", publicRegistration: null },
+          : { mode: "invite", publicRegistration: null, recoveryEnabled: false },
       )
       .then((config: RegistrationConfig) => {
         if (!cancelled) setRegistrationConfig(config);
       })
       .catch(() => {
         if (!cancelled) {
-          setRegistrationConfig({ mode: "invite", publicRegistration: null });
+          setRegistrationConfig({
+            mode: "invite",
+            publicRegistration: null,
+            recoveryEnabled: false,
+          });
         }
       });
     return () => {
@@ -1068,6 +1449,12 @@ export function SignInView({ pending }: { pending: boolean }) {
         ) : null}
 
         {error ? <div className="notice notice-error">{error}</div> : null}
+        {!registering && registrationConfig?.recoveryEnabled ? (
+          <a className="recovery-back-link" href="/recover">
+            <KeyRound aria-hidden="true" />
+            使用復原碼
+          </a>
+        ) : null}
         <p className="invite-note">
           <ShieldCheck aria-hidden="true" />
           登入即表示你同意
@@ -2458,6 +2845,18 @@ export function App() {
   const [passkeyError, setPasskeyError] = useState<string | null>(null);
   const [passkeyToDelete, setPasskeyToDelete] = useState<Passkey | null>(null);
   const [passkeyDeleteError, setPasskeyDeleteError] = useState<string | null>(null);
+  const [recoveryCodeStatus, setRecoveryCodeStatus] =
+    useState<RecoveryCodeStatus | null>(null);
+  const [recoveryCodeState, setRecoveryCodeState] =
+    useState<LoadState>("loading");
+  const [recoveryCodeError, setRecoveryCodeError] = useState<string | null>(null);
+  const [issuedRecoveryCodes, setIssuedRecoveryCodes] =
+    useState<RecoveryCodeIssue | null>(null);
+  const [recoveryRevokePending, setRecoveryRevokePending] = useState(false);
+  const recoveryIssuedHeadingRef = useRef<HTMLHeadingElement>(null);
+  const recoveryRevokeCancelRef = useRef<HTMLButtonElement>(null);
+  const recoveryRevokeTriggerRef = useRef<HTMLButtonElement>(null);
+  const recoveryStatusRef = useRef<HTMLElement>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [profileInfo, setProfileInfo] = useState<AccountProfileResponse | null>(null);
@@ -2468,6 +2867,14 @@ export function App() {
   const [loginMethodsState, setLoginMethodsState] = useState<LoadState>("loading");
   const [loginMethodsError, setLoginMethodsError] = useState<string | null>(null);
   const [unlinkPendingId, setUnlinkPendingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (issuedRecoveryCodes) recoveryIssuedHeadingRef.current?.focus();
+  }, [issuedRecoveryCodes]);
+
+  useEffect(() => {
+    if (recoveryRevokePending) recoveryRevokeCancelRef.current?.focus();
+  }, [recoveryRevokePending]);
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<PlatformRole>("user");
   const [adminUsers, setAdminUsers] = useState<AdminUserView[]>([]);
@@ -2647,6 +3054,38 @@ export function App() {
     }
   }, []);
 
+  const loadRecoveryCodeStatus = useCallback(async () => {
+    setRecoveryCodeState("loading");
+    setRecoveryCodeError(null);
+    try {
+      const response = await fetch("/api/account/recovery-codes", {
+        credentials: "include",
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      if (response.status === 404) {
+        setRecoveryCodeStatus(null);
+        setRecoveryCodeState("ready");
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(`Unable to load recovery codes (${response.status})`);
+      }
+      const data = (await response.json()) as RecoveryCodeStatus;
+      if (
+        typeof data.configured !== "boolean" ||
+        typeof data.remaining !== "number"
+      ) {
+        throw new Error("Invalid recovery-code response");
+      }
+      setRecoveryCodeStatus(data);
+      setRecoveryCodeState("ready");
+    } catch {
+      setRecoveryCodeError("無法載入復原碼狀態。");
+      setRecoveryCodeState("error");
+    }
+  }, []);
+
   const loadAdminClients = useCallback(async () => {
     setAdminClientsState("loading");
     try {
@@ -2721,6 +3160,7 @@ export function App() {
       void loadAuthorizations();
       void loadProfile();
       void loadLoginMethods();
+      void loadRecoveryCodeStatus();
       if (canManageClients) {
         void loadAdminClients();
       }
@@ -2736,6 +3176,7 @@ export function App() {
     loadSecurityActivity,
     loadAuthorizations,
     loadLoginMethods,
+    loadRecoveryCodeStatus,
     loadProfile,
     loadSessions,
     session,
@@ -2751,6 +3192,7 @@ export function App() {
   useEffect(() => {
     let title: string;
     if (pathname === "/about") title = "關於 PGID";
+    else if (pathname === "/recover") title = "帳號復原 — PGID";
     else if (pathname === "/tos") title = "服務條款 — PGID";
     else if (pathname === "/pp") title = "隱私權政策 — PGID";
     else if (pathname === "/consent") title = "授權 — PGID";
@@ -2764,6 +3206,7 @@ export function App() {
   if (pathname === "/tos") return <LegalPage kind="tos" />;
   if (pathname === "/pp") return <LegalPage kind="pp" />;
   if (pathname === "/about") return <AboutPage />;
+  if (pathname === "/recover") return <RecoveryView />;
 
   if (sessionQuery.isPending) {
     return (
@@ -3412,7 +3855,9 @@ export function App() {
     }
   };
 
-  const ensureClientPasskeyStepUp = async (): Promise<boolean> => {
+  const ensureClientPasskeyStepUp = async (
+    reportError: (message: string) => void = setAdminClientsError,
+  ): Promise<boolean> => {
     const challengeResponse = await fetch(
       "/api/account/passkey-step-up/challenge",
       {
@@ -3424,7 +3869,7 @@ export function App() {
     const challenge = (await challengeResponse.json().catch(() => ({}))) as
       PasskeyStepUpChallengeResponse;
     if (!challengeResponse.ok) {
-      setAdminClientsError(
+      reportError(
         adminClientErrorMessage(
           challenge.error,
           "無法開始 Passkey 驗證，請稍後再試。",
@@ -3434,7 +3879,7 @@ export function App() {
     }
     if (challenge.verified === true) return true;
     if (!challenge.challengeId || !challenge.options) {
-      setAdminClientsError("無法開始 Passkey 驗證，請重新整理。");
+      reportError("無法開始 Passkey 驗證，請重新整理。");
       return false;
     }
 
@@ -3442,7 +3887,7 @@ export function App() {
     try {
       assertion = await startAuthentication({ optionsJSON: challenge.options });
     } catch {
-      setAdminClientsError("Passkey 驗證已取消或無法完成。");
+      reportError("Passkey 驗證已取消或無法完成。");
       return false;
     }
 
@@ -3465,7 +3910,7 @@ export function App() {
       .json()
       .catch(() => ({}))) as PasskeyStepUpChallengeResponse;
     if (!verificationResponse.ok || verification.verified !== true) {
-      setAdminClientsError(
+      reportError(
         verification.error === "passkey_step_up_challenge_invalid"
           ? "Passkey 驗證已過期或已使用，請再試一次。"
           : "Passkey 驗證失敗，操作尚未送出。",
@@ -3475,6 +3920,104 @@ export function App() {
 
     setNotice("Passkey 驗證已完成。");
     return true;
+  };
+
+  const recoveryMutationError = (code: unknown): string => {
+    if (code === "fresh_session_required") {
+      return "登入時間已超過 10 分鐘，請重新登入。";
+    }
+    if (code === "passkey_enrollment_required") {
+      return "請先新增 Passkey。";
+    }
+    if (code === "passkey_step_up_required") {
+      return "請先完成 Passkey 驗證。";
+    }
+    if (code === "rate_limited") return "操作太頻繁，請稍後再試。";
+    if (code === "management_state_changed") {
+      return "帳號安全狀態已變更，請重新整理後再試。";
+    }
+    return "無法更新復原碼。";
+  };
+
+  const rotateRecoveryCodes = async () => {
+    setBusy("recovery:rotate");
+    setRecoveryCodeError(null);
+    setIssuedRecoveryCodes(null);
+    try {
+      if (!(await ensureClientPasskeyStepUp(setRecoveryCodeError))) return;
+      const response = await fetch("/api/account/recovery-codes/rotate", {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: "{}",
+      });
+      const payload = (await response
+        .json()
+        .catch(() => ({}))) as Partial<RecoveryCodeIssue> & { error?: string };
+      if (
+        !response.ok ||
+        !Array.isArray(payload.codes) ||
+        typeof payload.generation !== "number"
+      ) {
+        setRecoveryCodeError(recoveryMutationError(payload.error));
+        return;
+      }
+      const issued = payload as RecoveryCodeIssue;
+      setIssuedRecoveryCodes(issued);
+      setRecoveryCodeStatus({
+        configured: true,
+        count: issued.count,
+        expiresAt: issued.expiresAt,
+        formatVersion: issued.formatVersion,
+        generation: issued.generation,
+        remaining: issued.count,
+      });
+      setRecoveryCodeState("ready");
+      setRecoveryRevokePending(false);
+      await loadLoginMethods();
+    } catch {
+      setRecoveryCodeError("無法更新復原碼。");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const revokeRecoveryCodes = async () => {
+    setBusy("recovery:revoke");
+    setRecoveryCodeError(null);
+    try {
+      if (!(await ensureClientPasskeyStepUp(setRecoveryCodeError))) return;
+      const response = await fetch("/api/account/recovery-codes", {
+        method: "DELETE",
+        credentials: "include",
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      const payload = (await response
+        .json()
+        .catch(() => ({}))) as { error?: string };
+      if (!response.ok) {
+        setRecoveryCodeError(recoveryMutationError(payload.error));
+        return;
+      }
+      setIssuedRecoveryCodes(null);
+      setRecoveryCodeStatus((current) =>
+        current
+          ? { ...current, configured: false, generation: null, remaining: 0 }
+          : current,
+      );
+      setRecoveryRevokePending(false);
+      requestAnimationFrame(() => recoveryStatusRef.current?.focus());
+      await loadLoginMethods();
+    } catch {
+      setRecoveryCodeError("無法撤銷復原碼。");
+    } finally {
+      setBusy(null);
+    }
   };
 
   const createAdminClient = async () => {
@@ -3746,6 +4289,10 @@ export function App() {
   }
 
   const selectTab = (next: Tab) => {
+    if (next !== "security") {
+      setIssuedRecoveryCodes(null);
+      setRecoveryRevokePending(false);
+    }
     setTab(next);
     setNavOpen(false);
   };
@@ -5176,7 +5723,11 @@ export function App() {
                             )
                           ) : (
                             <span className="section-description">
-                              唯一登入方式
+                              {method.recoveryUnavailable
+                                ? "復原功能未啟用"
+                                : method.recoveryCodeRequired
+                                  ? "先建立復原碼"
+                                  : "唯一登入方式"}
                             </span>
                           )}
                         </div>
@@ -5286,6 +5837,181 @@ export function App() {
                   setPasskeyToDelete(passkey);
                 }}
               />
+
+              {recoveryCodeState !== "ready" || recoveryCodeStatus ? (
+                <>
+                  <div className="section-heading session-heading">
+                    <div>
+                      <span className="eyebrow">Account recovery</span>
+                      <h2>復原碼</h2>
+                    </div>
+                    {recoveryCodeStatus ? (
+                      <button
+                        type="button"
+                        className="button button-primary"
+                        disabled={busy?.startsWith("recovery:") === true}
+                        onClick={() => void rotateRecoveryCodes()}
+                      >
+                        <RefreshCw aria-hidden="true" />
+                        {busy === "recovery:rotate"
+                          ? "驗證中..."
+                          : recoveryCodeStatus.configured
+                            ? "重新產生"
+                            : "建立復原碼"}
+                      </button>
+                    ) : null}
+                  </div>
+
+                  {recoveryCodeError ? (
+                    <div className="passkey-inline-error" role="alert">
+                      <ShieldOff aria-hidden="true" />
+                      <span>{recoveryCodeError}</span>
+                    </div>
+                  ) : null}
+
+                  {recoveryCodeState === "loading" ? (
+                    <div className="empty-state">
+                      <RefreshCw aria-hidden="true" className="is-spinning" />
+                      <span>正在載入復原碼狀態...</span>
+                    </div>
+                  ) : null}
+                  {recoveryCodeState === "error" ? (
+                    <div className="empty-state empty-state-error">
+                      <ShieldOff aria-hidden="true" />
+                      <span>無法載入復原碼狀態。</span>
+                      <button
+                        type="button"
+                        className="button button-secondary button-compact"
+                        onClick={() => void loadRecoveryCodeStatus()}
+                      >
+                        <RefreshCw aria-hidden="true" />
+                        重試
+                      </button>
+                    </div>
+                  ) : null}
+
+                  {recoveryCodeState === "ready" && recoveryCodeStatus ? (
+                    <div className="item-list">
+                      <div className="list-item">
+                        <span className="item-icon key-icon">
+                          <KeyRound aria-hidden="true" />
+                        </span>
+                        <div className="item-copy">
+                          <strong ref={recoveryStatusRef} tabIndex={-1}>
+                            {recoveryCodeStatus.configured
+                              ? `${recoveryCodeStatus.remaining} 組可用`
+                              : "尚未建立"}
+                          </strong>
+                          <span>
+                            {recoveryCodeStatus.generation
+                              ? `Generation ${recoveryCodeStatus.generation}`
+                              : "PGID-R1"}
+                          </span>
+                        </div>
+                        {recoveryCodeStatus.configured ? (
+                          recoveryRevokePending ? (
+                            <div className="compact-actions">
+                              <button
+                                type="button"
+                                className="button button-secondary button-compact"
+                                ref={recoveryRevokeCancelRef}
+                                disabled={busy === "recovery:revoke"}
+                                onClick={() => {
+                                  setRecoveryRevokePending(false);
+                                  requestAnimationFrame(() =>
+                                    recoveryRevokeTriggerRef.current?.focus(),
+                                  );
+                                }}
+                              >
+                                取消
+                              </button>
+                              <button
+                                type="button"
+                                className="button button-danger button-compact"
+                                disabled={busy === "recovery:revoke"}
+                                onClick={() => void revokeRecoveryCodes()}
+                              >
+                                {busy === "recovery:revoke" ? "撤銷中..." : "確認撤銷"}
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              className="icon-button danger-icon"
+                              ref={recoveryRevokeTriggerRef}
+                              aria-label="撤銷全部復原碼"
+                              title="撤銷全部復原碼"
+                              onClick={() => setRecoveryRevokePending(true)}
+                            >
+                              <Trash2 aria-hidden="true" />
+                            </button>
+                          )
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {issuedRecoveryCodes ? (
+                    <div
+                      className="recovery-result"
+                      aria-labelledby="issued-account-recovery-codes"
+                    >
+                      <div className="section-heading">
+                        <div>
+                          <span className="eyebrow">
+                            Generation {issuedRecoveryCodes.generation}
+                          </span>
+                          <h3
+                            id="issued-account-recovery-codes"
+                            ref={recoveryIssuedHeadingRef}
+                            tabIndex={-1}
+                          >
+                            新的復原碼
+                          </h3>
+                        </div>
+                      </div>
+                      <p
+                        className="visually-hidden"
+                        role="status"
+                        aria-live="polite"
+                        aria-atomic="true"
+                      >
+                        已建立新的復原碼，請下載或離線保存。
+                      </p>
+                      <ol className="recovery-code-grid">
+                        {issuedRecoveryCodes.codes.map((recoveryCode) => (
+                          <li key={recoveryCode}>
+                            <code>{recoveryCode}</code>
+                          </li>
+                        ))}
+                      </ol>
+                      <div className="recovery-actions">
+                        <button
+                          type="button"
+                          className="button button-secondary"
+                          onClick={() =>
+                            downloadRecoveryCodes(
+                              issuedRecoveryCodes.codes,
+                              issuedRecoveryCodes.generation,
+                            )
+                          }
+                        >
+                          <Download aria-hidden="true" />
+                          下載
+                        </button>
+                        <button
+                          type="button"
+                          className="button button-primary"
+                          onClick={() => setIssuedRecoveryCodes(null)}
+                        >
+                          <Check aria-hidden="true" />
+                          已保存
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
 
               <div className="section-heading session-heading">
                 <div>

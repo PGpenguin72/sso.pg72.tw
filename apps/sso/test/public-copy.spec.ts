@@ -109,7 +109,7 @@ describe("rendered public product copy", () => {
     expect(signIn).toContain("Passkey 僅供既有帳號使用");
     expect(terms).toContain("不會取代邀請或自動建立帳號");
     expect(terms).toContain("不能用來建立帳號或繞過邀請");
-    expect(about).toContain("尚未提供自助帳號復原流程");
+    expect(about).toContain("若帳號中心顯示復原碼");
     expect(`${signIn} ${terms} ${about}`).not.toContain("PG72 ID");
     expect(`${signIn} ${terms} ${about}`).not.toContain("所有服務");
   });
@@ -123,7 +123,7 @@ describe("rendered public product copy", () => {
     expect(about).not.toContain("個人資料集中管理");
   });
 
-  it("renders the no-self-service-recovery warning before Passkey deletion", () => {
+  it("renders the recovery and sign-in-method warning before Passkey deletion", () => {
     const passkey = {
       id: "test-passkey",
       name: "Test Passkey",
@@ -139,7 +139,7 @@ describe("rendered public product copy", () => {
     );
 
     expect(dialog).toContain("刪除後無法再用這把 Passkey 登入");
-    expect(dialog).toContain("尚未提供自助帳號復原流程");
+    expect(dialog).toContain("若帳號中心顯示復原碼");
     expect(dialog).toContain("請保留至少一種可用的登入方式");
   });
 

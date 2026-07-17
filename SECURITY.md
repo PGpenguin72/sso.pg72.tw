@@ -61,14 +61,15 @@ and AST contexts. Both workflows run a dependency-free Node standard-library
 identity check immediately after checkout, before Preview authorization,
 package installation, or any other repository script. It pins exact workflow
 raw bytes/file set, all manifest and complete script-map identities, and the
-pnpm workspace lifecycle/build policy. The later validator independently pins
-every complete workspace `scripts` object and the reachable graph while
-expanding implicit `pre*`/`post*` and
+pnpm workspace lifecycle/build policy. It also pins the frozen lockfile and
+exact `patches/` file set/digests, and rejects workspace pnpm hooks or project
+`.npmrc` files before pnpm starts. The later validator independently pins every
+complete workspace `scripts` object and the reachable graph while expanding
+implicit `pre*`/`post*` and
 `preinstall`/`install`/`postinstall`/`prepare` execution. Policy cannot extend
-these contracts. The
-release upload is exactly `.artifacts/release` with fixed missing-file,
-hidden-file, and retention behavior. Workflow environment keys/values are restricted by a
-code-owned allowlist; all
+these contracts. The release upload is exactly `.artifacts/release` with fixed
+missing-file, hidden-file, and retention behavior. Workflow environment
+keys/values are restricted by a code-owned allowlist; all
 `CLOUDFLARE_*`, legacy `CF_*`, and `WRANGLER_*` keys are independently denied.
 The production Wrangler `index.js` must match its code-owned whole-file SHA-256
 before file, secret-family, and AST checks run. A runtime, dependency, bundler,

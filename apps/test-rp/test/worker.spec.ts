@@ -258,6 +258,54 @@ async function postLogoutToken(token: string): Promise<Response> {
   );
 }
 
+function stubLogoutJwksResponse(response: () => Response): void {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      const request = input instanceof Request ? input : new Request(input);
+      const path = new URL(request.url).pathname;
+      if (path === "/.well-known/openid-configuration") {
+        return json(discovery);
+      }
+      if (path === "/.well-known/jwks.json") return response();
+      return new Response(null, { status: 404 });
+    }),
+  );
+}
+
+function lazyByteStream(
+  totalBytes: number,
+  chunkBytes: number,
+): {
+  cancelled: () => boolean;
+  pulls: () => number;
+  stream: ReadableStream<Uint8Array>;
+} {
+  let emitted = 0;
+  let pullCount = 0;
+  let wasCancelled = false;
+  const stream = new ReadableStream<Uint8Array>({
+    cancel() {
+      wasCancelled = true;
+    },
+    pull(controller) {
+      pullCount += 1;
+      if (emitted >= totalBytes) {
+        controller.close();
+        return;
+      }
+      const size = Math.min(chunkBytes, totalBytes - emitted);
+      emitted += size;
+      controller.enqueue(new Uint8Array(size).fill(0x20));
+    },
+  });
+  return {
+    cancelled: () => wasCancelled,
+    pulls: () => pullCount,
+    stream,
+  };
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -660,6 +708,98 @@ describe("OIDC test relying party", () => {
       .bind(sid)
       .first<{ count: number }>();
     expect(remaining?.count).toBe(1);
+  });
+
+  it("accepts a valid chunked JWKS without Content-Length", async () => {
+    const signing = await createSigningFixture();
+    const sid = crypto.randomUUID();
+    await seedRpSession(sid);
+    const encoded = new TextEncoder().encode(
+      JSON.stringify({ keys: [signing.publicJwk] }),
+    );
+    stubLogoutJwksResponse(
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              for (let offset = 0; offset < encoded.length; offset += 7) {
+                controller.enqueue(encoded.slice(offset, offset + 7));
+              }
+              controller.close();
+            },
+          }),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    const token = await signIdToken(signing.privateKey, logoutClaims(sid));
+
+    expect((await postLogoutToken(token)).status).toBe(204);
+  });
+
+  it("rejects a forged-small Content-Length and cancels a 32 MiB-style stream at the byte limit", async () => {
+    const signing = await createSigningFixture();
+    const sid = crypto.randomUUID();
+    await seedRpSession(sid);
+    const lazy = lazyByteStream(32 * 1024 * 1024, 1024);
+    stubLogoutJwksResponse(
+      () =>
+        new Response(lazy.stream, {
+          headers: {
+            "Content-Length": "10",
+            "Content-Type": "application/json",
+          },
+        }),
+    );
+    const token = await signIdToken(signing.privateKey, logoutClaims(sid));
+
+    expect((await postLogoutToken(token)).status).toBe(400);
+    expect(lazy.cancelled()).toBe(true);
+    expect(lazy.pulls()).toBeLessThanOrEqual(66);
+  });
+
+  it("rejects a forged-large Content-Length before pulling and cancels the body", async () => {
+    const signing = await createSigningFixture();
+    const sid = crypto.randomUUID();
+    await seedRpSession(sid);
+    const lazy = lazyByteStream(128, 32);
+    stubLogoutJwksResponse(
+      () =>
+        new Response(lazy.stream, {
+          headers: {
+            "Content-Length": String(64 * 1024 + 1),
+            "Content-Type": "application/json",
+          },
+        }),
+    );
+    const token = await signIdToken(signing.privateKey, logoutClaims(sid));
+
+    expect((await postLogoutToken(token)).status).toBe(400);
+    expect(lazy.cancelled()).toBe(true);
+    // WHATWG streams may prefill one chunk before the Response is inspected;
+    // the bounded reader itself must not pull beyond that queued chunk.
+    expect(lazy.pulls()).toBeLessThanOrEqual(1);
+  });
+
+  it("fails closed and cancels a chunked JWKS with invalid UTF-8", async () => {
+    const signing = await createSigningFixture();
+    const sid = crypto.randomUUID();
+    await seedRpSession(sid);
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+      },
+      start(controller) {
+        controller.enqueue(new Uint8Array([0x7b, 0xff, 0x7d]));
+      },
+    });
+    stubLogoutJwksResponse(
+      () => new Response(stream, { headers: { "Content-Type": "application/json" } }),
+    );
+    const token = await signIdToken(signing.privateKey, logoutClaims(sid));
+
+    expect((await postLogoutToken(token)).status).toBe(400);
+    expect(cancelled).toBe(true);
   });
 
   it("rejects malformed back-channel requests before token validation", async () => {

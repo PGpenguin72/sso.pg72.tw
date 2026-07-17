@@ -109,6 +109,61 @@ async function discover(config: RuntimeConfig): Promise<oauth.AuthorizationServe
   return oauth.processDiscoveryResponse(config.issuer, response);
 }
 
+async function readBoundedUtf8Body(
+  response: Response,
+  maxBytes: number,
+): Promise<string> {
+  const declared = response.headers.get("content-length")?.trim();
+  if (declared && /^[0-9]+$/.test(declared)) {
+    const tooLarge = BigInt(declared) > BigInt(maxBytes);
+    if (tooLarge) {
+      try {
+        await response.body?.cancel("declared response body was too large");
+      } catch {
+        // The size decision is authoritative even if the peer rejects cancel.
+      }
+      throw new Error("JWKS response was too large");
+    }
+  }
+  if (!response.body) return "";
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const parts: string[] = [];
+  let bytesRead = 0;
+  let cancelled = false;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bytesRead += chunk.value.byteLength;
+      if (bytesRead > maxBytes) {
+        cancelled = true;
+        try {
+          await reader.cancel("response body exceeded bounded reader limit");
+        } catch {
+          // Continue with the bounded rejection even when cancel itself fails.
+        }
+        throw new Error("JWKS response was too large");
+      }
+      parts.push(decoder.decode(chunk.value, { stream: true }));
+    }
+    parts.push(decoder.decode());
+    return parts.join("");
+  } catch (error) {
+    if (!cancelled) {
+      try {
+        await reader.cancel("response body decoding failed");
+      } catch {
+        // Preserve the validation error rather than exposing stream internals.
+      }
+    }
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 async function validateLogoutToken(
   config: RuntimeConfig,
   token: string,
@@ -124,15 +179,7 @@ async function validateLogoutToken(
     signal: AbortSignal.timeout(8_000),
   });
   if (!jwksResponse.ok) throw new Error("JWKS request failed");
-  const declaredLength = Number(jwksResponse.headers.get("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > JWKS_MAX_LENGTH) {
-    await jwksResponse.body?.cancel();
-    throw new Error("JWKS response was too large");
-  }
-  const rawJwks = await jwksResponse.text();
-  if (rawJwks.length > JWKS_MAX_LENGTH) {
-    throw new Error("JWKS response was too large");
-  }
+  const rawJwks = await readBoundedUtf8Body(jwksResponse, JWKS_MAX_LENGTH);
   const jwks = JSON.parse(rawJwks) as JSONWebKeySet;
   if (!Array.isArray(jwks.keys)) throw new Error("JWKS response was invalid");
 

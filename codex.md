@@ -339,6 +339,9 @@ access:                  standard <-> restricted
 - [ ] DAST 覆蓋 auth、OIDC、admin、gateway 與 logout endpoints。
 - [ ] SAST、secret scan、IaC/config scan 自動化 gate。
 - [ ] 負載測試、備份還原演練、key rotation 與 Queue retry/DLQ 演練。
+- [x] Source-local fail-closed continuity/load tooling：固定 literal-loopback target、fresh D1 migration/export/restore、synthetic Passkey/session/consent/JWK overlap-retirement、bounded request profile、mode-`0600` redacted report 與 cleanup regression；命令與報告格式見 [`docs/runbooks/continuity.md`](./docs/runbooks/continuity.md) 與 [`docs/runbooks/load-failure-drills.md`](./docs/runbooks/load-failure-drills.md)。這只代表工具已進 source，不代表 dependency 或演練已通過。
+- [ ] 整合並獨立 review recovery `0019`、observability `0020`、encrypted R2 archive 與 release automation；兩個 local report 對任何缺件都必須維持 `dependency_missing` + nonzero，全部到位後才記錄 synthetic local pass。
+- [ ] 在隔離 Preview 另行執行核准 budget 的 D1 restore、signing-key rotation、recovery、Queue retry/DLQ、R2 archive/restore、外部 alert delivery、failure rollback 與 RP smoke；local synthetic report 不可勾除此項。
 - [x] Local source 的 persistent restricted-account state、request guards、D1 race guards、admin controls 與 workerd regression。
 - [ ] 套用 `0017`、部署 restricted-account Worker 至隔離 Preview，完成獨立 review、race/rollback/ordinary-OIDC smoke，再納入 production rollout；不得因 local gate 通過而宣稱已部署。
 - [x] Local source 的 visited-client ledger、durable logout outbox、opaque delivery key、原子 `in_flight`/terminal attempt evidence、self-delete 全批 rollback、專用 Queue consumer、Cron replayer、bounded retry、redacted operator replay、bounded JWKS reader 與 test-RP receiver/regression。
@@ -828,6 +831,25 @@ Webmail 仍須分成兩個問題：
 - 使用 `@cloudflare/vitest-pool-workers` 在 workerd 環境測 D1、Queue、cookies 與 bindings，不只在 Node.js mock 測試。
 - DAST 對 login、authorize、token、userinfo、introspection、revocation、logout、admin 與 gateway endpoints 全部覆蓋。
 - SAST/secret scan/dependency scan 無未處理的 Critical 或 High finding；Medium 必須有書面接受期限與補救措施。
+
+### 19.5 Local continuity and bounded drills
+
+- `pnpm public-readiness:continuity:local` 只在 policy-owned
+  `http://127.0.0.1:5183` 建立 fresh source/restore D1，驗證 migration head、
+  schema/row-count/D1 `quick_check`/FK 等價、synthetic consent/session/Passkey、
+  discovery issuer、JWK decrypt/overlap/retirement，並刪除所有 ephemeral
+  SQL、secret 與 state。
+- `pnpm public-readiness:drills:local` 只在 policy-owned
+  `http://127.0.0.1:5185` 以固定 96 requests、concurrency 4、12 rps、10 秒
+  hard deadline 跑 workerd/global-logout regression 與 live negative-request
+  profile；不可接受 caller target/budget。
+- 兩者都必須拒絕 Cloudflare credentials、remote/Preview/production target，
+  只寫 mode-`0600` allowlisted aggregate report；cleanup failure、local
+  invariant failure或 recovery `0019`／observability `0020`／encrypted R2／
+  release automation 缺件皆 nonzero。
+- Synthetic local pass 只證明 source-local contract；不取代 Preview D1
+  restore、live Queue/DLQ/R2、external alert、production smoke、獨立 review
+  或 owner GO。
 
 ## 20. 導入階段
 

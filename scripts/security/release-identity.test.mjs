@@ -6,7 +6,9 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -25,6 +27,9 @@ const identityFiles = [
   "apps/test-rp/package.json",
   "wiki/package.json",
   "pnpm-workspace.yaml",
+  "pnpm-lock.yaml",
+  "patches/@better-auth__oauth-provider@1.6.23.patch",
+  "patches/README.md",
   "scripts/security/release-identity.mjs",
 ];
 
@@ -137,6 +142,93 @@ test("rejects pnpm workspace lifecycle and build-policy drift", (context) => {
       error.includes("lifecycle/build policy"),
     ),
   );
+});
+
+test("rejects missing, mutated, and symlinked frozen lockfiles", (context) => {
+  for (const [name, mutate] of [
+    ["missing", (root, filename) => rmSync(filename)],
+    [
+      "mutated",
+      (root, filename) =>
+        writeFileSync(filename, `${readFileSync(filename, "utf8")}# drift\n`),
+    ],
+    [
+      "symlinked",
+      (root, filename) => {
+        const target = path.join(root, "lockfile-target.yaml");
+        renameSync(filename, target);
+        symlinkSync(path.basename(target), filename);
+      },
+    ],
+  ]) {
+    const root = fixture(context);
+    const filename = path.join(root, "pnpm-lock.yaml");
+    mutate(root, filename);
+    assert.ok(
+      validateReleaseIdentity(root).some((error) =>
+        error.includes("pnpm-lock.yaml"),
+      ),
+      name,
+    );
+  }
+});
+
+test("rejects missing, mutated, extra, and symlinked patch inputs", (context) => {
+  const patchRelative = "patches/@better-auth__oauth-provider@1.6.23.patch";
+  for (const [name, mutate] of [
+    ["missing", (root, filename) => rmSync(filename)],
+    [
+      "mutated",
+      (root, filename) =>
+        writeFileSync(filename, `${readFileSync(filename, "utf8")}# drift\n`),
+    ],
+    [
+      "extra",
+      (root) => writeFileSync(path.join(root, "patches/unreviewed.patch"), "drift\n"),
+    ],
+    [
+      "symlinked",
+      (root, filename) => {
+        const target = path.join(root, "patch-target.patch");
+        renameSync(filename, target);
+        symlinkSync("../patch-target.patch", filename);
+      },
+    ],
+  ]) {
+    const root = fixture(context);
+    mutate(root, path.join(root, patchRelative));
+    assert.ok(
+      validateReleaseIdentity(root).some((error) => error.includes("patch")),
+      name,
+    );
+  }
+});
+
+test("rejects every pnpm 11.5 default workspace hook filename", (context) => {
+  for (const relative of [".pnpmfile.mjs", ".pnpmfile.cjs"]) {
+    const root = fixture(context);
+    writeFileSync(path.join(root, relative), "throw new Error('unreviewed hook')\n");
+    assert.ok(
+      validateReleaseIdentity(root).some((error) => error.includes(relative)),
+      relative,
+    );
+  }
+});
+
+test("rejects project npmrc files at every code-owned package root", (context) => {
+  for (const relative of [
+    ".npmrc",
+    "apps/sso/.npmrc",
+    "apps/test-rp/.npmrc",
+    "wiki/.npmrc",
+  ]) {
+    const root = fixture(context);
+    writeFileSync(path.join(root, relative), "registry=https://example.invalid/\n");
+    assert.ok(
+      validateReleaseIdentity(root).some((error) => error.includes(relative)),
+      relative,
+    );
+  }
 });
 
 test("uses only Node standard-library imports and runs without node_modules", (context) => {

@@ -38,6 +38,28 @@ const pnpmWorkspaceContract = Object.freeze({
   digest: "df1b9fbd1c6221aa62320fd090c5cadcbc335b27876fde1a05ab26932eb4dc59",
 });
 
+const pnpmLockfileContract = Object.freeze({
+  file: "pnpm-lock.yaml",
+  digest: "8edc8aab209e831a3d50f857ca59cad643bcbfc8b705b3f544d3d5a598ad82b3",
+});
+
+const patchContracts = Object.freeze({
+  "@better-auth__oauth-provider@1.6.23.patch":
+    "1f29a064e1624b9e96d7b2ee1b5bdb7e593834de2aed1cb1b4f59b27dae28c2d",
+  "README.md": "5ae6a4d06f5243c5758644138961c330646e41aa105464ab6c4442dd113495d8",
+});
+
+const prohibitedWorkspacePnpmfiles = Object.freeze([
+  ".pnpmfile.mjs",
+  ".pnpmfile.cjs",
+]);
+
+const prohibitedProjectNpmrcFiles = Object.freeze(
+  Object.keys(packageContracts).map((projectRoot) =>
+    projectRoot === "." ? ".npmrc" : `${projectRoot}/.npmrc`,
+  ),
+);
+
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -67,6 +89,41 @@ function exactRegularFile(root, relative, errors) {
   } catch {
     errors.push(`${relative} is missing or unreadable`);
     return null;
+  }
+}
+
+function exactDirectoryFileSet(root, relative, expectedFiles, errors) {
+  const dirname = path.join(root, relative);
+  let files;
+  try {
+    const stat = lstatSync(dirname);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      errors.push(`${relative} must be a regular non-symlink directory`);
+      return;
+    }
+    files = readdirSync(dirname).sort();
+  } catch {
+    errors.push(`${relative} is missing or unreadable`);
+    return;
+  }
+  if (JSON.stringify(files) !== JSON.stringify([...expectedFiles].sort())) {
+    errors.push(`${relative} file set differs from the early install-input identity`);
+  }
+}
+
+function rejectPresentPath(root, relative, description, errors) {
+  try {
+    lstatSync(path.join(root, relative));
+    errors.push(`${relative} is an unreviewed ${description} and must be absent`);
+  } catch (error) {
+    if (
+      !error ||
+      typeof error !== "object" ||
+      !("code" in error) ||
+      error.code !== "ENOENT"
+    ) {
+      errors.push(`${relative} could not be proven absent`);
+    }
   }
 }
 
@@ -119,6 +176,28 @@ export function validateReleaseIdentity(root = repoRoot) {
   if (workspace && sha256(workspace) !== pnpmWorkspaceContract.digest) {
     errors.push("pnpm workspace lifecycle/build policy differs from the early identity");
   }
+
+  const lockfile = exactRegularFile(root, pnpmLockfileContract.file, errors);
+  if (lockfile && sha256(lockfile) !== pnpmLockfileContract.digest) {
+    errors.push("pnpm-lock.yaml differs from the early frozen-install identity");
+  }
+
+  const expectedPatchFiles = Object.keys(patchContracts);
+  exactDirectoryFileSet(root, "patches", expectedPatchFiles, errors);
+  for (const [name, digest] of Object.entries(patchContracts)) {
+    const relative = `patches/${name}`;
+    const bytes = exactRegularFile(root, relative, errors);
+    if (bytes && sha256(bytes) !== digest) {
+      errors.push(`${relative} differs from the early patch identity`);
+    }
+  }
+
+  for (const relative of prohibitedWorkspacePnpmfiles) {
+    rejectPresentPath(root, relative, "workspace pnpm hook", errors);
+  }
+  for (const relative of prohibitedProjectNpmrcFiles) {
+    rejectPresentPath(root, relative, "project pnpm configuration", errors);
+  }
   return [...new Set(errors)];
 }
 
@@ -129,7 +208,9 @@ function main() {
     process.exitCode = 1;
     return;
   }
-  console.log("Early release identity check passed (2 workflows, 4 manifests, pnpm policy).");
+  console.log(
+    "Early release identity check passed (2 workflows, 4 manifests, pnpm policy, lockfile, patch set, no project hooks/config).",
+  );
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) main();

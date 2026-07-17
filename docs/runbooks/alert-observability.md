@@ -2,13 +2,12 @@
 
 > Status: local schema, pure evaluator/parser and archive-crypto contracts,
 > evaluator runtime-status/lease/bootstrap and alert state/incident/outbox CAS
-> repositories, bounded audit and OAuth-report source repositories, and `0021`
-> archive-ledger source. None of these repositories is imported by the Worker
-> entry point or a scheduler. Remaining fan-out, logout, and Queue metric
-> sources, Cron, alert/archive Queue/DLQ, Email/admin delivery, same-run proof,
-> R2 archive
-> runtime, bounded restore, external backup, and deployment remain absent.
-> Production records remain through migration `0012`.
+> repositories, bounded audit, OAuth-report, and global fan-out-gap source
+> repositories, and `0021` archive-ledger source. None of these repositories is
+> imported by the Worker entry point or a scheduler. Remaining logout and Queue
+> metric sources, Cron, alert/archive Queue/DLQ, Email/admin delivery, same-run
+> proof, R2 archive runtime, bounded restore, external backup, and deployment
+> remain absent. Production records remain through migration `0012`.
 
 ## What `0020` provides
 
@@ -196,6 +195,18 @@ overflow, missing key continuity, or query failure cannot manufacture a clear
 or expose a raw client/reporter identifier. This repository is local source
 only: neither the Worker entry point nor a scheduler imports or invokes it.
 
+The local fan-out-gap source repository reads the exact half-open
+`[asOf - 60m, asOf)` `audit_event` cohort and left-joins
+`security_event_delivery.event_id`. A missing marker counts only when the source
+timestamp is strictly older than five or fifteen minutes, so an event exactly on
+either grace boundary remains outside that older cohort. The query uses the
+bounded audit time index and marker primary-key index, projects only aggregate
+counters, validates selected timestamps and the exact D1 result shape, and turns
+well-shaped evidence above `1,000,000,000` into an incomplete global source
+rather than a false clear. This is an unwired detector source only. It does not
+create a durable security-event outbox, replay a missing event, sample Queue
+state, or establish delivery reliability.
+
 Admin actor coverage follows the same rule because `audit_event.actor_user_id`
 also becomes null when its user is deleted. If a relevant admin event in the
 60-minute rule window plus evaluator skew has neither raw actor ID nor
@@ -337,6 +348,7 @@ pnpm --filter @pg72/id exec vitest run \
   test/audit-archive-schema.spec.ts
 pnpm --filter @pg72/id exec vitest run \
   test/alert-audit-source-repository.spec.ts \
+  test/alert-fanout-source-repository.spec.ts \
   test/alert-oauth-source-repository.spec.ts \
   test/alert-evaluator.spec.ts test/alert-rules.spec.ts \
   test/audit-archive-crypto.spec.ts
@@ -371,17 +383,21 @@ repository suite verifies only D1 lease/status/bootstrap persistence. The OAuth
 source suite verifies exact half-open cohorts, total/high-risk/distinct counts,
 nullable reporter evidence, domain-separated raw/stored provenance, sentinel
 continuity, bounded tracked zero-fill, query plans, and redacted failure behavior
-without wiring an evaluator. The archive schema suite verifies the `0021` ledger
-transaction contract, while the archive-crypto suite verifies the record/envelope
-and checkpoint binding without R2 or Queue I/O.
+without wiring an evaluator. The fan-out source suite verifies the one-hour
+half-open lookback, exact grace boundaries, marker matching, canonical
+timestamps, safe caps, cohort nesting, bounded query plans, and redacted
+fail-closed behavior without wiring an evaluator or Queue. The archive schema
+suite verifies the `0021` ledger transaction contract, while the archive-crypto
+suite verifies the record/envelope and checkpoint binding without R2 or Queue
+I/O.
 
 ## Remaining gates
 
 Schema, pure evaluator/parser, the two unwired evaluator repositories, and the
-bounded local `audit_event` and OAuth-report source repositories must still
-report observability as `source_present_unverified`, leaving continuity and
-drills blocked. Later reviewed slices must add the remaining fan-out, logout,
-and Queue sources; wire both evaluator repositories into Cron with
+bounded local `audit_event`, OAuth-report, and fan-out-gap source repositories
+must still report observability as `source_present_unverified`, leaving
+continuity and drills blocked. Later reviewed slices must add the remaining
+logout and Queue sources; wire both evaluator repositories into Cron with
 repository-controlled successful-run and same-run proof; and add dedicated
 alert Queue/DLQ, an Email Service adapter, admin acknowledge/resolve/replay
 operations, and redaction/race/failure tests. Archive crypto plus the `0021`

@@ -245,7 +245,7 @@ Queue 用於：
 
 Queue 是 at-least-once delivery。所有 consumer 必須以 `event_id` 或 logout token 的 `jti` 去重，並支援重試。無法成功送達的 Queue message 進入對應 Dead Letter Queue；外部告警只有在真的配置、測試並由 operator acknowledgement 後才能宣稱存在。
 
-Queue 不作為撤銷或 audit 真實來源；D1 中的 session/token 狀態與 `audit_event` 才是 source of truth。Global logout 另以 `logout_delivery` 作 durable delivery source：中央撤銷、audit 與每個 visited RP 的 endpoint snapshot 同一 D1 batch commit，專用 `LOGOUT_DELIVERIES` Queue 只作 accelerator，每分鐘 Cron 會重送 due/expired-lease row。因此 Queue send failure 不會遺失 logout work，也不會讓已提交的中央撤銷看似回滾。
+Queue 不作為撤銷或 audit 真實來源；D1 中的 session/token 狀態與 `audit_event` 才是 source of truth。Global logout 另以 `logout_delivery` 作 durable delivery source：中央撤銷、audit 與每個 visited RP 的 endpoint snapshot 同一 D1 batch commit，專用 `LOGOUT_DELIVERIES` Queue 只攜帶 opaque `deliveryKey` 並作 accelerator，每分鐘 Cron 會重送 due/expired-lease row。每次 claim 先原子寫入 `in_flight` attempt evidence；HTTP 結果同批 terminalize attempt 與 delivery，過期 lease 也先留下 `lease_expired` terminal evidence 才能 reclaim。因此 Queue send failure 或 result write failure 不會遺失 logout work，也不會讓已提交的中央撤銷看似回滾。
 
 一般 security-event fan-out 仍是不同保證：client mutation 先將狀態與 audit 同批 commit，`SECURITY_EVENTS` Queue 只在 commit 後 best effort 發送。Queue 在接受事件前失敗目前可能漏掉該 fan-out，只有 redacted log，尚無通用 durable outbox/replayer 或告警補送；補齊這項是 full Production GO 前必須決定的債務。不得用 global logout outbox 的可靠性宣稱所有 Queue workload 都已 durable。
 
@@ -341,7 +341,7 @@ access:                  standard <-> restricted
 - [ ] 負載測試、備份還原演練、key rotation 與 Queue retry/DLQ 演練。
 - [x] Local source 的 persistent restricted-account state、request guards、D1 race guards、admin controls 與 workerd regression。
 - [ ] 套用 `0017`、部署 restricted-account Worker 至隔離 Preview，完成獨立 review、race/rollback/ordinary-OIDC smoke，再納入 production rollout；不得因 local gate 通過而宣稱已部署。
-- [x] Local source 的 visited-client ledger、durable logout outbox、專用 Queue consumer、Cron replayer、bounded retry、redacted operator replay 與 test-RP receiver/regression。
+- [x] Local source 的 visited-client ledger、durable logout outbox、opaque delivery key、原子 `in_flight`/terminal attempt evidence、self-delete 全批 rollback、專用 Queue consumer、Cron replayer、bounded retry、redacted operator replay、bounded JWKS reader 與 test-RP receiver/regression。
 - [ ] 套用 `0018`、provision 隔離 logout Queue/DLQ、完成 Preview multi-RP/failure/rollback exercise、部署各 production RP receiver，並實作及測試外部 DLQ/dead-delivery 告警；local source 完成不等於全面上線。
 - [ ] 將 local source 已實作的 Passkey step-up 與 migration `0014` 部署至 production，完成獨立 review 與實機 smoke；10 分鐘 session-age freshness 仍是額外條件，不能替代重新驗證。
 
@@ -462,7 +462,7 @@ SSO 無法只靠刪除自己的 cookie 清除所有 RP cookie。因此所有第�
 
 現行 local source 已完成所有 user ID token 的 nonempty central `sid`、refresh
 grant live-session binding、`(sid, client_id)` visit ledger、D1 durable delivery
-outbox/attempt evidence、專用 Queue/DLQ consumer、Cron replayer、operator replay
+outbox/attempt evidence、opaque delivery key、專用 Queue/DLQ consumer、Cron replayer、operator replay
 API，以及 test RP 的 idempotent receiver。Production 尚未套用 `0018`、provision
 專用 Queue/DLQ 或部署任何經驗收的 RP receiver，外部告警也尚未實作；因此仍
 不能宣稱全域登出已在 production 完成。
@@ -506,9 +506,9 @@ D1 batch commits central revocation
 
 - 管理服務：要求立即撤銷，每次請求確認中央狀態，確認失敗時 fail closed。
 - 公開服務：專用 Queue 主動推送，另允許最多 30 秒撤銷快取。
-- Delivery 只有 HTTP `200`/`204` 成功；network/timeout、`408`、`425`、`429`、`5xx` retry，其他 `4xx` permanent，最多五次 bounded attempts。
-- 過期 lease 由每分鐘 Cron 回收；dead/retry row 可由具 `users.manage`、fresh session 與 Passkey step-up 的管理員人工 replay。`202` 代表 D1 reset/audit 已 commit、立即 Queue send 失敗而等待 Cron，不代表 rollback。
-- Redacted 管理 API 不回 endpoint snapshot、`sid`、`jti` 或 token。Repository 尚無外部 DLQ/dead-delivery paging；只有完成配置與演練後才能宣稱告警存在。
+- Delivery 只有 HTTP `200`/`204` 成功；network/timeout、`408`、`425`、`429`、`5xx` retry，其他任何 HTTP status（包含 `201`、`3xx` 與其他 `4xx`）permanent，最多五次 bounded attempts。
+- 過期 lease 由每分鐘 Cron 回收；reclaim 前先把原本的 `in_flight` attempt terminalize 為 `lease_expired`，attempt 5 則進 dead state。dead/retry row 可由具 `users.manage`、fresh session 與 Passkey step-up 的管理員人工 replay。`202` 代表 D1 reset/audit 已 commit、立即 Queue send 失敗而等待 Cron，不代表 rollback。
+- Redacted 管理 API 只用 opaque `deliveryKey` 定位，不暴露內部 sequential primary key、endpoint snapshot、`sid`、`jti` 或 token。Repository 尚無外部 DLQ/dead-delivery paging；只有完成配置與演練後才能宣稱告警存在。
 - SSO 暫時不可用：公開服務可依風險提供短期既有 session grace period；管理服務不得繞過驗證。
 
 「立即撤銷」與「SSO 故障時所有服務仍完全可用」無法同時保證。以上政策優先保護管理與高敏感服務。
@@ -808,11 +808,12 @@ Webmail 仍須分成兩個問題：
 - 撤銷單一裝置只影響對應 `sid`。
 - 撤銷所有裝置使所有中央 sessions 與 refresh tokens 失效。
 - Access-token trigger 只為 live user session 記錄實際 client visit；Client Credentials 不可寫入 ledger。
-- 中央撤銷、token/session deletion、audit 與所有 visited-client durable rows 原子 commit；強制 outbox failure 必須整批 rollback。
+- 中央撤銷、token/session deletion、audit 與所有 visited-client durable rows 原子 commit；self-delete 另把 actor/session snapshot、owned-client shutdown 與 account/user deletion 放在同一批，強制 outbox failure 必須整批 rollback，且不能清 cookie 或送 Queue。
 - 所有已存取 clients 都收到 logout event；partial Queue send failure 不遺失其他 D1 work。
 - Queue 重複投遞與相同 `jti` receiver replay 不造成錯誤；相同 `jti`/不同 `sid` fail closed。
-- Timeout/`408`/`425`/`429`/`5xx` bounded retry，permanent `4xx` 或 exhausted attempts 進 dead state；expired lease 由 replayer 回收。
-- Manual replay 要求 permission/fresh/Passkey step-up，且 list response 不暴露 endpoint、`sid`、`jti` 或 token。
+- Claim 必須在 HTTP 前 commit `in_flight` evidence；HTTP/result persist crash 保留同一 `jti`，expired lease terminalize 前一次 evidence 後才 reclaim，attempt 5 crash 進 dead state，並行 Queue duplicate 只能有一個 claim。
+- `200`/`204` 成功；timeout/`408`/`425`/`429`/`5xx` bounded retry；其他 status 或 exhausted attempts 進 dead state。
+- Manual replay 要求 permission/fresh/Passkey step-up、使用 opaque `deliveryKey`，且 list response 不暴露 sequential ID、endpoint、`sid`、`jti` 或 token。
 - 管理服務在 SSO/D1 無法確認時 fail closed。
 
 ### 19.4 Security tests

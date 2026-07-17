@@ -22,13 +22,15 @@ Receiver 接受 `POST` 與
 
 * 使用 PGID discovery 的 `jwks_uri` 驗證 EdDSA signature 與 `kid`。
 * `iss` 精確等於 PGID issuer，`aud` 包含自己的 `client_id`。
-* `iat` / `exp` 有效且 token 壽命不超過五分鐘。
+* `iat` / `exp` 有效且 token 壽命不超過五分鐘；PGID 目前簽發 120 秒 lifetime。
 * `events` 包含 OIDC Back-Channel Logout event URI。
 * 有 nonempty `sid` 與 `jti`，而且**沒有** `nonce`。
 * 同一 `jti` 重送時冪等成功；同一 `jti` 若搭配不同 `sid` 必須拒絕。
 
 驗證成功後，在同一個後端 transaction 中記錄 `jti` 並刪除所有符合 `sid` 的
 本機 sessions，然後回 HTTP `200` 或 `204`。PGID 只把這兩個狀態視為成功。
+Timeout/network error、`408`、`425`、`429` 與 `5xx` 會 retry；其餘任何 HTTP
+status（包含 `201`、redirect 與其他 `4xx`）都視為 permanent failure。
 不要在 response、log 或 telemetry 中輸出 logout token、完整 session ID 或使用者
 資料。
 

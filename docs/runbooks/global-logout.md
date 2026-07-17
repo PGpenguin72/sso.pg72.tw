@@ -1,6 +1,7 @@
 # Global Logout Delivery Runbook
 
-> Status: local source contract. This runbook does not claim that migration
+> Status: completed local source and regression contract. Final independent
+> source review is still required. This runbook does not claim that migration
 > `0018`, the dedicated Queue/DLQ, any RP receiver, an external dashboard, or
 > paging is deployed in Preview or production.
 
@@ -26,9 +27,16 @@ once.
   format during rollback.
 - A one-minute Cron re-enqueues due or expired-lease D1 rows. Queue loss alone
   therefore cannot lose durable logout work.
+- Queue and operator replay surfaces use an opaque, Web Crypto-derived
+  `deliveryKey`; the internal sequential D1 primary key is never exposed.
+- Claiming commits an `in_flight` attempt before HTTP starts. The HTTP result
+  terminalizes the attempt and delivery in one D1 batch. An expired lease first
+  terminalizes its prior attempt as `lease_expired`, then retries or becomes
+  dead at attempt five; a reused delivery keeps the same `jti`.
 - Delivery is successful only on HTTP `200` or `204`. Timeout, network errors,
-  `408`, `425`, `429`, and `5xx` retry. Other `4xx` responses are permanent.
-  Automatic delivery stops after five attempts with bounded backoff.
+  `408`, `425`, `429`, and `5xx` retry. Every other HTTP response, including
+  `201`, redirects, and other `4xx`, is permanent. Automatic delivery stops
+  after five attempts with bounded backoff.
 - The logout token is an EdDSA JWT signed by the same current PGID signing path
   published through JWKS. It contains `iss`, `aud`, `iat`, `exp`, `jti`, the
   OIDC back-channel logout event claim, and `sid`; it never contains `nonce`.
@@ -72,7 +80,7 @@ Migration `0018_global_logout.sql`:
 - preserves the unused pre-existing table as
   `logout_delivery_legacy_0018` instead of deleting its evidence;
 - creates the visited-client ledger, durable delivery state, attempt evidence,
-  indexes, constraints, and access-token ledger trigger.
+  opaque delivery keys, indexes, constraints, and access-token ledger trigger.
 
 After applying it in an isolated environment, verify with read-only queries:
 
@@ -107,21 +115,26 @@ migration list, Queue/DLQ names, timestamps, and result counts:
    durable delivery rows and one success audit commit.
 2. Exercise self single-session revoke, other-session revoke, all-session
    revoke, sign-out, RP-initiated logout, admin revoke, restrict, suspend, and
-   account deletion.
+   account deletion. Force account-deletion outbox failure and confirm the
+   actor/session snapshot, RP rows, tokens, owned clients, success audit,
+   account, user, Queue dispatch, and cookie cleanup all roll back together.
 3. Confirm each logout token passes signature, issuer, audience, lifetime,
    event, `sid`, `jti`, and no-`nonce` validation, and that both first and
    duplicate deliveries return `200` or `204`.
 4. Reject bad issuer, audience, signature, event claim, lifetime, nonce,
    malformed form bodies, and conflicting reuse of one `jti` for another
    `sid` without deleting an RP session.
-5. Simulate timeout, `429`, `5xx`, permanent `4xx`, partial Queue-send failure,
-   lost Queue messages, and an expired D1 lease. Confirm bounded retry,
-   per-attempt evidence, eventual `dead` state, and Cron recovery.
+5. Simulate timeout, `408`, `425`, `429`, `5xx`, permanent `201`/`3xx`/`4xx`,
+   partial Queue-send failure, lost Queue messages, HTTP success followed by
+   result-persistence failure, and an expired D1 lease. Confirm `in_flight`
+   evidence exists before HTTP, `jti` remains stable, every attempt becomes
+   terminal, attempt five becomes `dead`, and Cron recovery is bounded.
 6. Race two revocations of the same session. Confirm one central transition,
    no duplicate `(event, sid, client)` delivery, and no missing durable work.
-7. Confirm admin list responses omit endpoint, `sid`, `jti`, token, and user
-   identity. Confirm manual replay requires `users.manage`, a fresh session,
-   and Passkey step-up.
+7. Confirm Queue messages and admin replay use opaque `deliveryKey` values, and
+   admin list responses omit the internal sequential ID, endpoint, `sid`,
+   `jti`, token, and user identity. Confirm manual replay requires
+   `users.manage`, a fresh session, and Passkey step-up.
 8. Scan Worker and RP logs to confirm no logout token, authorization code,
    session ID, client secret, Passkey challenge, full email, or full IP is
    emitted.
@@ -137,9 +150,10 @@ The source exposes a redacted operator view:
 GET /api/admin/logout-deliveries?status=dead&limit=50
 ```
 
-The response contains delivery ID, client ID, reason, status, attempt count,
-replay count, a bounded error code, and timestamps. It intentionally excludes
-the endpoint snapshot, central `sid`, `jti`, and token.
+The response contains an opaque `deliveryKey`, client ID, reason, status,
+attempt count, replay count, a bounded error code, and timestamps. It
+intentionally excludes the internal sequential primary key, endpoint snapshot,
+central `sid`, `jti`, and token.
 
 For a dead or retrying item:
 
@@ -151,7 +165,7 @@ For a dead or retrying item:
 3. With a fresh, Passkey-stepped-up administrator session, replay:
 
    ```text
-   POST /api/admin/logout-deliveries/{deliveryId}/replay
+   POST /api/admin/logout-deliveries/{deliveryKey}/replay
    ```
 
 4. HTTP `200` means the durable row was reset and immediately queued. HTTP
@@ -176,6 +190,6 @@ to compensate for an RP receiver failure.
    D1 rows and Queue/DLQ messages for the repaired Worker.
 4. Keep central sessions and tokens revoked. Rollback must never resurrect
    authentication state merely because an RP notification is delayed.
-5. Record the affected delivery IDs, RP client IDs, first/last timestamps,
+5. Record the affected opaque delivery keys, RP client IDs, first/last timestamps,
    Worker versions, migration state, Queue/DLQ depth, containment decision, and
    follow-up owner without including tokens, `sid`, secrets, or user identity.

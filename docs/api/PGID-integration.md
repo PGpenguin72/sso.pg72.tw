@@ -4,7 +4,7 @@
 > 對象：要把服務接上 PGID 的第一方 / 受管開發者
 > Issuer：`https://sso.pg72.tw`
 > 協議：OAuth 2.1 / OpenID Connect，Authorization Code + PKCE S256
-> 最後對照程式碼：`apps/sso/worker/auth.ts`、`apps/sso/worker/index.ts`、`apps/sso/worker/account-access.ts`、`apps/sso/worker/admin-users.ts`、`apps/sso/worker/admin-clients.ts`、`apps/sso/worker/passkey-step-up.ts`、`apps/sso/worker/public-registration.ts`、`apps/sso/worker/global-logout.ts`、`apps/sso/worker/logout-delivery.ts`、`apps/test-rp/worker/index.ts`
+> 最後對照程式碼：`apps/sso/worker/auth.ts`、`apps/sso/worker/index.ts`、`apps/sso/worker/account-access.ts`、`apps/sso/worker/account-deletion.ts`、`apps/sso/worker/admin-users.ts`、`apps/sso/worker/admin-clients.ts`、`apps/sso/worker/passkey-step-up.ts`、`apps/sso/worker/public-registration.ts`、`apps/sso/worker/global-logout.ts`、`apps/sso/worker/logout-delivery.ts`、`apps/test-rp/worker/index.ts`
 
 本手冊是**精簡技術參考**：端點、scopes、claims、token 壽命、client 認證方式與可複製的串接範例。教學導向、逐步導覽與一般使用者說明在 [`wiki/`](../../wiki/SUMMARY.md)；完整架構規格與安全設計以 [`codex.md`](../../codex.md) 為準。若本文件與 `codex.md` 衝突，以 `codex.md` 為準並在同一變更修正本文件。
 
@@ -304,11 +304,15 @@ Receiver 接受 `POST application/x-www-form-urlencoded`，body 必須只有一�
 idempotency receipt 與刪除放進同一個 transaction。第一次與相同 `jti` 的重送都
 回 `200` 或 `204`；相同 `jti` 搭配不同 `sid` 必須拒絕。PGID 只有在收到 `200` 或
 `204` 時標記 delivered；timeout、network error、`408`、`425`、`429`、`5xx`
-會 bounded retry，其他 `4xx` 視為 permanent failure。
+會 bounded retry，其餘任何 HTTP status（包含 `201`、`3xx` 與其他 `4xx`）視為
+permanent failure。PGID 實際簽發的 logout token lifetime 是 120 秒；RP 仍須拒絕
+任何超過五分鐘的 token。
 
 管理員可用 `GET /api/admin/logout-deliveries?status=dead&limit=50` 查看遮蔽後的
-delivery evidence。`POST /api/admin/logout-deliveries/{deliveryId}/replay` 只接受
-dead/retry row，並要求 `users.manage`、fresh session 與 Passkey step-up。Replay 回
+delivery evidence。Response 與 Queue 只使用 Web Crypto 衍生的 opaque
+`deliveryKey`，不暴露內部 sequential primary key。
+`POST /api/admin/logout-deliveries/{deliveryKey}/replay` 只接受 dead/retry row，並
+要求 `users.manage`、fresh session 與 Passkey step-up。Replay 回
 `202` 表示 D1 reset/audit 已提交、只是立即送 Queue 失敗，Cron 仍會接手；不是
 rollback。完整驗收與 rollback 見
 [`docs/runbooks/global-logout.md`](../runbooks/global-logout.md)。

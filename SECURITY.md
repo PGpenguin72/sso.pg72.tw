@@ -2,9 +2,9 @@
 
 PGID currently runs as a deployed, invite-only production beta. Existing deployment records show Copy and Link using PGID for production sign-in. Public registration remains disabled.
 
-This deployed state is not the same as full Production GO or general-public approval. Local source now emits and validates the central ID-token `sid`, but the visited-client ledger, replay-safe back-channel logout, recovery/rotation drills, independent review, and other gates below are still incomplete; no document may treat production traffic alone as proof that those controls passed.
+This deployed state is not the same as full Production GO or general-public approval. Local source now includes the central ID-token `sid`, visited-client ledger, replay-safe durable back-channel logout delivery, and an idempotent test RP receiver. Final independent source review of this release candidate, Preview and production rollout, external alerting, recovery/rotation drills, and the other gates below are still incomplete; no document may treat local tests or production traffic alone as proof that those controls passed.
 
-The repository's local source now includes the narrowly scoped Mail Path A introspection prerequisite, Passkey step-up for every OAuth client mutation, and public-registration prerequisites using Turnstile, versioned legal acceptance, and persistent restricted-account access. Production has none of migrations `0013`/`0014`/`0015`/`0016`/`0017` or this Worker version; `pgid-mail-introspect` has not been provisioned, no public-registration bindings have been configured, no remote D1 operation was performed, and the mail VPS has not been cut over. These local results must not be represented as production behavior.
+The repository's local source now includes the narrowly scoped Mail Path A introspection prerequisite, Passkey step-up for every OAuth client mutation, public-registration prerequisites using Turnstile, versioned legal acceptance and persistent restricted-account access, and the global-logout source contract. Production has none of migrations `0013`/`0014`/`0015`/`0016`/`0017`/`0018` or this Worker version; `pgid-mail-introspect` has not been provisioned, no public-registration or logout-Queue bindings have been configured, no remote D1 operation was performed, and the mail VPS and production RP receivers have not been cut over. These local results must not be represented as production behavior.
 
 ## Reporting
 
@@ -37,7 +37,7 @@ Before enabling `REGISTRATION_MODE=public` or declaring full Production GO, comp
 - independent security review and OIDC conformance/security testing;
 - DAST across auth, OIDC, admin, gateway, and logout endpoints;
 - automated SAST, dependency, secret, and IaC/config scanning;
-- a central visited-client ledger, replay-safe back-channel logout, retry/DLQ alerting, and RP logout verification;
+- independently review and deploy the locally implemented central visited-client ledger and replay-safe back-channel logout after applying migration `0018`; provision and exercise its dedicated Queue/DLQ, external retry/dead-delivery alerting, and production RP verification;
 - recovery-code/break-glass, signing-key rotation, D1 restore, and Queue retry/DLQ drills;
 - deploy, configure, independently review, and smoke-test the locally implemented Turnstile, versioned Terms/Privacy acceptance, and restricted-account paths after applying migrations `0016` and `0017`; the owner must approve the exact live policy versions, validate the initial abuse thresholds in Preview, assign an operator, and test external alert delivery;
 - deploy and independently review the locally implemented Passkey step-up for high-risk system-client provisioning and secret rotation; production must apply migration `0014`, and the session-age freshness check remains an additional condition rather than a substitute;

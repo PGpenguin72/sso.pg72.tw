@@ -6,6 +6,8 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
+  writeFileSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -20,7 +22,9 @@ import {
   assertEquivalentD1,
   classifiedManifestStep,
   expectedMigrationHead,
+  expectedMigrationLedger,
   isApplicationSchemaRow,
+  normalizeMigrationLedgerRows,
   normalizeSingleRowCount,
   quickCheckPassed,
   trustedTableCountSql,
@@ -87,7 +91,12 @@ test("requires exact manifest and internal-record equivalence", () => {
   const manifest = {
     foreignKeysOk: true,
     integrityOk: true,
-    migrationHead: "0018_global_logout.sql",
+    migrationLedger: {
+      count: 2,
+      head: "0002_second.sql",
+      names: ["0001_first.sql", "0002_second.sql"],
+      sha256: "b".repeat(64),
+    },
     rowCounts: { user: 1 },
     schemaSha256: "a".repeat(64),
   };
@@ -105,13 +114,79 @@ test("requires exact manifest and internal-record equivalence", () => {
   );
 });
 
-test("derives the migration head from the integrated source sequence", () => {
+test("derives the complete migration ledger from the integrated source sequence", () => {
   const migrationsDirectory = path.join(ssoRoot, "migrations");
-  const expected = readdirSync(migrationsDirectory)
+  const expectedNames = readdirSync(migrationsDirectory)
     .filter((name) => /^\d{4}_[a-z0-9_]+\.sql$/.test(name))
-    .sort()
-    .at(-1);
-  assert.equal(expectedMigrationHead(migrationsDirectory), expected);
+    .sort();
+  const ledger = expectedMigrationLedger(migrationsDirectory);
+  assert.deepEqual(ledger.names, expectedNames);
+  assert.equal(ledger.count, expectedNames.length);
+  assert.equal(ledger.head, expectedNames.at(-1));
+  assert.match(ledger.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(expectedMigrationHead(migrationsDirectory), ledger.head);
+});
+
+test("migration source ledger rejects gaps, duplicate numbers, malformed names, and links", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "pgid-migration-ledger-"));
+  const writeMigration = (name) => writeFileSync(path.join(directory, name), "SELECT 1;\n");
+  try {
+    writeMigration("0001_first.sql");
+    writeMigration("0002_second.sql");
+    assert.equal(expectedMigrationLedger(directory).count, 2);
+
+    writeMigration("0004_gap.sql");
+    assert.throws(() => expectedMigrationLedger(directory), /gap or out-of-order/);
+    rmSync(path.join(directory, "0004_gap.sql"));
+
+    writeMigration("0002_duplicate.sql");
+    assert.throws(() => expectedMigrationLedger(directory), /duplicate numbers/);
+    rmSync(path.join(directory, "0002_duplicate.sql"));
+
+    writeMigration("2_malformed.sql");
+    assert.throws(() => expectedMigrationLedger(directory), /invalid migration filename/);
+    rmSync(path.join(directory, "2_malformed.sql"));
+
+    writeMigration("0003_empty.sql");
+    writeFileSync(path.join(directory, "0003_empty.sql"), "");
+    assert.throws(() => expectedMigrationLedger(directory), /must not be empty/);
+    rmSync(path.join(directory, "0003_empty.sql"));
+
+    rmSync(path.join(directory, "0002_second.sql"));
+    symlinkSync(path.join(directory, "0001_first.sql"), path.join(directory, "0002_link.sql"));
+    assert.throws(() => expectedMigrationLedger(directory), /regular migration file/);
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("D1 ledger normalization requires every exact ordered migration row", () => {
+  const rows = [
+    { id: 1, name: "0001_first.sql" },
+    { id: 2, name: "0002_second.sql" },
+    { id: 3, name: "0003_third.sql" },
+  ];
+  const ledger = normalizeMigrationLedgerRows(rows);
+  assert.deepEqual(ledger.names, rows.map(({ name }) => name));
+  assert.equal(ledger.count, 3);
+  assert.equal(ledger.head, "0003_third.sql");
+  assert.throws(() => normalizeMigrationLedgerRows([]), /empty/);
+  assert.throws(
+    () => normalizeMigrationLedgerRows([rows[0], rows[2]]),
+    /ID gap or duplicate/,
+  );
+  assert.throws(
+    () => normalizeMigrationLedgerRows([{ ...rows[0], extra: true }]),
+    /unexpected columns/,
+  );
+  assert.throws(
+    () => normalizeMigrationLedgerRows([{ id: "1", name: rows[0].name }]),
+    /must be an integer/,
+  );
+  assert.throws(
+    () => normalizeMigrationLedgerRows([rows[0], { id: 2, name: rows[0].name }]),
+    /filename gap or duplicate/,
+  );
 });
 
 test("manifest diagnostics expose only a fixed class", () => {

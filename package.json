@@ -18,5 +18,8 @@
     "test:clean-dist": "node --test scripts/clean-package-dist.test.mjs",
     "test:public-readiness": "node --test scripts/public-readiness/*.test.mjs",
     "typecheck": "pnpm -r --if-present typecheck"
+  },
+  "devDependencies": {
+    "jsonc-parser": "3.3.1"
   }
 }

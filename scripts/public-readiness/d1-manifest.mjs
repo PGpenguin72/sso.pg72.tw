@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 
 import { runWrangler } from "./local-runtime.mjs";
@@ -95,9 +95,32 @@ export function isApplicationSchemaRow({ name, tbl_name: table }) {
 }
 
 export function expectedMigrationHead(migrationsDirectory) {
-  const migrations = readdirSync(migrationsDirectory)
-    .filter((name) => MIGRATION_FILENAME_PATTERN.test(name))
-    .sort();
+  return expectedMigrationLedger(migrationsDirectory).head;
+}
+
+function canonicalMigrationLedger(names) {
+  return {
+    count: names.length,
+    head: names.at(-1),
+    names,
+    sha256: createHash("sha256").update(JSON.stringify(names)).digest("hex"),
+  };
+}
+
+export function expectedMigrationLedger(migrationsDirectory) {
+  const entries = readdirSync(migrationsDirectory).sort();
+  const sqlEntries = entries.filter((name) => name.endsWith(".sql"));
+  for (const name of sqlEntries) {
+    assert.match(name, MIGRATION_FILENAME_PATTERN, `invalid migration filename ${name}`);
+    const stat = lstatSync(path.join(migrationsDirectory, name));
+    assert.equal(
+      stat.isFile(),
+      true,
+      `${name} must be a regular migration file`,
+    );
+    assert.ok(stat.size > 0, `${name} must not be empty`);
+  }
+  const migrations = sqlEntries;
   assert.ok(migrations.length > 0, "migration directory is empty");
   assert.equal(
     new Set(migrations.map((name) => name.slice(0, 4))).size,
@@ -111,7 +134,36 @@ export function expectedMigrationHead(migrationsDirectory) {
       "migration filename must not escape its directory",
     );
   }
-  return migrations.at(-1);
+  migrations.forEach((migration, index) => {
+    assert.equal(
+      Number(migration.slice(0, 4)),
+      index + 1,
+      "migration sequence contains a gap or out-of-order number",
+    );
+  });
+  return canonicalMigrationLedger(migrations);
+}
+
+export function normalizeMigrationLedgerRows(rows) {
+  assert.ok(rows.length > 0, "D1 migration ledger is empty");
+  const names = rows.map((row, index) => {
+    assert.deepEqual(
+      Object.keys(row),
+      ["id", "name"],
+      "D1 migration ledger row has unexpected columns",
+    );
+    assert.ok(Number.isSafeInteger(row.id), "D1 migration ID must be an integer");
+    assert.equal(row.id, index + 1, "D1 migration ledger contains an ID gap or duplicate");
+    assert.match(row.name, MIGRATION_FILENAME_PATTERN);
+    assert.equal(
+      Number(row.name.slice(0, 4)),
+      index + 1,
+      "D1 migration ledger contains a filename gap or duplicate",
+    );
+    return row.name;
+  });
+  assert.equal(new Set(names).size, names.length, "D1 migration ledger repeats a name");
+  return canonicalMigrationLedger(names);
 }
 
 function parseWranglerJson(output) {
@@ -227,19 +279,21 @@ export function collectD1Manifest(projectDirectory) {
   const foreignKeys = classifiedManifestStep("D1ForeignKeyError", () =>
     queryRows(projectDirectory, "PRAGMA foreign_key_check"),
   );
-  const migration = classifiedManifestStep(
+  const migrationLedger = classifiedManifestStep(
     "D1MigrationLedgerError",
     () =>
-      queryRows(
-        projectDirectory,
-        "SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 1",
-      )[0],
+      normalizeMigrationLedgerRows(
+        queryRows(
+          projectDirectory,
+          "SELECT id, name FROM d1_migrations ORDER BY id",
+        ),
+      ),
   );
   const schemaSha256 = classifiedManifestStep("D1SchemaHashError", () =>
     schemaHash(schemaRows.filter(isApplicationSchemaRow)),
   );
   return {
-    migrationHead: migration?.name ?? null,
+    migrationLedger,
     rowCounts,
     schemaSha256,
     integrityOk: quickCheckPassed(integrity),

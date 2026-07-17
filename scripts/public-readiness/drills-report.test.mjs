@@ -4,11 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { DRILL_PROFILE } from "./drill-contract.mjs";
 import { earlyDrillReport } from "./drills-local.mjs";
 import { validateClosedReport, writeClosedReport } from "./report.mjs";
 
 const stages = [
   "invocation",
+  "source",
+  "source_finalize",
   "setup",
   "workerd_suites",
   "migrations",
@@ -16,12 +19,6 @@ const stages = [
   "manifest",
   "report",
 ];
-const profile = {
-  concurrency: 1,
-  durationMs: 100,
-  requestsPerSecond: 1,
-  totalRequests: 1,
-};
 
 test("every drill failure stage writes dependencies in a closed mode-0600 report", () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "pgid-drill-reports-"));
@@ -36,8 +33,8 @@ test("every drill failure stage writes dependencies in a closed mode-0600 report
             listenerStopped: cleanupValue,
             temporaryStateRemoved: cleanupValue,
           },
-          profile,
-          directory,
+          DRILL_PROFILE,
+          { sourceCommit: "a".repeat(40), sourceState: "clean" },
         );
         assert.doesNotThrow(() => validateClosedReport(report), stage);
         assert.equal(report.ready, false);

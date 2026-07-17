@@ -106,6 +106,61 @@ export function runWorkspaceBinary(packageRoot, binary, args, options = {}) {
   );
 }
 
+export function inspectSourceState(
+  {
+    repositoryRoot = repoRoot,
+    homeDirectory = repositoryRoot,
+    runCommand = runLocalCommand,
+  } = {},
+) {
+  const environment = closedChildEnvironment(homeDirectory);
+  try {
+    const sourceCommit = runCommand("git", ["rev-parse", "--verify", "HEAD"], {
+      cwd: repositoryRoot,
+      environment,
+      label: "source commit lookup",
+      suppressDiagnostic: true,
+    }).trim();
+    assert.match(sourceCommit, /^[a-f0-9]{40}$/);
+    assert.notEqual(sourceCommit, "0".repeat(40));
+    const workingTree = runCommand(
+      "git",
+      ["status", "--porcelain=v1", "--untracked-files=all"],
+      {
+        cwd: repositoryRoot,
+        environment,
+        label: "source tree status",
+        suppressDiagnostic: true,
+      },
+    );
+    return {
+      sourceCommit,
+      sourceState: workingTree.trim() === "" ? "clean" : "dirty",
+    };
+  } catch {
+    return { sourceCommit: null, sourceState: "unavailable" };
+  }
+}
+
+export function requireCleanSource(source) {
+  assert.ok(source && typeof source === "object", "source state is unavailable");
+  assert.equal(source.sourceState, "clean", "public-readiness evidence requires a clean Git tree");
+  assert.match(source.sourceCommit, /^[a-f0-9]{40}$/);
+  assert.notEqual(source.sourceCommit, "0".repeat(40));
+  return source;
+}
+
+export function requireStableSource(initialSource, finalSource) {
+  requireCleanSource(initialSource);
+  requireCleanSource(finalSource);
+  assert.equal(
+    finalSource.sourceCommit,
+    initialSource.sourceCommit,
+    "public-readiness source commit changed while evidence was running",
+  );
+  return finalSource;
+}
+
 export function createLocalProject(
   projectDirectory,
   operation,

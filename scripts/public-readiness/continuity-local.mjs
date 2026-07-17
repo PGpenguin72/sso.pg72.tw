@@ -20,12 +20,16 @@ import {
   verifyCompactJwtAgainstJwks,
 } from "./crypto-fixtures.mjs";
 import {
+  dependencyStatus,
+  runGlobalLogoutDependencyProof,
+} from "./dependency-contracts.mjs";
+import {
   applyAllMigrations,
   assertEquivalentD1,
   collectD1Manifest,
   executeD1,
   executeD1File,
-  expectedMigrationHead,
+  expectedMigrationLedger,
   exportD1,
   queryRows,
   readContinuityRecords,
@@ -38,7 +42,9 @@ import {
   readPackageVersion,
   removeTemporaryTree,
   repoRoot,
-  runLocalCommand,
+  inspectSourceState,
+  requireCleanSource,
+  requireStableSource,
   runWorkspaceBinary,
   ssoRoot,
   startLocalWorker,
@@ -150,24 +156,11 @@ export function classifiedStage(errorName, operation) {
   }
 }
 
-function sourceMetadata(homeDirectory) {
-  let sourceCommit = "0".repeat(40);
-  try {
-    const candidate = runLocalCommand("git", ["rev-parse", "HEAD"], {
-      cwd: repoRoot,
-      environment: closedChildEnvironment(homeDirectory),
-      label: "source commit lookup",
-      suppressDiagnostic: true,
-    }).trim();
-    if (/^[a-f0-9]{40}$/.test(candidate)) sourceCommit = candidate;
-  } catch {
-    // A zero digest is the closed, non-sensitive failure sentinel.
-  }
+function toolMetadata() {
   const packageManager = JSON.parse(
     readFileSync(path.join(repoRoot, "package.json"), "utf8"),
   ).packageManager;
   return {
-    sourceCommit,
     toolVersions: {
       node: process.versions.node,
       pnpm: packageManager.replace(/^pnpm@/, ""),
@@ -178,8 +171,13 @@ function sourceMetadata(homeDirectory) {
   };
 }
 
-export function earlyFailureReport(stage, error, cleanup, homeDirectory) {
-  const metadata = sourceMetadata(homeDirectory);
+export function earlyFailureReport(
+  stage,
+  error,
+  cleanup,
+  source = { sourceCommit: null, sourceState: "unavailable" },
+) {
+  const metadata = toolMetadata();
   return {
     checks: emptyChecks(),
     cleanup,
@@ -187,7 +185,7 @@ export function earlyFailureReport(stage, error, cleanup, homeDirectory) {
     export: { bytes: 0, sha256: "0".repeat(64) },
     failure: { class: failureClassOf(error), stage },
     kind: "continuity",
-    migrationHead: "not_run",
+    migrationLedger: { count: 0, head: null, sha256: null },
     mode: "local",
     ready: false,
     rowCounts: {},
@@ -196,66 +194,13 @@ export function earlyFailureReport(stage, error, cleanup, homeDirectory) {
       integrity: "not_run",
       sha256: "0".repeat(64),
     },
-    schemaVersion: 1,
-    sourceCommit: metadata.sourceCommit,
+    schemaVersion: 2,
+    sourceCommit: source.sourceCommit,
+    sourceState: source.sourceState,
     status: "blocked",
     syntheticOnly: true,
     toolVersions: metadata.toolVersions,
   };
-}
-
-export function dependencyStatus(
-  {
-    identityRoot = ssoRoot,
-    repositoryRoot = repoRoot,
-  } = {},
-) {
-  const wranglerSource = readFileSync(
-    path.join(identityRoot, "wrangler.jsonc"),
-    "utf8",
-  );
-  return [
-    {
-      name: "global_logout_0018",
-      status: existsSync(
-        path.join(identityRoot, "migrations", "0018_global_logout.sql"),
-      )
-        ? "present"
-        : "dependency_missing",
-    },
-    {
-      name: "recovery_0019",
-      status: existsSync(
-        path.join(identityRoot, "migrations", "0019_recovery_codes.sql"),
-      )
-        ? "present"
-        : "dependency_missing",
-    },
-    {
-      name: "observability_0020",
-      status: existsSync(
-        path.join(identityRoot, "migrations", "0020_alert_observability.sql"),
-      )
-        ? "present"
-        : "dependency_missing",
-    },
-    {
-      name: "encrypted_r2_archive",
-      status:
-        existsSync(path.join(identityRoot, "worker", "audit-archive.ts")) &&
-        /"r2_buckets"\s*:/.test(wranglerSource)
-          ? "present"
-          : "dependency_missing",
-    },
-    {
-      name: "release_automation",
-      status:
-        existsSync(path.join(repositoryRoot, "security", "release-policy.json")) &&
-        existsSync(path.join(repositoryRoot, "scripts", "security", "dast.mjs"))
-          ? "present"
-          : "dependency_missing",
-    },
-  ];
 }
 
 function runFocusedContinuityTests(homeDirectory) {
@@ -263,7 +208,10 @@ function runFocusedContinuityTests(homeDirectory) {
   runWorkspaceBinary(
     ssoRoot,
     "vitest",
-    ["run", "test/public-readiness-continuity.spec.ts"],
+    [
+      "run",
+      "test/public-readiness-continuity.spec.ts",
+    ],
     { environment, label: "SSO continuity workerd suite" },
   );
   runWorkspaceBinary(
@@ -587,6 +535,8 @@ async function exerciseRestoredRuntime(
 
 export async function runContinuityLocal() {
   let stage = "invocation";
+  let source = { sourceCommit: null, sourceState: "unavailable" };
+  const dependencyProofs = [];
   let caughtError;
   let temporaryRoot;
   let sourceProject;
@@ -602,6 +552,9 @@ export async function runContinuityLocal() {
     assertRemoteOperationsDenied();
     loadClosedProfile("continuity");
     const origin = authorizeOwnedLocalOrigin("continuity");
+    stage = "source";
+    source = inspectSourceState({ homeDirectory: repoRoot });
+    requireCleanSource(source);
     stage = "setup";
     temporaryRoot = mkdtempSync(
       path.join(os.tmpdir(), "pgid-public-readiness-continuity-"),
@@ -619,6 +572,7 @@ export async function runContinuityLocal() {
     assert.equal(runtime.origin, origin);
     stage = "workerd_suites";
     runFocusedContinuityTests(temporaryRoot);
+    dependencyProofs.push(runGlobalLogoutDependencyProof(temporaryRoot));
     stage = "migrations";
     applyAllMigrations(sourceProject);
     stage = "seed";
@@ -636,9 +590,9 @@ export async function runContinuityLocal() {
     stage = "source_invariants";
     classifiedStage("ContinuityInvariantError", () => {
       exactFixtureChecks(sourceRecords, fixture);
-      assert.equal(
-        sourceManifest.migrationHead,
-        expectedMigrationHead(path.join(ssoRoot, "migrations")),
+      assert.deepEqual(
+        sourceManifest.migrationLedger,
+        expectedMigrationLedger(path.join(ssoRoot, "migrations")),
       );
       assert.equal(sourceManifest.integrityOk, true);
       assert.equal(sourceManifest.foreignKeysOk, true);
@@ -676,10 +630,10 @@ export async function runContinuityLocal() {
     listenerStopped = runtimeResult.listenerStopped;
     const runtimeChecks = runtimeResult.checks;
     assert.ok(runtimeChecks, "restored runtime did not return checks");
-    const dependencies = dependencyStatus();
+    const dependencies = dependencyStatus({ proofs: dependencyProofs });
     const readiness = readinessFromDependencies(dependencies);
     stage = "report";
-    const metadata = sourceMetadata(temporaryRoot);
+    const metadata = toolMetadata();
     report = {
       checks: {
         centralSidPreserved: sourceRecords.session_records.some(
@@ -715,7 +669,11 @@ export async function runContinuityLocal() {
       export: exported,
       failure: { class: "none", stage: "none" },
       kind: "continuity",
-      migrationHead: sourceManifest.migrationHead,
+      migrationLedger: {
+        count: sourceManifest.migrationLedger.count,
+        head: sourceManifest.migrationLedger.head,
+        sha256: sourceManifest.migrationLedger.sha256,
+      },
       mode: "local",
       ready: readiness.ready,
       rowCounts: sourceManifest.rowCounts,
@@ -724,8 +682,9 @@ export async function runContinuityLocal() {
         integrity: "ok",
         sha256: sourceManifest.schemaSha256,
       },
-      schemaVersion: 1,
-      sourceCommit: metadata.sourceCommit,
+      schemaVersion: 2,
+      sourceCommit: source.sourceCommit,
+      sourceState: source.sourceState,
       status: readiness.status,
       syntheticOnly: true,
       toolVersions: metadata.toolVersions,
@@ -759,12 +718,29 @@ export async function runContinuityLocal() {
     caughtError = new Error("closed cleanup failed");
     stage = "report";
   }
+  if (source.sourceState === "clean") {
+    const initialSource = source;
+    const finalSource = inspectSourceState({ homeDirectory: repoRoot });
+    source = finalSource;
+    try {
+      requireStableSource(initialSource, finalSource);
+      if (report) {
+        report.sourceCommit = finalSource.sourceCommit;
+        report.sourceState = finalSource.sourceState;
+      }
+    } catch (error) {
+      if (!caughtError) {
+        caughtError = error;
+        stage = "source_finalize";
+      }
+    }
+  }
   if (!report || caughtError) {
     report = earlyFailureReport(
       stage,
       caughtError ?? new Error("continuity report was not produced"),
       cleanup,
-      temporaryRoot ?? repoRoot,
+      source,
     );
   } else {
     report.cleanup = cleanup;
@@ -789,10 +765,10 @@ export async function runContinuityLocal() {
     process.exitCode = 1;
   } else if (!report.ready) {
     const missing = report.dependencies
-      .filter(({ status }) => status === "dependency_missing")
-      .map(({ name }) => name)
+      .filter(({ status }) => status !== "verified")
+      .map(({ name, status }) => `${name}:${status}`)
       .join(",");
-    console.error(`Public readiness remains blocked: dependency_missing (${missing}).`);
+    console.error(`Public readiness remains blocked: dependencies (${missing}).`);
     process.exitCode = 1;
   } else {
     console.log("Synthetic local continuity checks passed; owner Preview and production gates remain external.");

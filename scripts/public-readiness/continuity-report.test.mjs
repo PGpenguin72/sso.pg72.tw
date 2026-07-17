@@ -13,6 +13,8 @@ import { validateClosedReport, writeClosedReport } from "./report.mjs";
 
 const stages = [
   "invocation",
+  "source",
+  "source_finalize",
   "setup",
   "workerd_suites",
   "migrations",
@@ -44,7 +46,7 @@ test("every early stage and cleanup state writes a closed mode-0600 report", () 
             temporarySqlRemoved: cleanupValue,
             temporaryStateRemoved: cleanupValue,
           },
-          directory,
+          { sourceCommit: "a".repeat(40), sourceState: "clean" },
         );
         assert.doesNotThrow(() => validateClosedReport(report), stage);
         const filename = path.join(directory, `${stage}-${cleanupValue}.json`);

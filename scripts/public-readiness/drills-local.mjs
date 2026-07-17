@@ -4,11 +4,15 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { dependencyStatus } from "./continuity-local.mjs";
+import {
+  dependencyStatus,
+  runGlobalLogoutDependencyProof,
+} from "./dependency-contracts.mjs";
+import { DRILL_DEFINITIONS } from "./drill-contract.mjs";
 import {
   applyAllMigrations,
   collectD1Manifest,
-  expectedMigrationHead,
+  expectedMigrationLedger,
 } from "./d1-manifest.mjs";
 import { runBoundedProfile } from "./load-profiles.mjs";
 import {
@@ -16,9 +20,11 @@ import {
   closedChildEnvironment,
   createLocalProject,
   fetchLocal,
+  inspectSourceState,
   removeTemporaryTree,
   repoRoot,
-  runLocalCommand,
+  requireCleanSource,
+  requireStableSource,
   runWorkspaceBinary,
   ssoRoot,
   startLocalWorker,
@@ -67,7 +73,6 @@ function runFocusedDrillTests(homeDirectory) {
     [
       "run",
       "test/public-readiness-drills.spec.ts",
-      "test/global-logout.spec.ts",
     ],
     { environment, label: "SSO and global-logout drill suites" },
   );
@@ -79,53 +84,12 @@ function runFocusedDrillTests(homeDirectory) {
   );
 }
 
-function drillDefinitions() {
-  return [
-    { expectedStatuses: [200], id: "health", path: "/health" },
-    { expectedStatuses: [200], id: "readiness", path: "/ready" },
-    {
-      expectedStatuses: [200],
-      id: "discovery",
-      path: "/.well-known/openid-configuration",
-    },
-    {
-      expectedStatuses: [400],
-      id: "authorize_invalid",
-      path: "/oauth2/authorize",
-    },
-    {
-      expectedStatuses: [401],
-      id: "userinfo_unauthorized",
-      path: "/oauth2/userinfo",
-    },
-    {
-      expectedStatuses: [401],
-      id: "admin_unauthorized",
-      path: "/api/admin/users",
-    },
-  ];
-}
-
-function sourceCommit(homeDirectory) {
-  try {
-    const value = runLocalCommand("git", ["rev-parse", "HEAD"], {
-      cwd: repoRoot,
-      environment: closedChildEnvironment(homeDirectory),
-      label: "source commit lookup",
-      suppressDiagnostic: true,
-    }).trim();
-    return /^[a-f0-9]{40}$/.test(value) ? value : "0".repeat(40);
-  } catch {
-    return "0".repeat(40);
-  }
-}
-
 export function earlyDrillReport(
   stage,
   error,
   cleanup,
   profile,
-  homeDirectory,
+  source = { sourceCommit: null, sourceState: "unavailable" },
 ) {
   return {
     cleanup,
@@ -138,8 +102,9 @@ export function earlyDrillReport(
     ready: false,
     redactionPassed: true,
     scenarios: [],
-    schemaVersion: 1,
-    sourceCommit: sourceCommit(homeDirectory),
+    schemaVersion: 2,
+    sourceCommit: source.sourceCommit,
+    sourceState: source.sourceState,
     status: "blocked",
     suiteChecks: { globalLogout: false, sso: false, testRp: false },
     syntheticOnly: true,
@@ -148,6 +113,8 @@ export function earlyDrillReport(
 
 export async function runLocalDrills() {
   let stage = "invocation";
+  let source = { sourceCommit: null, sourceState: "unavailable" };
+  const dependencyProofs = [];
   let temporaryRoot;
   let processState;
   let listenerStopped = true;
@@ -160,6 +127,9 @@ export async function runLocalDrills() {
     assertRemoteOperationsDenied();
     profile = loadClosedProfile("drills");
     const origin = authorizeOwnedLocalOrigin("drills");
+    stage = "source";
+    source = inspectSourceState({ homeDirectory: repoRoot });
+    requireCleanSource(source);
     stage = "setup";
     temporaryRoot = mkdtempSync(
       path.join(os.tmpdir(), "pgid-public-readiness-drills-"),
@@ -171,6 +141,7 @@ export async function runLocalDrills() {
 
     stage = "workerd_suites";
     runFocusedDrillTests(temporaryRoot);
+    dependencyProofs.push(runGlobalLogoutDependencyProof(temporaryRoot));
     stage = "migrations";
     applyAllMigrations(temporaryRoot);
     stage = "runtime";
@@ -179,7 +150,7 @@ export async function runLocalDrills() {
     await waitForLocalWorker(origin, processState);
     const scenarios = await runBoundedProfile(
       profile,
-      drillDefinitions(),
+      DRILL_DEFINITIONS,
       (definition, _index, deadlineSignal) =>
         fetchLocal(origin, definition.path, {
           method: "GET",
@@ -190,20 +161,20 @@ export async function runLocalDrills() {
     processState = undefined;
     stage = "manifest";
     const manifest = collectD1Manifest(temporaryRoot);
-    assert.equal(
-      manifest.migrationHead,
-      expectedMigrationHead(path.join(ssoRoot, "migrations")),
+    assert.deepEqual(
+      manifest.migrationLedger,
+      expectedMigrationLedger(path.join(ssoRoot, "migrations")),
     );
     assert.equal(manifest.integrityOk, true);
     assert.equal(manifest.foreignKeysOk, true);
-    const dependencies = dependencyStatus();
+    const dependencies = dependencyStatus({ proofs: dependencyProofs });
     const dependencyReadiness = readinessFromDependencies(dependencies);
     const invariants = {
       d1: "passed",
       queue: "passed",
       r2:
-        dependencies.find(({ name }) => name === "encrypted_r2_archive")?.status ===
-        "present"
+        dependencies.find(({ name }) => name === "encrypted_r2_archive")?.status !==
+        "dependency_missing"
           ? "not_run"
           : "dependency_missing",
     };
@@ -214,6 +185,7 @@ export async function runLocalDrills() {
       Object.values(suiteChecks).every(Boolean) &&
       Object.values(invariants).every((value) => value === "passed");
     const ready = dependencyReadiness.ready && localChecksPassed;
+    stage = "report";
     report = {
       cleanup: { listenerStopped, temporaryStateRemoved: true },
       dependencies,
@@ -225,8 +197,9 @@ export async function runLocalDrills() {
       ready,
       redactionPassed: true,
       scenarios,
-      schemaVersion: 1,
-      sourceCommit: sourceCommit(temporaryRoot),
+      schemaVersion: 2,
+      sourceCommit: source.sourceCommit,
+      sourceState: source.sourceState,
       status: ready ? "synthetic_pass" : "blocked",
       suiteChecks,
       syntheticOnly: true,
@@ -249,13 +222,30 @@ export async function runLocalDrills() {
     caughtError.name = "CleanupError";
     stage = "report";
   }
+  if (source.sourceState === "clean") {
+    const initialSource = source;
+    const finalSource = inspectSourceState({ homeDirectory: repoRoot });
+    source = finalSource;
+    try {
+      requireStableSource(initialSource, finalSource);
+      if (report) {
+        report.sourceCommit = finalSource.sourceCommit;
+        report.sourceState = finalSource.sourceState;
+      }
+    } catch (error) {
+      if (!caughtError) {
+        caughtError = error;
+        stage = "source_finalize";
+      }
+    }
+  }
   if (caughtError || !report) {
     report = earlyDrillReport(
       stage,
       caughtError ?? new Error("drill report was not produced"),
       cleanup,
       profile ?? loadClosedProfile("drills"),
-      repoRoot,
+      source,
     );
   } else {
     report.cleanup = cleanup;
@@ -280,10 +270,10 @@ export async function runLocalDrills() {
     process.exitCode = 1;
   } else if (!report.ready) {
     const missing = report.dependencies
-      .filter(({ status }) => status === "dependency_missing")
-      .map(({ name }) => name)
+      .filter(({ status }) => status !== "verified")
+      .map(({ name, status }) => `${name}:${status}`)
       .join(",");
-    console.error(`Local drills remain blocked: dependency_missing (${missing}).`);
+    console.error(`Local drills remain blocked: dependencies (${missing}).`);
     process.exitCode = 1;
   } else {
     console.log("Synthetic local drills passed; no Preview or production target was used.");

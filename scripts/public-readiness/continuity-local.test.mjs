@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { dependencyStatus } from "./continuity-local.mjs";
+import { dependencyStatus } from "./dependency-contracts.mjs";
 import { readinessFromDependencies } from "./report.mjs";
 
 test("machine readiness fails for absent recovery, observability, and archive source", () => {
@@ -38,11 +38,11 @@ test("machine readiness fails for absent recovery, observability, and archive so
     const byName = new Map(
       dependencies.map((entry) => [entry.name, entry.status]),
     );
-    assert.equal(byName.get("global_logout_0018"), "present");
+    assert.equal(byName.get("global_logout_0018"), "source_invalid");
     assert.equal(byName.get("recovery_0019"), "dependency_missing");
     assert.equal(byName.get("observability_0020"), "dependency_missing");
     assert.equal(byName.get("encrypted_r2_archive"), "dependency_missing");
-    assert.equal(byName.get("release_automation"), "present");
+    assert.equal(byName.get("release_automation"), "source_invalid");
     assert.deepEqual(readinessFromDependencies(dependencies), {
       ready: false,
       status: "blocked",

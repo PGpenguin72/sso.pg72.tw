@@ -4,6 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { REQUIRED_DEPENDENCY_NAMES } from "./dependency-contracts.mjs";
+import {
+  DRILL_PROFILE,
+  DRILL_REQUESTS_PER_SCENARIO,
+  DRILL_SCENARIO_IDS,
+} from "./drill-contract.mjs";
 import {
   readinessFromDependencies,
   validateClosedReport,
@@ -11,30 +17,61 @@ import {
   writeMinimalFailureReport,
 } from "./report.mjs";
 
+function dependencies(status = "dependency_missing") {
+  return REQUIRED_DEPENDENCY_NAMES.map((name) => ({ name, status }));
+}
+
 function drillReport(overrides = {}) {
   return {
     cleanup: { listenerStopped: true, temporaryStateRemoved: true },
-    dependencies: [{ name: "recovery_0019", status: "dependency_missing" }],
-    failure: { class: "none", stage: "none" },
-    invariants: { d1: "passed", queue: "passed", r2: "dependency_missing" },
+    dependencies: dependencies(),
+    failure: { class: "Error", stage: "runtime" },
+    invariants: { d1: "not_run", queue: "not_run", r2: "not_run" },
     kind: "drills",
     mode: "local",
-    profile: {
-      concurrency: 1,
-      durationMs: 100,
-      requestsPerSecond: 1,
-      totalRequests: 1,
-    },
+    profile: DRILL_PROFILE,
     ready: false,
     redactionPassed: true,
     scenarios: [],
-    schemaVersion: 1,
+    schemaVersion: 2,
     sourceCommit: "a".repeat(40),
+    sourceState: "clean",
     status: "blocked",
-    suiteChecks: { globalLogout: true, sso: true, testRp: true },
+    suiteChecks: { globalLogout: false, sso: false, testRp: false },
     syntheticOnly: true,
     ...overrides,
   };
+}
+
+function scenario(id, overrides = {}) {
+  return {
+    errorCount: 0,
+    expectedStatusCount: DRILL_REQUESTS_PER_SCENARIO,
+    id,
+    maxMs: 4,
+    p50Ms: 1,
+    p95Ms: 2,
+    p99Ms: 3,
+    requestCount: DRILL_REQUESTS_PER_SCENARIO,
+    status: "passed",
+    throughputPerSecond: 2,
+    timeoutCount: 0,
+    unexpectedStatusCount: 0,
+    ...overrides,
+  };
+}
+
+function completedDrillReport(overrides = {}) {
+  return drillReport({
+    dependencies: dependencies("verified"),
+    failure: { class: "none", stage: "none" },
+    invariants: { d1: "passed", queue: "passed", r2: "passed" },
+    ready: true,
+    scenarios: DRILL_SCENARIO_IDS.map((id) => scenario(id)),
+    status: "synthetic_pass",
+    suiteChecks: { globalLogout: true, sso: true, testRp: true },
+    ...overrides,
+  });
 }
 
 function failedContinuityReport(overrides = {}) {
@@ -67,11 +104,11 @@ function failedContinuityReport(overrides = {}) {
       temporarySqlRemoved: true,
       temporaryStateRemoved: true,
     },
-    dependencies: [{ name: "recovery_0019", status: "dependency_missing" }],
+    dependencies: dependencies(),
     export: { bytes: 0, sha256: "0".repeat(64) },
     failure: { class: "Error", stage: "migrations" },
     kind: "continuity",
-    migrationHead: "not_run",
+    migrationLedger: { count: 0, head: null, sha256: null },
     mode: "local",
     ready: false,
     rowCounts: {},
@@ -80,8 +117,9 @@ function failedContinuityReport(overrides = {}) {
       integrity: "not_run",
       sha256: "0".repeat(64),
     },
-    schemaVersion: 1,
+    schemaVersion: 2,
     sourceCommit: "a".repeat(40),
+    sourceState: "clean",
     status: "blocked",
     syntheticOnly: true,
     toolVersions: { node: "26.0.0", pnpm: "11.5.0", wrangler: "4.110.0" },
@@ -90,15 +128,20 @@ function failedContinuityReport(overrides = {}) {
 }
 
 test("test fixtures can never be reported as ready", () => {
-  const dependencies = [{ name: "synthetic", status: "present" }];
-  assert.deepEqual(readinessFromDependencies(dependencies), {
+  const verified = dependencies("verified");
+  assert.deepEqual(readinessFromDependencies(verified), {
     ready: true,
     status: "synthetic_pass",
   });
-  assert.deepEqual(readinessFromDependencies(dependencies, { testFixture: true }), {
+  assert.deepEqual(readinessFromDependencies(verified, { testFixture: true }), {
     ready: false,
     status: "test_fixture",
   });
+  assert.throws(() => readinessFromDependencies([]), /exact ordered contract/);
+  assert.throws(
+    () => readinessFromDependencies([{ name: "synthetic", status: "verified" }]),
+    /exact ordered contract/,
+  );
 });
 
 test("accepts a closed early-failure continuity report and rejects a ready failure", () => {
@@ -110,8 +153,54 @@ test("accepts a closed early-failure continuity report and rejects a ready failu
   );
 });
 
+test("completed continuity evidence requires a populated migration-ledger summary", () => {
+  const completed = failedContinuityReport({
+    checks: Object.fromEntries(
+      Object.keys(failedContinuityReport().checks).map((name) => [name, true]),
+    ),
+    dependencies: dependencies("verified"),
+    export: { bytes: 1_024, sha256: "a".repeat(64) },
+    failure: { class: "none", stage: "none" },
+    migrationLedger: {
+      count: 18,
+      head: "0018_global_logout.sql",
+      sha256: "b".repeat(64),
+    },
+    ready: true,
+    schema: {
+      foreignKeys: "ok",
+      integrity: "ok",
+      sha256: "c".repeat(64),
+    },
+    status: "synthetic_pass",
+  });
+  assert.doesNotThrow(() => validateClosedReport(completed));
+  for (const migrationLedger of [
+    { count: 0, head: null, sha256: null },
+    { count: 18, head: "0001_global_logout.sql", sha256: "b".repeat(64) },
+    { count: 18, head: "not-a-migration", sha256: "b".repeat(64) },
+    { count: 18, head: "0018_global_logout.sql", sha256: "0" },
+  ]) {
+    assert.throws(() =>
+      validateClosedReport({ ...completed, migrationLedger }),
+    );
+  }
+});
+
 test("closed report validation rejects extra fields and sensitive values", () => {
   assert.doesNotThrow(() => validateClosedReport(drillReport()));
+  assert.throws(() =>
+    validateClosedReport(
+      drillReport({
+        profile: {
+          concurrency: 1,
+          durationMs: 100,
+          requestsPerSecond: 1,
+          totalRequests: 1,
+        },
+      }),
+    ),
+  );
   assert.throws(() => validateClosedReport(drillReport({ rawBody: "no" })), /unapproved fields/);
   assert.throws(
     () =>
@@ -134,9 +223,16 @@ test("closed report validation rejects extra fields and sensitive values", () =>
 });
 
 test("R2 source presence cannot make an unexecuted drill ready", () => {
-  const report = drillReport({
-    dependencies: [{ name: "encrypted_r2_archive", status: "present" }],
+  const blockedDependencies = dependencies("verified").map((entry) =>
+    entry.name === "encrypted_r2_archive"
+      ? { ...entry, status: "source_present_unverified" }
+      : entry,
+  );
+  const report = completedDrillReport({
+    dependencies: blockedDependencies,
     invariants: { d1: "passed", queue: "passed", r2: "not_run" },
+    ready: false,
+    status: "blocked",
   });
   assert.doesNotThrow(() => validateClosedReport(report));
   assert.throws(() =>
@@ -145,6 +241,91 @@ test("R2 source presence cannot make an unexecuted drill ready", () => {
       ready: true,
       status: "synthetic_pass",
     }),
+  );
+});
+
+test("ready drill evidence requires the exact scenario and request contract", () => {
+  const valid = completedDrillReport();
+  assert.doesNotThrow(() => validateClosedReport(valid));
+  const mutations = [
+    [],
+    valid.scenarios.slice(0, -1),
+    [valid.scenarios[0], valid.scenarios[0], ...valid.scenarios.slice(2)],
+    valid.scenarios.map((entry, index) =>
+      index === 0
+        ? scenario(entry.id, {
+            expectedStatusCount: 0,
+            requestCount: 0,
+            throughputPerSecond: 0,
+          })
+        : entry,
+    ),
+    valid.scenarios.map((entry, index) =>
+      index === 0
+        ? scenario(entry.id, {
+            expectedStatusCount: 0,
+            requestCount: DRILL_REQUESTS_PER_SCENARIO,
+          })
+        : entry,
+    ),
+  ];
+  for (const scenarios of mutations) {
+    assert.throws(() =>
+      validateClosedReport({
+        ...valid,
+        scenarios,
+      }),
+    );
+  }
+});
+
+test("drill evidence rejects inconsistent timing and throughput metrics", () => {
+  const valid = completedDrillReport();
+  for (const mutation of [
+    { p50Ms: 5, p95Ms: 2 },
+    { maxMs: DRILL_PROFILE.durationMs + 1_001 },
+    { throughputPerSecond: 0 },
+    { throughputPerSecond: DRILL_PROFILE.requestsPerSecond + 1 },
+  ]) {
+    assert.throws(() =>
+      validateClosedReport({
+        ...valid,
+        scenarios: valid.scenarios.map((entry, index) =>
+          index === 0 ? { ...entry, ...mutation } : entry,
+        ),
+      }),
+    );
+  }
+});
+
+test("dirty and unavailable source states are explicit and can never be ready", () => {
+  assert.doesNotThrow(() =>
+    validateClosedReport(
+      failedContinuityReport({ sourceState: "dirty" }),
+    ),
+  );
+  assert.doesNotThrow(() =>
+    validateClosedReport(
+      failedContinuityReport({ sourceCommit: null, sourceState: "unavailable" }),
+    ),
+  );
+  assert.throws(() =>
+    validateClosedReport(
+      completedDrillReport({ sourceState: "dirty" }),
+    ),
+  );
+  assert.throws(() =>
+    validateClosedReport(
+      failedContinuityReport({
+        sourceCommit: "0".repeat(40),
+        sourceState: "clean",
+      }),
+    ),
+  );
+  assert.throws(() =>
+    validateClosedReport(
+      drillReport({ status: "synthetic_pass" }),
+    ),
   );
 });
 
@@ -173,7 +354,9 @@ test("emergency writer bypasses the main schema but keeps a minimal closed repor
       kind: "continuity_failure",
       mode: "local",
       ready: false,
-      schemaVersion: 1,
+      schemaVersion: 2,
+      sourceCommit: null,
+      sourceState: "unavailable",
       status: "blocked",
     });
     assert.equal(statSync(filename).mode & 0o777, 0o600);

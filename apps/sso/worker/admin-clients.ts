@@ -72,9 +72,36 @@ interface ClientTrustInput {
   termsOfServiceUrl?: unknown;
 }
 
+interface UpdateClientInput extends ClientTrustInput {
+  enableEndSession?: unknown;
+  expectedUpdatedAt?: unknown;
+  grantTypes?: unknown;
+  name?: unknown;
+  postLogoutRedirectUris?: unknown;
+  redirectUris?: unknown;
+  scopes?: unknown;
+  uri?: unknown;
+}
+
+const CLIENT_UPDATE_FIELDS = new Set([
+  "backchannelLogoutUri",
+  "developerName",
+  "enableEndSession",
+  "expectedUpdatedAt",
+  "grantTypes",
+  "name",
+  "postLogoutRedirectUris",
+  "privacyPolicyUrl",
+  "redirectUris",
+  "scopes",
+  "termsOfServiceUrl",
+  "uri",
+]);
+
 interface AdminClientRow {
   backchannelLogoutUri: string | null;
   clientId: string;
+  enableEndSession: number | null;
   name: string | null;
   uri: string | null;
   disabled: number | null;
@@ -96,26 +123,42 @@ interface AdminClientRow {
 
 interface ManagedClientRow {
   backchannelLogoutUri: string | null;
+  enableEndSession: number | null;
+  grantTypes: string | null;
   id: string;
+  name: string | null;
   ownerUserId: string | null;
+  postLogoutRedirectUris: string | null;
   public: number | null;
+  redirectUris: string;
   clientSecret: string | null;
+  scopes: string | null;
   tos: string | null;
   policy: string | null;
   metadata: string | null;
+  uri: string | null;
+  updatedAt: string | null;
 }
 
 interface ManagedClientGuard {
   actor: AdminActorCommitGuard;
+  authorizationEventId?: string;
   clientId: string;
   clientRowId: string;
   expectedOwnerUserId?: string;
+  expectedUpdatedAt?: string | null;
 }
 
+// Before the guarded success audit exists, every statement revalidates the
+// actor/session. Later statements in that same D1 batch use the exact audit ID
+// as the transaction-local authorization snapshot, matching the repository's
+// established admin/recovery mutation pattern.
 const MANAGED_CLIENT_PREDICATE = `id = ?
   AND clientId = ?
   AND (? IS NULL OR ownerUserId = ?)
-  AND ${ADMIN_ACTOR_COMMIT_PREDICATE}`;
+  AND (? = 0 OR updatedAt IS ?)
+  AND (? IS NULL OR EXISTS (SELECT 1 FROM audit_event WHERE id = ?))
+  AND (? IS NOT NULL OR ${ADMIN_ACTOR_COMMIT_PREDICATE})`;
 
 function managedClientGuardBindings(guard: ManagedClientGuard): unknown[] {
   return [
@@ -123,6 +166,11 @@ function managedClientGuardBindings(guard: ManagedClientGuard): unknown[] {
     guard.clientId,
     guard.expectedOwnerUserId ?? null,
     guard.expectedOwnerUserId ?? null,
+    guard.expectedUpdatedAt === undefined ? 0 : 1,
+    guard.expectedUpdatedAt ?? null,
+    guard.authorizationEventId ?? null,
+    guard.authorizationEventId ?? null,
+    guard.authorizationEventId ?? null,
     ...adminActorCommitBindings(guard.actor),
   ];
 }
@@ -215,7 +263,15 @@ function validStringArray(
   return (
     Array.isArray(value) &&
     value.length <= maxCount &&
-    value.every((entry) => typeof entry === "string")
+    value.every((entry) => typeof entry === "string") &&
+    new Set(value).size === value.length
+  );
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((entry) => right.includes(entry))
   );
 }
 
@@ -259,6 +315,7 @@ function clientView(row: AdminClientRow) {
     backchannelLogoutUri: row.backchannelLogoutUri,
     uri: row.uri,
     disabled: row.disabled === 1,
+    enableEndSession: row.enableEndSession === 1,
     public: row.public === 1,
     scopes: parseJsonStringArray(row.scopes),
     redirectUris: parseJsonStringArray(row.redirectUris),
@@ -307,6 +364,52 @@ function pendingAuthorizationCodeCleanup(
   ).bind(guard.clientId, ...managedClientGuardBindings(guard));
 }
 
+function clientConsentCleanup(env: Env, guard: ManagedClientGuard) {
+  return env.PG72_ID_DB.prepare(
+    `DELETE FROM oauthConsent
+      WHERE clientId = ?
+        AND EXISTS (
+          SELECT 1
+            FROM oauthClient
+           WHERE ${MANAGED_CLIENT_PREDICATE}
+        )`,
+  ).bind(guard.clientId, ...managedClientGuardBindings(guard));
+}
+
+function clientAccessTokenCleanup(env: Env, guard: ManagedClientGuard) {
+  return env.PG72_ID_DB.prepare(
+    `DELETE FROM oauthAccessToken
+      WHERE clientId = ?
+        AND EXISTS (
+          SELECT 1
+            FROM oauthClient
+           WHERE ${MANAGED_CLIENT_PREDICATE}
+        )`,
+  ).bind(guard.clientId, ...managedClientGuardBindings(guard));
+}
+
+function clientRefreshTokenRevocation(
+  env: Env,
+  guard: ManagedClientGuard,
+  revokedAt: string,
+) {
+  return env.PG72_ID_DB.prepare(
+    `UPDATE oauthRefreshToken
+        SET revoked = ?
+      WHERE clientId = ?
+        AND revoked IS NULL
+        AND EXISTS (
+          SELECT 1
+            FROM oauthClient
+           WHERE ${MANAGED_CLIENT_PREDICATE}
+        )`,
+  ).bind(
+    revokedAt,
+    guard.clientId,
+    ...managedClientGuardBindings(guard),
+  );
+}
+
 /**
  * Whether the actor may manage every client (admin/bootadmin) or only the
  * clients they own (developer).
@@ -327,7 +430,9 @@ async function loadManagedClient(
 ): Promise<ManagedClientRow | null> {
   const row = await c.env.PG72_ID_DB.prepare(
     `SELECT id, ownerUserId, public, clientSecret, tos, policy, metadata,
-            backchannelLogoutUri
+            backchannelLogoutUri, name, uri, redirectUris,
+            postLogoutRedirectUris, scopes, grantTypes, enableEndSession,
+            updatedAt
        FROM oauthClient
       WHERE clientId = ?
       LIMIT 1`,
@@ -385,7 +490,7 @@ adminClientRoutes.get("/", async (c) => {
   // including unowned (NULL owner) clients such as the seeded first-party
   // relying parties.
   const result = await c.env.PG72_ID_DB.prepare(
-    `SELECT clientId, name, uri, disabled, public, scopes, redirectUris,
+    `SELECT clientId, name, uri, disabled, enableEndSession, public, scopes, redirectUris,
             postLogoutRedirectUris, grantTypes, tokenEndpointAuthMethod,
             tos, policy, metadata, backchannelLogoutUri,
             CASE WHEN clientSecret IS NOT NULL
@@ -487,6 +592,7 @@ adminClientRoutes.post("/provision-mail-introspector", async (c) => {
         clientId: MAIL_INTROSPECTION_CLIENT_ID,
         name: "PGID Mail Token Introspection",
         disabled: false,
+        enableEndSession: false,
         public: false,
         scopes: [],
         redirectUris: [],
@@ -774,6 +880,7 @@ adminClientRoutes.post("/", async (c) => {
         backchannelLogoutUri,
         uri,
         disabled: false,
+        enableEndSession,
         public: isPublic,
         scopes,
         redirectUris,
@@ -810,19 +917,179 @@ adminClientRoutes.patch("/:clientId", async (c) => {
     return c.json({ error: "trusted_client_locked" }, 409);
   }
   // Same ownership rule as every other mutation: developers may only edit
-  // the trust metadata of clients they own (404 keeps client IDs private).
+  // clients they own (404 keeps client IDs private).
   const managedClient = await loadManagedClient(c, gate.actor, clientId);
   if (!managedClient) {
     return c.json({ error: "client_not_found" }, 404);
   }
-  const guard = mutationGuard(gate.actor, clientId, managedClient);
-
-  const input = await readJson<ClientTrustInput>(c.req.raw);
-  if (!input) {
+  const rawInput = await readJson<unknown>(c.req.raw);
+  if (
+    !rawInput ||
+    typeof rawInput !== "object" ||
+    Array.isArray(rawInput)
+  ) {
     return c.json({ error: "invalid_request" }, 400);
+  }
+  const inputFields = Object.keys(rawInput);
+  const mutationFields = inputFields.filter(
+    (field) => field !== "expectedUpdatedAt",
+  );
+  if (
+    mutationFields.length === 0 ||
+    inputFields.some((field) => !CLIENT_UPDATE_FIELDS.has(field))
+  ) {
+    return c.json({ error: "invalid_client_update" }, 400);
+  }
+  const input = rawInput as UpdateClientInput;
+  if (
+    !Object.prototype.hasOwnProperty.call(rawInput, "expectedUpdatedAt") ||
+    (input.expectedUpdatedAt !== null &&
+      (typeof input.expectedUpdatedAt !== "string" ||
+        input.expectedUpdatedAt.length === 0 ||
+        input.expectedUpdatedAt.length > 64))
+  ) {
+    return c.json({ error: "invalid_client_version" }, 400);
+  }
+  if (input.expectedUpdatedAt !== managedClient.updatedAt) {
+    return c.json({ error: "management_state_changed" }, 409);
+  }
+  const versionGuard: ManagedClientGuard = {
+    ...mutationGuard(gate.actor, clientId, managedClient),
+    expectedUpdatedAt: input.expectedUpdatedAt,
+  };
+
+  const authorizationFieldUpdate = mutationFields.some((field) =>
+    [
+      "enableEndSession",
+      "grantTypes",
+      "postLogoutRedirectUris",
+      "redirectUris",
+      "scopes",
+    ].includes(field),
+  );
+  if (
+    clientId === MAIL_INTROSPECTION_CLIENT_ID &&
+    authorizationFieldUpdate
+  ) {
+    return c.json({ error: "system_client_protocol_locked" }, 409);
   }
 
   const config = readRuntimeConfig(c.env);
+
+  let name = managedClient.name;
+  if (input.name !== undefined) {
+    if (typeof input.name !== "string") {
+      return c.json({ error: "invalid_client_name" }, 400);
+    }
+    const nextName = input.name.trim();
+    if (!nextName || nextName.length > CLIENT_NAME_MAX_LENGTH) {
+      return c.json({ error: "invalid_client_name" }, 400);
+    }
+    name = nextName;
+  }
+
+  let uri = managedClient.uri;
+  if (input.uri !== undefined) {
+    if (input.uri === null || input.uri === "") {
+      uri = null;
+    } else if (
+      typeof input.uri === "string" &&
+      input.uri.length <= CLIENT_URI_MAX_LENGTH &&
+      validRedirectUri(input.uri, config.environment)
+    ) {
+      uri = input.uri;
+    } else {
+      return c.json({ error: "invalid_client_uri" }, 400);
+    }
+  }
+
+  const currentRedirectUris = parseJsonStringArray(managedClient.redirectUris);
+  let redirectUris = currentRedirectUris;
+  let redirectUrisStorage = managedClient.redirectUris;
+  if (input.redirectUris !== undefined) {
+    if (
+      !validStringArray(input.redirectUris, REDIRECT_URI_MAX_COUNT) ||
+      input.redirectUris.length === 0 ||
+      !input.redirectUris.every((redirectUri) =>
+        validRedirectUri(redirectUri, config.environment),
+      )
+    ) {
+      return c.json({ error: "invalid_redirect_uri" }, 400);
+    }
+    redirectUris = input.redirectUris;
+    redirectUrisStorage = JSON.stringify(redirectUris);
+  }
+
+  const currentPostLogoutRedirectUris = parseJsonStringArray(
+    managedClient.postLogoutRedirectUris,
+  );
+  let postLogoutRedirectUris = currentPostLogoutRedirectUris;
+  let postLogoutRedirectUrisStorage = managedClient.postLogoutRedirectUris;
+  if (input.postLogoutRedirectUris !== undefined) {
+    if (
+      !validStringArray(
+        input.postLogoutRedirectUris,
+        REDIRECT_URI_MAX_COUNT,
+      ) ||
+      !input.postLogoutRedirectUris.every((redirectUri) =>
+        validRedirectUri(redirectUri, config.environment),
+      )
+    ) {
+      return c.json({ error: "invalid_post_logout_redirect_uri" }, 400);
+    }
+    postLogoutRedirectUris = input.postLogoutRedirectUris;
+    postLogoutRedirectUrisStorage = postLogoutRedirectUris.length
+      ? JSON.stringify(postLogoutRedirectUris)
+      : null;
+  }
+
+  const currentScopes = parseJsonStringArray(managedClient.scopes);
+  let scopes = currentScopes;
+  let scopesStorage = managedClient.scopes;
+  if (input.scopes !== undefined) {
+    if (
+      !validStringArray(input.scopes, ALLOWED_SCOPES.size) ||
+      input.scopes.length === 0 ||
+      !input.scopes.every((scope) => ALLOWED_SCOPES.has(scope)) ||
+      !input.scopes.includes("openid")
+    ) {
+      return c.json({ error: "invalid_scopes" }, 400);
+    }
+    scopes = input.scopes;
+    scopesStorage = JSON.stringify(scopes);
+  }
+
+  const currentGrantTypes = parseJsonStringArray(managedClient.grantTypes);
+  let grantTypes = currentGrantTypes;
+  let grantTypesStorage = managedClient.grantTypes;
+  if (input.grantTypes !== undefined) {
+    if (
+      !validStringArray(input.grantTypes, ALLOWED_GRANT_TYPES.size) ||
+      !input.grantTypes.every((grant) => ALLOWED_GRANT_TYPES.has(grant)) ||
+      !input.grantTypes.includes("authorization_code")
+    ) {
+      return c.json({ error: "invalid_grant_types" }, 400);
+    }
+    grantTypes = input.grantTypes;
+    grantTypesStorage = JSON.stringify(grantTypes);
+  }
+  if (
+    (input.scopes !== undefined || input.grantTypes !== undefined) &&
+    grantTypes.includes("refresh_token") &&
+    !scopes.includes("offline_access")
+  ) {
+    return c.json({ error: "refresh_token_requires_offline_access" }, 400);
+  }
+
+  let enableEndSession = managedClient.enableEndSession === 1;
+  let enableEndSessionStorage = managedClient.enableEndSession;
+  if (input.enableEndSession !== undefined) {
+    if (typeof input.enableEndSession !== "boolean") {
+      return c.json({ error: "invalid_request" }, 400);
+    }
+    enableEndSession = input.enableEndSession;
+    enableEndSessionStorage = enableEndSession ? 1 : 0;
+  }
 
   // Preserve unrelated provider metadata while keeping the interoperable JSON
   // key in sync with the validated dedicated delivery column.
@@ -877,33 +1144,80 @@ adminClientRoutes.patch("/:clientId", async (c) => {
     privacyPolicyUrl = parsed.url;
   }
 
-  const now = new Date().toISOString();
+  let now = new Date().toISOString();
+  if (now === input.expectedUpdatedAt) {
+    now = new Date(Date.now() + 1).toISOString();
+  }
+  const redirectUrisChanged = !sameStringSet(
+    currentRedirectUris,
+    redirectUris,
+  );
+  const permissionsChanged =
+    !sameStringSet(currentScopes, scopes) ||
+    !sameStringSet(currentGrantTypes, grantTypes);
+  const settingsUpdated = mutationFields.some((field) =>
+    [
+      "enableEndSession",
+      "grantTypes",
+      "name",
+      "postLogoutRedirectUris",
+      "redirectUris",
+      "scopes",
+      "uri",
+    ].includes(field),
+  );
+  const auditEvent = clientAuditEvent(
+    settingsUpdated ? "oauth_client.updated" : "oauth_client.trust_updated",
+    clientId,
+    gate.actor.userId,
+  );
+  const commitGuard: ManagedClientGuard = {
+    ...versionGuard,
+    authorizationEventId: auditEvent.eventId,
+  };
   const update = c.env.PG72_ID_DB.prepare(
     `UPDATE oauthClient
-        SET metadata = ?, tos = ?, policy = ?, backchannelLogoutUri = ?,
-            updatedAt = ?
+        SET name = ?, uri = ?, redirectUris = ?, postLogoutRedirectUris = ?,
+            scopes = ?, grantTypes = ?, enableEndSession = ?, metadata = ?,
+            tos = ?, policy = ?, backchannelLogoutUri = ?, updatedAt = ?
       WHERE ${MANAGED_CLIENT_PREDICATE}`,
   )
     .bind(
+      name,
+      uri,
+      redirectUrisStorage,
+      postLogoutRedirectUrisStorage,
+      scopesStorage,
+      grantTypesStorage,
+      enableEndSessionStorage,
       JSON.stringify(metadata),
       termsOfServiceUrl,
       privacyPolicyUrl,
       backchannelLogoutUri,
       now,
-      ...managedClientGuardBindings(guard),
+      ...managedClientGuardBindings(commitGuard),
     );
-  const auditEvent = clientAuditEvent(
-    "oauth_client.trust_updated",
-    clientId,
-    gate.actor.userId,
-  );
-  const results = await c.env.PG72_ID_DB.batch([
-    update,
-    auditInsertForExistingClientStatement(c.env, auditEvent, guard),
-  ]);
+  const statements = [
+    auditInsertForExistingClientStatement(c.env, auditEvent, versionGuard),
+  ];
+  if (redirectUrisChanged || permissionsChanged) {
+    statements.push(
+      pendingAuthorizationCodeCleanup(c.env, commitGuard),
+      clientConsentCleanup(c.env, commitGuard),
+    );
+  }
+  if (permissionsChanged) {
+    statements.push(
+      clientAccessTokenCleanup(c.env, commitGuard),
+      clientRefreshTokenRevocation(c.env, commitGuard, now),
+    );
+  }
+  const updateStatementIndex = statements.length;
+  statements.push(update);
+  const results = await c.env.PG72_ID_DB.batch(statements);
   if (
-    results[0]?.meta.changes !== 1 ||
-    results[1]?.meta.changes !== 1
+    (results[0]?.meta.changes ?? 0) < 1 ||
+    results[updateStatementIndex]?.meta.changes !== 1
   ) {
     return c.json({ error: "management_state_changed" }, 409);
   }
@@ -911,10 +1225,17 @@ adminClientRoutes.patch("/:clientId", async (c) => {
 
   return c.json({
     clientId,
+    name: name ?? clientId,
     developerName,
     privacyPolicyUrl,
     termsOfServiceUrl,
     backchannelLogoutUri,
+    uri,
+    redirectUris,
+    postLogoutRedirectUris,
+    scopes,
+    grantTypes,
+    enableEndSession,
     updatedAt: now,
   });
 });

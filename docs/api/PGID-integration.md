@@ -149,7 +149,11 @@ Client 建立時的實際契約（對照 `apps/sso/worker/admin-clients.ts`）�
 
 Client secret 為 `pg72_cs_<suffix>` 格式，**只在建立時回傳一次**，資料庫只存 hash。遺失只能重新輪替。
 
-所有 client mutation（建立、trust metadata 更新、secret rotation、停用 / 啟用、刪除與 system-client provisioning）都必須使用有效的登入 session cookie，且請求的 `Origin` 必須精確等於 PGID 的 `AUTH_BASE_URL`；mutation 缺少 `Origin` 或來源不符時回 `403 {"error":"invalid_origin"}`。這些操作也要求 session 的 `createdAt` 距目前時間小於 10 分鐘；過期或未來時間都回精確的 `403 {"code":"SESSION_NOT_FRESH","error":"fresh_session_required"}`。
+`PATCH /api/admin/clients/:clientId` 可更新 `name`、nullable `uri`、`redirectUris`、`postLogoutRedirectUris`、`scopes`、`grantTypes`、`enableEndSession`、`developerName`、`termsOfServiceUrl`、`privacyPolicyUrl` 與 `backchannelLogoutUri`。Request 必須另帶 GET list 原樣回傳的 `expectedUpdatedAt`：它是 required、最多 64 字元的 opaque exact-version precondition，可為 `null`，不得由呼叫端解析或重組為特定 timestamp 格式。缺少、空字串、既非字串亦非 `null` 或超長時回 `400 invalid_client_version`；bounded 值與目前 row 不相等時回 `409 management_state_changed`，呼叫端必須重新載入後再編輯。`clientId`、public/confidential 類型、`tokenEndpointAuthMethod`、secret、owner、PKCE/consent 規則、response/subject type 與 disabled 狀態不可由此端點修改；未知或不可變欄位回 `400 invalid_client_update`。`pgid-mail-introspect` 的 protocol/authorization 欄位另受 system-client lock 保護。
+
+Redirect URI membership 變更會在更新 client 的同一筆 D1 batch 清除 pending authorization code 與 consent。Scope 或 grant membership 變更還會刪除 access token、撤銷 live refresh token，並清除 pending code 與 consent。Success audit 會重驗 managed-client identity、actor/session state 及 `expectedUpdatedAt`；cleanup/update 依賴同一 batch 建立的 exact audit event，並再次重驗 row、owner 與舊版本，但不重新計算會在 transaction 期間變動的 session 時鐘。Client 被並行更新、刪除或替換時整筆 request 不會寫入或清理較新的狀態。只更新名稱、URI 或 trust/logout metadata 不會撤銷既有 token。
+
+所有 client mutation（建立、設定更新、secret rotation、停用 / 啟用、刪除與 system-client provisioning）都必須使用有效的登入 session cookie，且請求的 `Origin` 必須精確等於 PGID 的 `AUTH_BASE_URL`；mutation 缺少 `Origin` 或來源不符時回 `403 {"error":"invalid_origin"}`。這些操作也要求 session 的 `createdAt` 距目前時間小於 10 分鐘；過期或未來時間都回精確的 `403 {"code":"SESSION_NOT_FRESH","error":"fresh_session_required"}`。
 
 此處的 fresh 只代表 session age gate，**不等於**使用者剛完成 Passkey 驗證。Local source 的所有 client mutation 還要求同一 D1 session 有未過期的 Passkey step-up timestamp；production 尚未套用 `0014`、部署或完成獨立 review，因此遠端 rollout blocker 仍未關閉。
 

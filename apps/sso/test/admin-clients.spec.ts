@@ -28,13 +28,17 @@ interface ClientRow {
   clientId: string;
   clientSecret: string | null;
   disabled: number;
+  enableEndSession: number;
+  grantTypes: string;
+  name: string;
+  postLogoutRedirectUris: string | null;
   skipConsent: number;
   requirePKCE: number;
   public: number;
   tokenEndpointAuthMethod: string;
   scopes: string;
-  grantTypes: string;
   redirectUris: string;
+  uri: string | null;
 }
 
 async function createAdmin() {
@@ -65,6 +69,29 @@ async function createClient(
     status: response.status,
     payload: (await response.json()) as CreatedClientResponse,
   };
+}
+
+async function patchClient(
+  headers: Headers,
+  clientId: string,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  const versionedBody = Object.prototype.hasOwnProperty.call(
+    body,
+    "expectedUpdatedAt",
+  )
+    ? body
+    : {
+        ...body,
+        expectedUpdatedAt: await fetchClientUpdatedAt(clientId),
+      };
+  return exports.default.fetch(
+    new Request(`${CLIENTS_URL}/${clientId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify(versionedBody),
+    }),
+  );
 }
 
 function confidentialClientBody(clientId: string): Record<string, unknown> {
@@ -139,14 +166,108 @@ async function mintAuthorizationCode(
 
 async function fetchClientRow(clientId: string): Promise<ClientRow | null> {
   return env.PG72_ID_DB.prepare(
-    `SELECT clientId, clientSecret, disabled, skipConsent, requirePKCE,
-            public, tokenEndpointAuthMethod, scopes, grantTypes, redirectUris
+    `SELECT clientId, clientSecret, disabled, enableEndSession, grantTypes,
+            name, postLogoutRedirectUris, skipConsent, requirePKCE, public,
+            tokenEndpointAuthMethod, scopes, redirectUris, uri
        FROM oauthClient
       WHERE clientId = ?
       LIMIT 1`,
   )
     .bind(clientId)
     .first<ClientRow>();
+}
+
+async function fetchClientUpdatedAt(clientId: string): Promise<string | null> {
+  const row = await env.PG72_ID_DB.prepare(
+    "SELECT updatedAt FROM oauthClient WHERE clientId = ? LIMIT 1",
+  )
+    .bind(clientId)
+    .first<{ updatedAt: string | null }>();
+  return row?.updatedAt ?? null;
+}
+
+async function seedClientProtocolState(
+  clientId: string,
+  userId: string,
+): Promise<void> {
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 60 * 60 * 1000).toISOString();
+  await env.PG72_ID_DB.batch([
+    env.PG72_ID_DB.prepare(
+      `INSERT INTO oauthConsent (id, clientId, userId, scopes, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      crypto.randomUUID(),
+      clientId,
+      userId,
+      '["openid","profile","email","offline_access"]',
+      now.toISOString(),
+      now.toISOString(),
+    ),
+    env.PG72_ID_DB.prepare(
+      `INSERT INTO oauthAccessToken
+        (id, token, clientId, userId, expiresAt, createdAt, scopes)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      crypto.randomUUID(),
+      crypto.randomUUID(),
+      clientId,
+      userId,
+      expiresAt,
+      now.toISOString(),
+      '["openid","profile","email","offline_access"]',
+    ),
+    env.PG72_ID_DB.prepare(
+      `INSERT INTO oauthRefreshToken
+        (id, token, clientId, userId, expiresAt, createdAt, scopes)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      crypto.randomUUID(),
+      crypto.randomUUID(),
+      clientId,
+      userId,
+      expiresAt,
+      now.toISOString(),
+      '["openid","profile","email","offline_access"]',
+    ),
+    env.PG72_ID_DB.prepare(
+      `INSERT INTO verification (id, identifier, value, expiresAt, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      crypto.randomUUID(),
+      crypto.randomUUID(),
+      JSON.stringify({
+        type: "authorization_code",
+        userId,
+        query: { client_id: clientId },
+      }),
+      expiresAt,
+      now.toISOString(),
+      now.toISOString(),
+    ),
+  ]);
+}
+
+async function clientProtocolState(clientId: string) {
+  return env.PG72_ID_DB.prepare(
+    `SELECT
+      (SELECT COUNT(*) FROM oauthAccessToken WHERE clientId = ?1) AS access_tokens,
+      (SELECT COUNT(*) FROM oauthRefreshToken
+        WHERE clientId = ?1 AND revoked IS NULL) AS live_refresh_tokens,
+      (SELECT COUNT(*) FROM oauthConsent WHERE clientId = ?1) AS consents,
+      (SELECT COUNT(*) FROM verification
+        WHERE CASE WHEN json_valid(value) THEN
+          json_extract(value, '$.type') = 'authorization_code'
+          AND json_extract(value, '$.query.client_id') = ?1
+        ELSE 0 END) AS authorization_codes`,
+  )
+    .bind(clientId)
+    .first<{
+      access_tokens: number;
+      authorization_codes: number;
+      consents: number;
+      live_refresh_tokens: number;
+    }>();
 }
 
 function interposeAfterManagedClientLoad(
@@ -1283,6 +1404,7 @@ describe("Admin OAuth client management", () => {
 
     const created = await createClient(headers, confidentialClientBody(clientId));
     expect(created.status).toBe(201);
+    await seedClientProtocolState(clientId, userId);
 
     // Simulate unrelated provider-level metadata that this endpoint must keep.
     await env.PG72_ID_DB.prepare(
@@ -1293,19 +1415,13 @@ describe("Admin OAuth client management", () => {
       .bind(clientId)
       .run();
 
-    const patchResponse = await exports.default.fetch(
-      new Request(`${CLIENTS_URL}/${clientId}`, {
-        method: "PATCH",
-        headers,
-        body: JSON.stringify({
-          developerName: "PG72 Diary Team",
-          privacyPolicyUrl: "https://diary.pg72.tw/privacy",
-          termsOfServiceUrl: null,
-          backchannelLogoutUri:
-            "https://diary.pg72.tw/api/auth/backchannel-logout",
-        }),
-      }),
-    );
+    const patchResponse = await patchClient(headers, clientId, {
+      developerName: "PG72 Diary Team",
+      privacyPolicyUrl: "https://diary.pg72.tw/privacy",
+      termsOfServiceUrl: null,
+      backchannelLogoutUri:
+        "https://diary.pg72.tw/api/auth/backchannel-logout",
+    });
     expect(patchResponse.status).toBe(200);
     expect(await patchResponse.json()).toMatchObject({
       clientId,
@@ -1338,14 +1454,16 @@ describe("Admin OAuth client management", () => {
       developer_name: "PG72 Diary Team",
       purpose: "diary-integration",
     });
+    expect(await clientProtocolState(clientId)).toEqual({
+      access_tokens: 1,
+      authorization_codes: 1,
+      consents: 1,
+      live_refresh_tokens: 1,
+    });
 
-    const invalidUpdate = await exports.default.fetch(
-      new Request(`${CLIENTS_URL}/${clientId}`, {
-        method: "PATCH",
-        headers,
-        body: JSON.stringify({ developerName: "" }),
-      }),
-    );
+    const invalidUpdate = await patchClient(headers, clientId, {
+      developerName: "",
+    });
     expect(invalidUpdate.status).toBe(400);
     expect(await invalidUpdate.json()).toMatchObject({
       error: "invalid_developer_name",
@@ -1353,13 +1471,9 @@ describe("Admin OAuth client management", () => {
 
     const crossOriginHeaders = new Headers(headers);
     crossOriginHeaders.set("Origin", "https://attacker.example");
-    const crossOrigin = await exports.default.fetch(
-      new Request(`${CLIENTS_URL}/${clientId}`, {
-        method: "PATCH",
-        headers: crossOriginHeaders,
-        body: JSON.stringify({ developerName: "Attacker" }),
-      }),
-    );
+    const crossOrigin = await patchClient(crossOriginHeaders, clientId, {
+      developerName: "Attacker",
+    });
     expect(crossOrigin.status).toBe(403);
 
     const audit = await env.PG72_ID_DB.prepare(
@@ -1369,6 +1483,611 @@ describe("Admin OAuth client management", () => {
       .bind(clientId)
       .first<{ outcome: string; subject_id: string }>();
     expect(audit).toEqual({ outcome: "success", subject_id: userId });
+  });
+
+  it("edits all mutable client settings and returns them from the list", async () => {
+    const { headers, userId } = await createAdmin();
+    const clientId = `settings-edit-${crypto.randomUUID()}`;
+    const created = await createClient(headers, confidentialClientBody(clientId));
+    expect(created.status).toBe(201);
+    const original = await env.PG72_ID_DB.prepare(
+      "SELECT clientSecret, ownerUserId, public, metadata FROM oauthClient WHERE clientId = ?",
+    )
+      .bind(clientId)
+      .first<{
+        clientSecret: string;
+        metadata: string;
+        ownerUserId: string;
+        public: number;
+      }>();
+
+    const response = await patchClient(headers, clientId, {
+      name: "  Updated RP  ",
+      uri: "https://updated.example/app",
+      developerName: "Updated Team",
+      privacyPolicyUrl: "https://updated.example/privacy",
+      termsOfServiceUrl: "https://updated.example/terms",
+      backchannelLogoutUri: "https://updated.example/backchannel",
+      redirectUris: [
+        "https://updated.example/callback",
+        "https://updated.example/callback/secondary",
+      ],
+      postLogoutRedirectUris: ["https://updated.example/signed-out"],
+      scopes: ["openid", "profile", "offline_access"],
+      grantTypes: ["authorization_code", "refresh_token"],
+      enableEndSession: true,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      clientId,
+      name: "Updated RP",
+      uri: "https://updated.example/app",
+      developerName: "Updated Team",
+      redirectUris: [
+        "https://updated.example/callback",
+        "https://updated.example/callback/secondary",
+      ],
+      postLogoutRedirectUris: ["https://updated.example/signed-out"],
+      scopes: ["openid", "profile", "offline_access"],
+      grantTypes: ["authorization_code", "refresh_token"],
+      enableEndSession: true,
+    });
+
+    const row = await fetchClientRow(clientId);
+    expect(row).toMatchObject({
+      name: "Updated RP",
+      uri: "https://updated.example/app",
+      enableEndSession: 1,
+      public: original?.public,
+      clientSecret: original?.clientSecret,
+    });
+    expect(JSON.parse(row?.redirectUris ?? "[]")).toEqual([
+      "https://updated.example/callback",
+      "https://updated.example/callback/secondary",
+    ]);
+    expect(JSON.parse(row?.postLogoutRedirectUris ?? "[]")).toEqual([
+      "https://updated.example/signed-out",
+    ]);
+    expect(JSON.parse(row?.scopes ?? "[]")).toEqual([
+      "openid",
+      "profile",
+      "offline_access",
+    ]);
+    expect(JSON.parse(row?.grantTypes ?? "[]")).toEqual([
+      "authorization_code",
+      "refresh_token",
+    ]);
+
+    const preserved = await env.PG72_ID_DB.prepare(
+      "SELECT ownerUserId, metadata FROM oauthClient WHERE clientId = ?",
+    )
+      .bind(clientId)
+      .first<{ metadata: string; ownerUserId: string }>();
+    expect(preserved?.ownerUserId).toBe(original?.ownerUserId);
+    expect(JSON.parse(preserved?.metadata ?? "{}")).toMatchObject({
+      developer_name: "Updated Team",
+    });
+
+    const listedResponse = await exports.default.fetch(
+      new Request(CLIENTS_URL, { headers }),
+    );
+    const listed = ((await listedResponse.json()) as {
+      clients: Array<Record<string, unknown> & { clientId: string }>;
+    }).clients.find((client) => client.clientId === clientId);
+    expect(listed).toMatchObject({
+      enableEndSession: true,
+      name: "Updated RP",
+      postLogoutRedirectUris: ["https://updated.example/signed-out"],
+      uri: "https://updated.example/app",
+    });
+
+    const audit = await env.PG72_ID_DB.prepare(
+      `SELECT outcome, subject_id FROM audit_event
+        WHERE event_type = 'oauth_client.updated' AND client_id = ?`,
+    )
+      .bind(clientId)
+      .first<{ outcome: string; subject_id: string }>();
+    expect(audit).toEqual({ outcome: "success", subject_id: userId });
+  });
+
+  it("clears pending codes and consent when redirect URIs change", async () => {
+    const { headers, userId } = await createAdmin();
+    const clientId = `redirect-edit-${crypto.randomUUID()}`;
+    expect(
+      (await createClient(headers, confidentialClientBody(clientId))).status,
+    ).toBe(201);
+    await seedClientProtocolState(clientId, userId);
+
+    const response = await patchClient(headers, clientId, {
+      redirectUris: [`https://${clientId}.example/new-callback`],
+    });
+    expect(response.status).toBe(200);
+    expect(await clientProtocolState(clientId)).toEqual({
+      access_tokens: 1,
+      authorization_codes: 0,
+      consents: 0,
+      live_refresh_tokens: 1,
+    });
+  });
+
+  it("revokes credentials and consent when scopes or grants change", async () => {
+    const { headers, userId } = await createAdmin();
+    const cases: Array<[string, Record<string, unknown>]> = [
+      [
+        "scopes",
+        { scopes: ["openid", "profile", "offline_access"] },
+      ],
+      ["grants", { grantTypes: ["authorization_code"] }],
+    ];
+
+    for (const [label, body] of cases) {
+      const clientId = `permissions-${label}-${crypto.randomUUID()}`;
+      expect(
+        (await createClient(headers, confidentialClientBody(clientId))).status,
+      ).toBe(201);
+      await seedClientProtocolState(clientId, userId);
+
+      const response = await patchClient(headers, clientId, body);
+      expect(response.status, label).toBe(200);
+      expect(await clientProtocolState(clientId), label).toEqual({
+        access_tokens: 0,
+        authorization_codes: 0,
+        consents: 0,
+        live_refresh_tokens: 0,
+      });
+    }
+  });
+
+  it("uses the success audit as a transaction-stable actor authorization", async () => {
+    const { headers, sessionId, userId } = await createAdmin();
+    const clientId = `actor-snapshot-${crypto.randomUUID()}`;
+    expect(
+      (await createClient(headers, confidentialClientBody(clientId))).status,
+    ).toBe(201);
+    await seedClientProtocolState(clientId, userId);
+    await env.PG72_ID_DB.prepare(
+      `CREATE TRIGGER expire_actor_session_after_client_update_audit
+       AFTER INSERT ON audit_event
+       WHEN NEW.event_type = 'oauth_client.updated'
+       BEGIN
+         UPDATE session
+            SET expiresAt = '1970-01-01T00:00:00.000Z'
+          WHERE userId = NEW.actor_user_id;
+       END`,
+    ).run();
+
+    try {
+      const response = await patchClient(headers, clientId, {
+        scopes: ["openid", "profile", "offline_access"],
+      });
+      expect(response.status).toBe(200);
+      expect(await clientProtocolState(clientId)).toEqual({
+        access_tokens: 0,
+        authorization_codes: 0,
+        consents: 0,
+        live_refresh_tokens: 0,
+      });
+      const session = await env.PG72_ID_DB.prepare(
+        "SELECT expiresAt FROM session WHERE id = ?",
+      )
+        .bind(sessionId)
+        .first<{ expiresAt: string }>();
+      expect(session?.expiresAt).toBe("1970-01-01T00:00:00.000Z");
+      const audit = await env.PG72_ID_DB.prepare(
+        `SELECT outcome FROM audit_event
+          WHERE event_type = 'oauth_client.updated' AND client_id = ?`,
+      )
+        .bind(clientId)
+        .first<{ outcome: string }>();
+      expect(audit).toEqual({ outcome: "success" });
+    } finally {
+      await env.PG72_ID_DB.prepare(
+        "DROP TRIGGER IF EXISTS expire_actor_session_after_client_update_audit",
+      ).run();
+    }
+  });
+
+  it("blocks actor invalidation before the success audit without cleanup", async () => {
+    const admin = await createAdmin();
+    const clientId = `actor-invalidated-${crypto.randomUUID()}`;
+    expect(
+      (await createClient(admin.headers, confidentialClientBody(clientId))).status,
+    ).toBe(201);
+    await seedClientProtocolState(clientId, admin.userId);
+    const expectedUpdatedAt = await fetchClientUpdatedAt(clientId);
+    const interposed = interposeAfterManagedClientLoad(async () => {
+      await env.PG72_ID_DB.prepare(
+        "UPDATE user SET accessLevel = 'restricted', role = 'user' WHERE id = ?",
+      )
+        .bind(admin.userId)
+        .run();
+    });
+    const ctx = createExecutionContext();
+    const response = await app.fetch(
+      new Request(`${CLIENTS_URL}/${clientId}`, {
+        method: "PATCH",
+        headers: admin.headers,
+        body: JSON.stringify({
+          expectedUpdatedAt,
+          scopes: ["openid", "profile", "offline_access"],
+        }),
+      }),
+      { ...env, PG72_ID_DB: interposed.database } as Env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(interposed.wasIntercepted()).toBe(true);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "management_state_changed",
+    });
+    expect(await fetchClientUpdatedAt(clientId)).toBe(expectedUpdatedAt);
+    expect(await clientProtocolState(clientId)).toEqual({
+      access_tokens: 1,
+      authorization_codes: 1,
+      consents: 1,
+      live_refresh_tokens: 1,
+    });
+    const audit = await env.PG72_ID_DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_event
+        WHERE event_type = 'oauth_client.updated' AND client_id = ?`,
+    )
+      .bind(clientId)
+      .first<{ count: number }>();
+    expect(audit?.count).toBe(0);
+  });
+
+  it("does not update or revoke a replacement client from a stale request", async () => {
+    const admin = await createAdmin();
+    const replacementOwner = await createAuthenticatedUser(
+      `${crypto.randomUUID()}@example.com`,
+      "developer",
+      { passkeyStepUp: true },
+    );
+    const clientId = `replacement-edit-${crypto.randomUUID()}`;
+    expect(
+      (await createClient(admin.headers, confidentialClientBody(clientId))).status,
+    ).toBe(201);
+    const expectedUpdatedAt = await fetchClientUpdatedAt(clientId);
+    const replacementId = crypto.randomUUID();
+    const interposed = interposeAfterManagedClientLoad(async () => {
+      await env.PG72_ID_DB.prepare("DELETE FROM oauthClient WHERE clientId = ?")
+        .bind(clientId)
+        .run();
+      await env.PG72_ID_DB.prepare(
+        `DELETE FROM verification
+          WHERE CASE WHEN json_valid(value) THEN
+            json_extract(value, '$.query.client_id') = ?
+          ELSE 0 END`,
+      )
+        .bind(clientId)
+        .run();
+      await insertReplacementClient(
+        clientId,
+        replacementId,
+        replacementOwner.userId,
+      );
+      await seedClientProtocolState(clientId, replacementOwner.userId);
+    });
+    const ctx = createExecutionContext();
+    const response = await app.fetch(
+      new Request(`${CLIENTS_URL}/${clientId}`, {
+        method: "PATCH",
+        headers: admin.headers,
+        body: JSON.stringify({
+          expectedUpdatedAt,
+          redirectUris: [`https://${clientId}.example/attacker-callback`],
+          scopes: ["openid", "profile"],
+          grantTypes: ["authorization_code"],
+        }),
+      }),
+      { ...env, PG72_ID_DB: interposed.database } as Env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(interposed.wasIntercepted()).toBe(true);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "management_state_changed",
+    });
+    const replacement = await env.PG72_ID_DB.prepare(
+      "SELECT id, ownerUserId, redirectUris, scopes FROM oauthClient WHERE clientId = ?",
+    )
+      .bind(clientId)
+      .first();
+    expect(replacement).toEqual({
+      id: replacementId,
+      ownerUserId: replacementOwner.userId,
+      redirectUris: JSON.stringify([
+        `https://${clientId}.example/replacement-callback`,
+      ]),
+      scopes: '["openid"]',
+    });
+    expect(await clientProtocolState(clientId)).toEqual({
+      access_tokens: 1,
+      authorization_codes: 1,
+      consents: 1,
+      live_refresh_tokens: 1,
+    });
+    const audit = await env.PG72_ID_DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_event
+        WHERE event_type = 'oauth_client.updated' AND client_id = ?`,
+    )
+      .bind(clientId)
+      .first<{ count: number }>();
+    expect(audit?.count).toBe(0);
+  });
+
+  it("rejects a stale same-row update without restoring old permissions", async () => {
+    const { headers, userId } = await createAdmin();
+    const clientId = `same-row-edit-${crypto.randomUUID()}`;
+    expect(
+      (await createClient(headers, confidentialClientBody(clientId))).status,
+    ).toBe(201);
+    await seedClientProtocolState(clientId, userId);
+    const expectedUpdatedAt = await fetchClientUpdatedAt(clientId);
+    const concurrentUpdatedAt = new Date(Date.now() + 60_000).toISOString();
+    const concurrentRedirect = `https://${clientId}.example/concurrent-callback`;
+    const interposed = interposeAfterManagedClientLoad(async () => {
+      await env.PG72_ID_DB.prepare(
+        `UPDATE oauthClient
+            SET name = ?, redirectUris = ?, scopes = ?, updatedAt = ?
+          WHERE clientId = ?`,
+      )
+        .bind(
+          "Concurrent update",
+          JSON.stringify([concurrentRedirect]),
+          '["openid"]',
+          concurrentUpdatedAt,
+          clientId,
+        )
+        .run();
+    });
+    const ctx = createExecutionContext();
+    const response = await app.fetch(
+      new Request(`${CLIENTS_URL}/${clientId}`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({
+          expectedUpdatedAt,
+          name: "Stale editor update",
+          redirectUris: [`https://${clientId}.example/callback`],
+          scopes: ["openid", "profile", "email", "offline_access"],
+          grantTypes: ["authorization_code", "refresh_token"],
+        }),
+      }),
+      { ...env, PG72_ID_DB: interposed.database } as Env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(interposed.wasIntercepted()).toBe(true);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "management_state_changed",
+    });
+    const row = await env.PG72_ID_DB.prepare(
+      "SELECT name, redirectUris, scopes, updatedAt FROM oauthClient WHERE clientId = ?",
+    )
+      .bind(clientId)
+      .first();
+    expect(row).toEqual({
+      name: "Concurrent update",
+      redirectUris: JSON.stringify([concurrentRedirect]),
+      scopes: '["openid"]',
+      updatedAt: concurrentUpdatedAt,
+    });
+    expect(await clientProtocolState(clientId)).toEqual({
+      access_tokens: 1,
+      authorization_codes: 1,
+      consents: 1,
+      live_refresh_tokens: 1,
+    });
+    const audit = await env.PG72_ID_DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_event
+        WHERE event_type = 'oauth_client.updated' AND client_id = ?`,
+    )
+      .bind(clientId)
+      .first<{ count: number }>();
+    expect(audit?.count).toBe(0);
+  });
+
+  it("rejects invalid, unknown, and immutable client updates", async () => {
+    const { headers } = await createAdmin();
+    const clientId = `invalid-edit-${crypto.randomUUID()}`;
+    expect(
+      (await createClient(headers, confidentialClientBody(clientId))).status,
+    ).toBe(201);
+    const before = await fetchClientRow(clientId);
+    const tooManyRedirects = Array.from(
+      { length: 9 },
+      (_, index) => `https://callbacks.example/${index}`,
+    );
+    const invalidCases: Array<[Record<string, unknown>, string]> = [
+      [{}, "invalid_client_update"],
+      [{ name: "   " }, "invalid_client_name"],
+      [{ name: "x".repeat(65) }, "invalid_client_name"],
+      [{ uri: "http://app.example" }, "invalid_client_uri"],
+      [{ redirectUris: [] }, "invalid_redirect_uri"],
+      [
+        {
+          redirectUris: [
+            "https://app.example/callback",
+            "https://app.example/callback",
+          ],
+        },
+        "invalid_redirect_uri",
+      ],
+      [{ redirectUris: tooManyRedirects }, "invalid_redirect_uri"],
+      [
+        {
+          postLogoutRedirectUris: [
+            "https://app.example/signed-out",
+            "https://app.example/signed-out",
+          ],
+        },
+        "invalid_post_logout_redirect_uri",
+      ],
+      [{ scopes: ["profile"] }, "invalid_scopes"],
+      [{ scopes: ["openid", "openid"] }, "invalid_scopes"],
+      [{ scopes: ["openid", "admin"] }, "invalid_scopes"],
+      [{ grantTypes: [] }, "invalid_grant_types"],
+      [{ grantTypes: ["client_credentials"] }, "invalid_grant_types"],
+      [
+        {
+          scopes: ["openid", "profile"],
+          grantTypes: ["authorization_code", "refresh_token"],
+        },
+        "refresh_token_requires_offline_access",
+      ],
+      [{ enableEndSession: "true" }, "invalid_request"],
+    ];
+
+    for (const [body, error] of invalidCases) {
+      const response = await patchClient(headers, clientId, body);
+      expect(response.status, JSON.stringify(body)).toBe(400);
+      expect(await response.json()).toEqual({ error });
+    }
+
+    expect(await fetchClientRow(clientId)).toEqual(before);
+    const audit = await env.PG72_ID_DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_event
+        WHERE client_id = ?
+          AND event_type IN ('oauth_client.updated', 'oauth_client.trust_updated')`,
+    )
+      .bind(clientId)
+      .first<{ count: number }>();
+    expect(audit?.count).toBe(0);
+  });
+
+  it("requires a well-formed current client version", async () => {
+    const { headers } = await createAdmin();
+    const clientId = `version-edit-${crypto.randomUUID()}`;
+    expect(
+      (await createClient(headers, confidentialClientBody(clientId))).status,
+    ).toBe(201);
+
+    const missingVersion = await exports.default.fetch(
+      new Request(`${CLIENTS_URL}/${clientId}`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ name: "Missing version" }),
+      }),
+    );
+    expect(missingVersion.status).toBe(400);
+    expect(await missingVersion.json()).toEqual({
+      error: "invalid_client_version",
+    });
+
+    for (const expectedUpdatedAt of [42, "", "x".repeat(65)]) {
+      const malformedVersion = await patchClient(headers, clientId, {
+        expectedUpdatedAt,
+        name: "Malformed version",
+      });
+      expect(malformedVersion.status, JSON.stringify(expectedUpdatedAt)).toBe(
+        400,
+      );
+      expect(await malformedVersion.json()).toEqual({
+        error: "invalid_client_version",
+      });
+    }
+
+    const opaqueVersionMismatch = await patchClient(headers, clientId, {
+      expectedUpdatedAt: "opaque-version-token",
+      name: "Stale opaque version",
+    });
+    expect(opaqueVersionMismatch.status).toBe(409);
+    expect(await opaqueVersionMismatch.json()).toEqual({
+      error: "management_state_changed",
+    });
+  });
+
+  it("rejects every immutable client field independently", async () => {
+    const { headers } = await createAdmin();
+    const clientId = `immutable-edit-${crypto.randomUUID()}`;
+    expect(
+      (await createClient(headers, confidentialClientBody(clientId))).status,
+    ).toBe(201);
+    const before = await fetchClientRow(clientId);
+    const immutableCases: Record<string, unknown>[] = [
+      { clientId: "replacement-id" },
+      { public: true },
+      { clientSecret: "replacement" },
+      { disabled: true },
+      { ownerUserId: crypto.randomUUID() },
+      { requirePKCE: false },
+      { tokenEndpointAuthMethod: "none" },
+      { metadata: { purpose: "override" } },
+    ];
+
+    for (const body of immutableCases) {
+      const response = await patchClient(headers, clientId, body);
+      expect(response.status, JSON.stringify(body)).toBe(400);
+      expect(await response.json()).toEqual({
+        error: "invalid_client_update",
+      });
+    }
+    expect(await fetchClientRow(clientId)).toEqual(before);
+  });
+
+  it("keeps the mail introspection client out of authorization flows", async () => {
+    const { headers } = await createAdmin();
+    const clientId = "pgid-mail-introspect";
+    const now = new Date().toISOString();
+    await env.PG72_ID_DB.prepare(
+      `INSERT OR IGNORE INTO oauthClient (
+        id, clientId, clientSecret, disabled, skipConsent, enableEndSession,
+        subjectType, scopes, createdAt, updatedAt, name, redirectUris,
+        postLogoutRedirectUris, tokenEndpointAuthMethod, grantTypes,
+        responseTypes, public, type, requirePKCE, ownerUserId, metadata
+      ) VALUES (?, ?, ?, 0, 0, 0, 'public', '[]', ?, ?, ?, '[]', NULL,
+                'client_secret_post', ?, '[]', 0, 'service', 1, NULL, ?)`,
+    )
+      .bind(
+        crypto.randomUUID(),
+        clientId,
+        "test-only-secret-hash",
+        now,
+        now,
+        "Mail Introspection",
+        '["urn:pg72:grant-type:introspection-only"]',
+        JSON.stringify({ developer_name: "PG72 Mail" }),
+      )
+      .run();
+
+    const lockedFields: Record<string, unknown>[] = [
+      { redirectUris: ["https://mail.example/callback"] },
+      { postLogoutRedirectUris: ["https://mail.example/signed-out"] },
+      { scopes: ["openid"] },
+      { grantTypes: ["authorization_code"] },
+      { enableEndSession: true },
+    ];
+    for (const body of lockedFields) {
+      const protocolUpdate = await patchClient(headers, clientId, body);
+      expect(protocolUpdate.status, JSON.stringify(body)).toBe(409);
+      expect(await protocolUpdate.json()).toEqual({
+        error: "system_client_protocol_locked",
+      });
+    }
+
+    const metadataUpdate = await patchClient(headers, clientId, {
+      name: "PGID Mail Introspection",
+      developerName: "PG72 Mail Infrastructure",
+    });
+    expect(metadataUpdate.status).toBe(200);
+    const row = await env.PG72_ID_DB.prepare(
+      "SELECT name, redirectUris, scopes, grantTypes FROM oauthClient WHERE clientId = ?",
+    )
+      .bind(clientId)
+      .first();
+    expect(row).toEqual({
+      name: "PGID Mail Introspection",
+      redirectUris: "[]",
+      scopes: "[]",
+      grantTypes: '["urn:pg72:grant-type:introspection-only"]',
+    });
   });
 
   it("refuses trust edits on trusted or unknown clients", async () => {

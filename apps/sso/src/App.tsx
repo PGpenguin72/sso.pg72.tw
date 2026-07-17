@@ -306,9 +306,10 @@ interface AuthorizationsResponse {
   canDeleteAccount: boolean;
 }
 
-interface AdminOAuthClient {
+export interface AdminOAuthClient {
   backchannelLogoutUri: string | null;
   clientId: string;
+  enableEndSession: boolean;
   name: string;
   developerName: string | null;
   privacyPolicyUrl: string | null;
@@ -318,6 +319,7 @@ interface AdminOAuthClient {
   public: boolean;
   scopes: string[];
   redirectUris: string[];
+  postLogoutRedirectUris: string[];
   grantTypes: string[];
   tokenEndpointAuthMethod: string | null;
   hasSecret: boolean;
@@ -325,6 +327,64 @@ interface AdminOAuthClient {
   ownerUserId: string | null;
   createdAt: string | null;
   updatedAt: string | null;
+}
+
+interface AdminClientEditDraft {
+  backchannelLogoutUri: string;
+  developerName: string;
+  emailScope: boolean;
+  enableEndSession: boolean;
+  expectedUpdatedAt: string | null;
+  name: string;
+  offlineAccess: boolean;
+  postLogoutRedirectUris: string;
+  privacyPolicyUrl: string;
+  profileScope: boolean;
+  redirectUris: string;
+  termsOfServiceUrl: string;
+  uri: string;
+}
+
+function nonemptyLines(value: string): string[] {
+  return value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+export function buildAdminClientUpdate(
+  client: AdminOAuthClient,
+  draft: AdminClientEditDraft,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    expectedUpdatedAt: draft.expectedUpdatedAt,
+    name: draft.name.trim(),
+    uri: draft.uri.trim() || null,
+    developerName: draft.developerName.trim(),
+    privacyPolicyUrl: draft.privacyPolicyUrl.trim() || null,
+    termsOfServiceUrl: draft.termsOfServiceUrl.trim() || null,
+    backchannelLogoutUri: draft.backchannelLogoutUri.trim() || null,
+  };
+  if (!client.grantTypes.includes("authorization_code")) return body;
+
+  body.redirectUris = nonemptyLines(draft.redirectUris);
+  body.postLogoutRedirectUris = nonemptyLines(draft.postLogoutRedirectUris);
+  body.scopes = [
+    ...client.scopes.filter(
+      (scope) => !["email", "offline_access", "profile"].includes(scope),
+    ),
+    ...(draft.profileScope ? ["profile"] : []),
+    ...(draft.emailScope ? ["email"] : []),
+    ...(draft.offlineAccess ? ["offline_access"] : []),
+  ];
+  body.grantTypes = draft.offlineAccess
+    ? [
+        ...client.grantTypes.filter((grant) => grant !== "refresh_token"),
+        "refresh_token",
+      ]
+    : client.grantTypes.filter((grant) => grant !== "refresh_token");
+  body.enableEndSession = draft.enableEndSession;
+  return body;
 }
 
 type PlatformRole = "bootadmin" | "admin" | "developer" | "user";
@@ -510,6 +570,14 @@ const ADMIN_CLIENT_ERROR_MESSAGES: Record<string, string> = {
   client_exists: "這個 Client ID 已存在。",
   invalid_client_id: "Client ID 格式無效（小寫英數、-、_、.，3-64 字元）。",
   invalid_client_name: "名稱不能是空白且不可超過 64 字元。",
+  invalid_client_update: "更新內容包含不可修改或不支援的欄位。",
+  invalid_client_version: "Client 資料版本無效，請重新整理後再試。",
+  invalid_client_uri: "應用程式 URI 必須是完整的 HTTPS URL。",
+  invalid_backchannel_logout_uri:
+    "Back-channel logout URI 必須是完整且安全的 HTTPS URL。",
+  invalid_grant_types: "Grant types 只能是 authorization_code/refresh_token。",
+  invalid_post_logout_redirect_uri:
+    "Post-logout Redirect URI 必須是完整的 HTTPS URL，且不可重複。",
   invalid_developer_name: "開發者名稱為必填，且不可超過 64 字元。",
   invalid_privacy_policy_url: "隱私權政策必須是完整的 HTTPS URL。",
   invalid_terms_of_service_url: "服務條款必須是完整的 HTTPS URL。",
@@ -525,6 +593,7 @@ const ADMIN_CLIENT_ERROR_MESSAGES: Record<string, string> = {
   refresh_token_requires_offline_access:
     "啟用 refresh token 時必須包含 offline_access scope。",
   skip_consent_not_allowed: "所有 client 都必須經過使用者同意。",
+  system_client_protocol_locked: "系統 client 的 OAuth 協定設定不可在此修改。",
   trusted_client_locked: "Trusted client 只能透過 seed 或 migration 調整。",
 };
 
@@ -2902,10 +2971,21 @@ export function App() {
   const [clientBackchannelUrlDraft, setClientBackchannelUrlDraft] = useState("");
   const [clientRedirectUrisDraft, setClientRedirectUrisDraft] = useState("");
   const [editingClientId, setEditingClientId] = useState<string | null>(null);
+  const [editExpectedUpdatedAt, setEditExpectedUpdatedAt] = useState<
+    string | null
+  >(null);
+  const [editNameDraft, setEditNameDraft] = useState("");
+  const [editUriDraft, setEditUriDraft] = useState("");
   const [editDeveloperDraft, setEditDeveloperDraft] = useState("");
   const [editPrivacyUrlDraft, setEditPrivacyUrlDraft] = useState("");
   const [editTermsUrlDraft, setEditTermsUrlDraft] = useState("");
   const [editBackchannelUrlDraft, setEditBackchannelUrlDraft] = useState("");
+  const [editRedirectUrisDraft, setEditRedirectUrisDraft] = useState("");
+  const [editPostLogoutUrisDraft, setEditPostLogoutUrisDraft] = useState("");
+  const [editProfileScopeDraft, setEditProfileScopeDraft] = useState(false);
+  const [editEmailScopeDraft, setEditEmailScopeDraft] = useState(false);
+  const [editOfflineDraft, setEditOfflineDraft] = useState(false);
+  const [editEndSessionDraft, setEditEndSessionDraft] = useState(false);
   const [clientTypeDraft, setClientTypeDraft] = useState<
     "confidential" | "public"
   >("confidential");
@@ -4091,32 +4171,65 @@ export function App() {
     }
   };
 
-  const beginClientTrustEdit = (client: AdminOAuthClient) => {
+  const focusClientEditTrigger = (clientId: string) => {
+    requestAnimationFrame(() => {
+      document.getElementById(`client-edit-trigger-${clientId}`)?.focus();
+    });
+  };
+
+  const closeClientEdit = (clientId: string) => {
+    setEditingClientId(null);
+    focusClientEditTrigger(clientId);
+  };
+
+  const beginClientEdit = (client: AdminOAuthClient) => {
     setAdminClientsError(null);
     setEditingClientId(client.clientId);
+    setEditExpectedUpdatedAt(client.updatedAt);
+    setEditNameDraft(client.name);
+    setEditUriDraft(client.uri ?? "");
     setEditDeveloperDraft(client.developerName ?? "");
     setEditPrivacyUrlDraft(client.privacyPolicyUrl ?? "");
     setEditTermsUrlDraft(client.termsOfServiceUrl ?? "");
     setEditBackchannelUrlDraft(client.backchannelLogoutUri ?? "");
+    setEditRedirectUrisDraft(client.redirectUris.join("\n"));
+    setEditPostLogoutUrisDraft(client.postLogoutRedirectUris.join("\n"));
+    setEditProfileScopeDraft(client.scopes.includes("profile"));
+    setEditEmailScopeDraft(client.scopes.includes("email"));
+    setEditOfflineDraft(
+      client.scopes.includes("offline_access") &&
+        client.grantTypes.includes("refresh_token"),
+    );
+    setEditEndSessionDraft(client.enableEndSession);
   };
 
-  const updateAdminClientTrust = async (client: AdminOAuthClient) => {
+  const updateAdminClient = async (client: AdminOAuthClient) => {
     setBusy(`client:${client.clientId}`);
     setAdminClientsError(null);
     try {
       if (!(await ensureClientPasskeyStepUp())) return;
+      const body = buildAdminClientUpdate(client, {
+        backchannelLogoutUri: editBackchannelUrlDraft,
+        developerName: editDeveloperDraft,
+        emailScope: editEmailScopeDraft,
+        enableEndSession: editEndSessionDraft,
+        expectedUpdatedAt: editExpectedUpdatedAt,
+        name: editNameDraft,
+        offlineAccess: editOfflineDraft,
+        postLogoutRedirectUris: editPostLogoutUrisDraft,
+        privacyPolicyUrl: editPrivacyUrlDraft,
+        profileScope: editProfileScopeDraft,
+        redirectUris: editRedirectUrisDraft,
+        termsOfServiceUrl: editTermsUrlDraft,
+        uri: editUriDraft,
+      });
       const response = await fetch(
         `/api/admin/clients/${encodeURIComponent(client.clientId)}`,
         {
           method: "PATCH",
           credentials: "include",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            developerName: editDeveloperDraft.trim(),
-            privacyPolicyUrl: editPrivacyUrlDraft.trim() || null,
-            termsOfServiceUrl: editTermsUrlDraft.trim() || null,
-            backchannelLogoutUri: editBackchannelUrlDraft.trim() || null,
-          }),
+          body: JSON.stringify(body),
         },
       );
       if (!response.ok) {
@@ -4129,8 +4242,9 @@ export function App() {
         return;
       }
       setEditingClientId(null);
-      setNotice(`Client ${client.clientId} 的信任資訊已更新。`);
+      setNotice(`Client ${client.clientId} 的設定已更新。`);
       await loadAdminClients();
+      focusClientEditTrigger(client.clientId);
     } catch {
       setAdminClientsError("網路連線失敗，請稍後再試。");
     } finally {
@@ -5408,17 +5522,48 @@ export function App() {
                                 ) : null}
                                 {editingClient ? (
                                   <form
-                                    className="client-trust-form"
+                                    id={`client-edit-${client.clientId}`}
+                                    className="client-settings-form"
                                     onSubmit={(event) => {
                                       event.preventDefault();
                                       if (!clientBusy) {
-                                        void updateAdminClientTrust(client);
+                                        void updateAdminClient(client);
                                       }
                                     }}
                                   >
                                     <label>
+                                      <span>名稱</span>
+                                      <input
+                                        autoFocus
+                                        required
+                                        type="text"
+                                        maxLength={64}
+                                        value={editNameDraft}
+                                        disabled={clientBusy}
+                                        onChange={(event) =>
+                                          setEditNameDraft(event.target.value)
+                                        }
+                                        autoComplete="off"
+                                      />
+                                    </label>
+                                    <label>
+                                      <span>應用程式 URI（選填，HTTPS）</span>
+                                      <input
+                                        type="url"
+                                        maxLength={256}
+                                        value={editUriDraft}
+                                        disabled={clientBusy}
+                                        onChange={(event) =>
+                                          setEditUriDraft(event.target.value)
+                                        }
+                                        autoComplete="off"
+                                        spellCheck={false}
+                                      />
+                                    </label>
+                                    <label>
                                       <span>開發者名稱</span>
                                       <input
+                                        required
                                         type="text"
                                         maxLength={64}
                                         value={editDeveloperDraft}
@@ -5473,12 +5618,117 @@ export function App() {
                                         spellCheck={false}
                                       />
                                     </label>
-                                    <div className="client-trust-actions">
+                                    {client.grantTypes.includes(
+                                      "authorization_code",
+                                    ) ? (
+                                      <>
+                                        <label className="client-settings-full">
+                                          <span>
+                                            Redirect URIs（每行一個，production 僅接受 HTTPS）
+                                          </span>
+                                          <textarea
+                                            required
+                                            rows={3}
+                                            value={editRedirectUrisDraft}
+                                            disabled={clientBusy}
+                                            onChange={(event) =>
+                                              setEditRedirectUrisDraft(
+                                                event.target.value,
+                                              )
+                                            }
+                                            spellCheck={false}
+                                          />
+                                        </label>
+                                        <label className="client-settings-full">
+                                          <span>
+                                            Post-logout Redirect URIs（每行一個，選填）
+                                          </span>
+                                          <textarea
+                                            rows={2}
+                                            value={editPostLogoutUrisDraft}
+                                            disabled={clientBusy}
+                                            onChange={(event) =>
+                                              setEditPostLogoutUrisDraft(
+                                                event.target.value,
+                                              )
+                                            }
+                                            spellCheck={false}
+                                          />
+                                        </label>
+                                        <label className="client-settings-checkbox">
+                                          <span>Profile scope</span>
+                                          <span className="client-checkbox-row">
+                                            <input
+                                              type="checkbox"
+                                              checked={editProfileScopeDraft}
+                                              disabled={clientBusy}
+                                              onChange={(event) =>
+                                                setEditProfileScopeDraft(
+                                                  event.target.checked,
+                                                )
+                                              }
+                                            />
+                                            提供名稱與頭像
+                                          </span>
+                                        </label>
+                                        <label className="client-settings-checkbox">
+                                          <span>Email scope</span>
+                                          <span className="client-checkbox-row">
+                                            <input
+                                              type="checkbox"
+                                              checked={editEmailScopeDraft}
+                                              disabled={clientBusy}
+                                              onChange={(event) =>
+                                                setEditEmailScopeDraft(
+                                                  event.target.checked,
+                                                )
+                                              }
+                                            />
+                                            提供已驗證的 Email
+                                          </span>
+                                        </label>
+                                        <label className="client-settings-checkbox">
+                                          <span>Refresh token</span>
+                                          <span className="client-checkbox-row">
+                                            <input
+                                              type="checkbox"
+                                              checked={editOfflineDraft}
+                                              disabled={clientBusy}
+                                              onChange={(event) =>
+                                                setEditOfflineDraft(
+                                                  event.target.checked,
+                                                )
+                                              }
+                                            />
+                                            啟用 offline_access 與 refresh_token
+                                          </span>
+                                        </label>
+                                        <label className="client-settings-checkbox">
+                                          <span>RP-initiated logout</span>
+                                          <span className="client-checkbox-row">
+                                            <input
+                                              type="checkbox"
+                                              checked={editEndSessionDraft}
+                                              disabled={clientBusy}
+                                              onChange={(event) =>
+                                                setEditEndSessionDraft(
+                                                  event.target.checked,
+                                                )
+                                              }
+                                            />
+                                            允許使用 end_session_endpoint
+                                          </span>
+                                        </label>
+                                      </>
+                                    ) : null}
+                                    <div className="client-settings-actions">
                                       <button
                                         type="button"
                                         className="button button-secondary button-compact"
                                         disabled={clientBusy}
-                                        onClick={() => setEditingClientId(null)}
+                                        onClick={() =>
+                                          closeClientEdit(client.clientId)
+                                        }
                                       >
                                         取消
                                       </button>
@@ -5486,7 +5736,12 @@ export function App() {
                                         type="submit"
                                         className="button button-primary button-compact"
                                         disabled={
-                                          clientBusy || !editDeveloperDraft.trim()
+                                          clientBusy ||
+                                          !editNameDraft.trim() ||
+                                          !editDeveloperDraft.trim() ||
+                                          (client.grantTypes.includes(
+                                            "authorization_code",
+                                          ) && !editRedirectUrisDraft.trim())
                                         }
                                       >
                                         {clientBusy ? "儲存中..." : "儲存"}
@@ -5498,15 +5753,18 @@ export function App() {
                               <div className="manage-actions">
                                 {!client.trusted ? (
                                   <button
+                                    id={`client-edit-trigger-${client.clientId}`}
                                     type="button"
                                     className="icon-button"
-                                    aria-label={`編輯 ${client.clientId} 的信任資訊`}
-                                    title="編輯開發者與條款資訊"
+                                    aria-label={`編輯 ${client.clientId} 的設定`}
+                                    aria-controls={`client-edit-${client.clientId}`}
+                                    aria-expanded={editingClient}
+                                    title="編輯 client 設定"
                                     disabled={clientBusy}
                                     onClick={() =>
                                       editingClient
-                                        ? setEditingClientId(null)
-                                        : beginClientTrustEdit(client)
+                                        ? closeClientEdit(client.clientId)
+                                        : beginClientEdit(client)
                                     }
                                   >
                                     <Pencil aria-hidden="true" />

@@ -25,6 +25,12 @@ PGID **不開放動態自助註冊**。每個 client 由 standard access 的 PGI
 
 建立、更新、輪替 secret、停用 / 啟用或刪除 client 都是同源 admin mutation：請求必須帶有效的 PGID session cookie，且 `Origin` 必須精確等於 PGID 的 `AUTH_BASE_URL`。這些操作只接受 `createdAt` 距目前時間小於 10 分鐘的 session；不符合時固定回 `403` 與 `{"code":"SESSION_NOT_FRESH","error":"fresh_session_required"}`。
 
+## 更新既有 client
+
+Client owner 可在開發者管理介面更新名稱、應用程式 URI、redirect URI、post-logout redirect URI、scopes、grant types、end-session、開發者名稱、服務條款、隱私權政策與 back-channel logout URI。儲存時會原樣帶回開啟編輯器時讀到的 opaque exact version；呼叫端不應把它解析或重組成特定 timestamp 格式。若其他管理者已更新同一個 client，這次操作會被拒絕並要求重新載入，不會覆蓋較新的設定。`client_id`、public/confidential 類型、token endpoint 認證方式、client secret、owner、PKCE/consent 規則及停用狀態不能由一般設定更新；secret rotation 與停用等操作仍使用各自的專用按鈕。
+
+變更 redirect URI 時，PGID 會在同一筆 D1 transaction 清除該 client 尚未兌換的 authorization code 與既有 consent，避免舊 redirect 信任沿用。變更 scopes 或 grant types 時，還會刪除既有 access token、撤銷尚未到期的 refresh token，並清除 pending code 與 consent；只修改名稱、說明連結或 logout metadata 不會撤銷 token。`pgid-mail-introspect` 的 redirect、post-logout redirect、scope、grant 與 end-session protocol 設定固定鎖定，只能修改不影響其授權邊界的名稱、應用程式 URI 與 trust metadata。
+
 Local source 還要求同一個 D1 session 最近完成 Passkey step-up。帳號中心會在 mutation 前啟動原生 Passkey 驗證；取消或驗證失敗時不會送出原操作。10 分鐘 session age 只是額外 gate，不能替代 step-up。沒有 Passkey 時不提供 bypass，包含 `bootadmin`；先用既有 Google fresh session 註冊 Passkey，再操作 client。Local recovery-code flow 只能替換 Passkey，完成後仍須一般登入；它不會寫入 step-up timestamp 或授權 client mutation。Production 尚未套用 `0019` 或啟用 recovery。
 
 Step-up 使用同源的 `POST /api/account/passkey-step-up/challenge` 與 `POST /api/account/passkey-step-up/verify`。Challenge 兩分鐘內有效、只能使用一次，並綁定目前的 user 與 D1 session；WebAuthn 必須完成 user verification。Step-up 有效期只能設定為 60–600 秒，目前為 600 秒。沒有 Passkey 時回 `PASSKEY_ENROLLMENT_REQUIRED`；未完成或已過期時，client mutation 回 `PASSKEY_STEP_UP_REQUIRED`。Production 尚未套用 `0014` 或部署此行為。

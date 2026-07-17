@@ -426,6 +426,8 @@ access:                  standard <-> restricted
 - Production 不允許 wildcard、HTTP 或任意 query-based callback。
 - Local development callback 必須列為獨立 development client。
 - Client secret 僅顯示一次，資料庫只保存 hash。
+- Owner 可透過 guarded admin PATCH 更新 `name`、nullable `uri`、redirect/post-logout redirect URI、scopes、grant types、end-session 與 trust/logout metadata。Request 必須原樣帶回 GET list 的 `expectedUpdatedAt`，並將它視為 required、bounded opaque exact-version precondition，而非自行解析或重組的 timestamp；same-row 版本失配時回 409，不能 stale write-back。Client ID、public/confidential 類型、token auth method、secret、owner、PKCE/consent、response/subject type 與 disabled 狀態不可由 generic update 修改；`pgid-mail-introspect` 的 protocol/authorization 欄位另行鎖定。
+- Redirect membership 變更必須在 client update 的同一 D1 batch 清除 pending authorization code 與 consent；scope/grant membership 變更還必須刪除 access token、撤銷 live refresh token。Success audit 是 batch 內唯一的 actor/session authorization snapshot，並重驗 exact row、owner 與舊版本；cleanup/update 必須依賴該 exact audit event 並再次重驗 row/owner/version，不能在各 statement 重算會變動的 session clock。並行更新、刪除或 replacement row 不得被 stale request 修改或清理。Metadata-only update 不撤銷 token。
 
 ### 10.3 Claims
 

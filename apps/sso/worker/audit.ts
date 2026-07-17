@@ -57,6 +57,8 @@ export interface ExistingClientAuditGuard {
   clientRowId: string;
   /** Omitted for actors with clients.manage_all. */
   expectedOwnerUserId?: string;
+  /** Omitted when the mutation does not use optimistic concurrency. */
+  expectedUpdatedAt?: string | null;
 }
 
 export interface InvitationMutationAuditGuard {
@@ -199,6 +201,7 @@ export function auditInsertForExistingClientStatement(
          WHERE id = ?
            AND clientId = ?
            AND (? IS NULL OR ownerUserId = ?)
+           AND (? = 0 OR updatedAt IS ?)
       )
         AND ${ADMIN_ACTOR_COMMIT_PREDICATE}`,
   ).bind(
@@ -214,6 +217,8 @@ export function auditInsertForExistingClientStatement(
     guard.clientId,
     guard.expectedOwnerUserId ?? null,
     guard.expectedOwnerUserId ?? null,
+    guard.expectedUpdatedAt === undefined ? 0 : 1,
+    guard.expectedUpdatedAt ?? null,
     ...adminActorCommitBindings(guard.actor),
   );
 }

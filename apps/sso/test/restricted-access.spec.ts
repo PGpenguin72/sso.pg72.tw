@@ -655,6 +655,11 @@ describe("restricted account administration", () => {
       "https://commit-guard.example/callback",
       developer.userId,
     );
+    const client = await env.PG72_ID_DB.prepare(
+      "SELECT updatedAt FROM oauthClient WHERE clientId = ?",
+    )
+      .bind(clientId)
+      .first<{ updatedAt: string }>();
     const interposed = interposeAfterD1First(
       "SELECT email, role, status, accessLevel",
       async () => {
@@ -670,7 +675,10 @@ describe("restricted account administration", () => {
       new Request(`${CLIENTS_URL}/${clientId}`, {
         method: "PATCH",
         headers: developer.headers,
-        body: JSON.stringify({ developerName: "Updated Developer" }),
+        body: JSON.stringify({
+          developerName: "Updated Developer",
+          expectedUpdatedAt: client?.updatedAt,
+        }),
       }),
       { ...env, PG72_ID_DB: interposed.database } as Env,
       ctx,

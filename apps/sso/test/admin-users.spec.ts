@@ -791,14 +791,23 @@ describe("Developer-owned OAuth clients", () => {
       (await createClient(developer.headers, clientBody(ownedId))).status,
     ).toBe(201);
 
-    const patchTrust = (headers: Headers, developerName: string) =>
-      exports.default.fetch(
+    const patchTrust = async (headers: Headers, developerName: string) => {
+      const client = await env.PG72_ID_DB.prepare(
+        "SELECT updatedAt FROM oauthClient WHERE clientId = ?",
+      )
+        .bind(ownedId)
+        .first<{ updatedAt: string | null }>();
+      return exports.default.fetch(
         new Request(`${CLIENTS_URL}/${ownedId}`, {
           method: "PATCH",
           headers,
-          body: JSON.stringify({ developerName }),
+          body: JSON.stringify({
+            developerName,
+            expectedUpdatedAt: client?.updatedAt ?? null,
+          }),
         }),
       );
+    };
 
     // Foreign developers get the same existence-hiding 404 as on every
     // other client mutation.

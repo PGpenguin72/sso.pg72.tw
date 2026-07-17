@@ -166,13 +166,21 @@ private-key, assignment, and high-entropy families. Source fixtures and
 generated enum/metadata exceptions require an exact raw path, normalized key,
 and complete value. Better Auth's generated fallback additionally requires all
 three exact literal digests, literal forms, and AST contexts; marker substrings
-do not waive a finding. Workflow run commands and recursively reachable package
-script names/values are code-owned exact maps, not policy additions. The upload
-step is fixed to `.artifacts/release` with error-on-missing, hidden-file
+do not waive a finding. The two workflow files are pinned by code-owned SHA-256
+over their exact raw LF bytes and are rejected before YAML/structural checks if
+any field, comment, or line ending changes. Recursively reachable package-script
+names and complete values have a separate code-owned canonical digest; neither
+contract can be extended through policy. The upload step is fixed to
+`.artifacts/release` with error-on-missing, hidden-file
 exclusion, and seven-day retention. Workflow environment policy can select only
 code-owned `DAST_*`, `CI`, and `NO_COLOR` values; `CLOUDFLARE_*`, legacy `CF_*`,
 and `WRANGLER_*` remain hard-denied even if policy and workflow are changed
-together. Diagnostics normalize
+together. The deterministic production Wrangler `index.js` is also pinned by a
+code-owned whole-file SHA-256 before the structural artifact and AST secret
+scanners run. Runtime, dependency, bundler, or build-chain changes therefore
+require human review and two matching clean build/dry-run outputs before that
+digest is deliberately updated; the gate never learns a new digest from policy
+or its current output. Diagnostics normalize
 safe relative paths and replace sensitive, secret-bearing, absolute/outside, or
 terminal-unsafe paths with a short SHA-256 identifier. The audit covers runtime,
 build, and development dependencies so tooling advisories cannot bypass the

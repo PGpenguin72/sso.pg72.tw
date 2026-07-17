@@ -57,12 +57,19 @@ bounded static evaluator; the separate line/dotenv parser handles export and
 declaration forms. Source fixture and reviewed generated enum/metadata
 allowances are exact path/key/value contracts. The generated Better Auth
 fallback must retain its three exact digests, literal forms, occurrence counts,
-and AST contexts. Workflow run locations/commands and reachable package-script
-names/values are code-owned exact maps that policy cannot extend; the release
-upload is exactly `.artifacts/release` with fixed missing-file, hidden-file, and
-retention behavior. Workflow environment keys/values are restricted by a
+and AST contexts. Both workflow files are pinned by code-owned SHA-256 over
+their raw LF bytes and fail before YAML/structural validation on any change.
+Reachable package-script names and complete values are independently pinned by
+a code-owned canonical digest; policy cannot extend either contract. The
+release upload is exactly `.artifacts/release` with fixed missing-file,
+hidden-file, and retention behavior. Workflow environment keys/values are restricted by a
 code-owned allowlist; all
 `CLOUDFLARE_*`, legacy `CF_*`, and `WRANGLER_*` keys are independently denied.
+The production Wrangler `index.js` must match its code-owned whole-file SHA-256
+before file, secret-family, and AST checks run. A runtime, dependency, bundler,
+or build-chain change requires human review and two byte-identical clean
+build/dry-run results before deliberately updating that digest; no policy or
+generated artifact can update it automatically.
 Unsafe diagnostic paths are normalized and represented only by a short SHA-256
 identifier.
 

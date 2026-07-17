@@ -26,9 +26,9 @@ pnpm dast:local
 | --- | --- |
 | Worker static analysis | Oxlint type-aware `no-floating-promises` and `no-misused-promises` over both Worker implementations |
 | Secret scan | required checksum-pinned Gitleaks over complete Git history; explicit bounded/redacted tracked, ordinary-untracked, and ignored-sensitive-filename traversal; TypeScript compiler AST plus bounded line/binary decoding with exact audited allowances; captured Secretlint output |
-| Workflow/config | actionlint, immutable Action SHAs, least permissions, code-owned exact workflow/job/step run maps and package-script name/value graph, exact environment scopes, fixed artifact upload, and exact source/generated Wrangler binding targets |
+| Workflow/config | raw-byte SHA-256 identity for the exact workflow file set, actionlint, immutable Action SHAs, least permissions, code-owned exact workflow/job/step run maps, canonical reachable package-script name/value digest, exact environment scopes, fixed artifact upload, and exact source/generated Wrangler binding targets |
 | Dependency policy | live `pnpm audit --json` reconciled field-for-field with `security/accepted-advisories.json` |
-| Production artifact | `wrangler deploy --dry-run --outdir` modules plus Static Assets scanned against `security/release-policy.json`, including bounded text/binary secret families |
+| Production artifact | code-owned whole-entry SHA-256 followed by `wrangler deploy --dry-run --outdir` module/Static Asset policy and bounded text/binary secret-family scans |
 | Inventory | path-free package/version/license inventory generated from the frozen pnpm install |
 | Automation tests | negative advisory, target-allowlist, workflow, config, artifact, and inventory tests |
 
@@ -56,15 +56,28 @@ embedded text or binary credential families, symlinks, and unexpected files.
 Generated config path metadata is validated in place and is outside the current
 artifact upload allowlist.
 
+The production Wrangler entry module is deterministic for the pinned toolchain
+and must match a SHA-256 constant owned by `scripts/security/artifact-gate.mjs`.
+The identity check runs before the existing structural and AST scans, so a
+replacement, decoy, duplicate, removal, concatenation, template rewrite, or any
+other entry-byte change fails even if a shallow structural pattern still looks
+reviewed. Do not derive or update this constant automatically. An intentional
+runtime, dependency, bundler, or build-chain change must receive human review;
+then run two independent clean builds and Wrangler dry-runs, confirm their
+`index.js` bytes are identical, and update the constant in the reviewed change.
+
 `security/workflow-policy.json` default-denies environment keys at workflow,
 job, and step scope. Policy may select only the code-owned `DAST_*` expressions
 and exact `CI=1`/`NO_COLOR=1` values; it cannot add workflow commands, leaf
 commands, local scripts, or package-script approvals. Every workflow job/step
-run string and every recursively reachable package-script name and complete
-value is fixed in code. CRLF is normalized, but quote composition, inline env,
-network tools, redirects, extra commands, environment-file writes, and control
-characters cannot equal that map and fail closed. All `CLOUDFLARE_*`, legacy
-`CF_*`, and `WRANGLER_*` keys are code-owned hard denials. Preview DAST therefore
+run string is fixed in code, while every recursively reachable package-script
+name and complete value is bound to a separate canonical SHA-256. The exact
+`ci.yml` and `dast-preview.yml` raw LF bytes have code-owned SHA-256 identities;
+CRLF conversion and every action/input/job/step/comment change fail before YAML
+and deeper semantic checks. Quote composition, inline env, network tools,
+redirects, extra commands, environment-file writes, and control characters also
+fail the retained structural layer. All `CLOUDFLARE_*`, legacy `CF_*`, and
+`WRANGLER_*` keys are code-owned hard denials. Preview DAST therefore
 accepts its three non-credential `DAST_*` variables, not a Cloudflare API
 credential.
 

@@ -174,7 +174,7 @@ test("pins reachable package-script names and complete values to one code-owned 
   const baseline = loadWorkflowCommandContext();
   assert.equal(
     reachablePackageScriptDigest(baseline),
-    "98547eca8d6e8bd2ea927b40022e22589246a514a98a5d7ea47588becff8c8f0",
+    "fd7e280671c8d2ec864c296948d1bb07c2106852b451eb867d5864af512caecb",
   );
   assert.deepEqual(validateReachablePackageScriptIdentity(baseline), []);
 
@@ -196,7 +196,7 @@ test("pins every workspace scripts object including otherwise unreachable names"
   const baseline = loadWorkflowCommandContext();
   assert.equal(
     completePackageScriptDigest(baseline),
-    "c7845bbe3711fb62111f2ccb929dafb45de20579232218f89202b16fb4f09679",
+    "9785193a907eec3edd5152a6597353e9f80beea18775c060a8106aa7e97fdb32",
   );
   assert.deepEqual(validateCompletePackageScriptIdentity(baseline), []);
 

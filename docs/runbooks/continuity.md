@@ -83,6 +83,12 @@ observability migration `0020` or encrypted R2 archive integration remains
 fail-closed until that slice and its same-run exercise are integrated and
 reviewed.
 
+The repository-level public-readiness unit runner fixes Node test-file
+concurrency to one. Its proof-drift regressions briefly mutate and restore an
+exact tracked Worker file inside `finally` to prove that an already-created
+opaque proof cannot survive runtime drift; serial execution prevents any other
+source-state test from observing that deliberate dirty window.
+
 `ready: true` requires a clean attributed commit, every exact local invariant,
 successful cleanup, and all five dependency contracts verified by the same
 run. It means only that this synthetic local command passed. It is not evidence

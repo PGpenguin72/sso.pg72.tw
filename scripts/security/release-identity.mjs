@@ -13,8 +13,8 @@ const workflowDigests = Object.freeze({
 const packageContracts = Object.freeze({
   ".": Object.freeze({
     file: "package.json",
-    fileDigest: "783246633bf965c32f47b43622677e50b118f218bb6328f9577b08a5381fdc38",
-    scriptsDigest: "7db676862a8557b0d2a08f0f82a55ae64d306f1832c3a10e69250c000294ebd1",
+    fileDigest: "cc3718b79507c961a44015abe3e3ad1aca689ec98c0c8b319293cf0b9ef940eb",
+    scriptsDigest: "6561b6b949f9b71d0f3ae8b2c0d2d22ece9800f9fc414381db71dd12998a395a",
   }),
   "apps/sso": Object.freeze({
     file: "apps/sso/package.json",

@@ -26,7 +26,7 @@
     "security:check": "pnpm test:security && pnpm security:static && pnpm security:secrets && pnpm security:config && pnpm security:audit && pnpm security:artifact && pnpm security:inventory",
     "test": "pnpm -r --if-present test",
     "test:clean-dist": "node --test scripts/clean-package-dist.test.mjs",
-    "test:public-readiness": "node --test scripts/public-readiness/*.test.mjs",
+    "test:public-readiness": "node --test --test-concurrency=1 scripts/public-readiness/*.test.mjs",
     "test:security": "node --test scripts/security/*.test.mjs",
     "typecheck": "pnpm -r --if-present typecheck"
   },

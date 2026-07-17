@@ -57,9 +57,9 @@ const codeOwnedWorkflowSourceDigests = Object.freeze({
   "dast-preview.yml": "9826177b4315c8f0ca29fe812508349d1ac0fcab6e3cce9d1e0772c9c124e711",
 });
 const codeOwnedReachablePackageScriptDigest =
-  "98547eca8d6e8bd2ea927b40022e22589246a514a98a5d7ea47588becff8c8f0";
+  "fd7e280671c8d2ec864c296948d1bb07c2106852b451eb867d5864af512caecb";
 const codeOwnedCompletePackageScriptDigest =
-  "c7845bbe3711fb62111f2ccb929dafb45de20579232218f89202b16fb4f09679";
+  "9785193a907eec3edd5152a6597353e9f80beea18775c060a8106aa7e97fdb32";
 const codeOwnedWorkflowRuns = Object.freeze({
   "ci.yml": Object.freeze({
     "verify:1": "node scripts/security/release-identity.mjs",
@@ -90,7 +90,7 @@ const codeOwnedReachablePackageScripts = Object.freeze({
     "security:static": "oxlint --type-aware apps/sso/worker apps/test-rp/worker",
     "security:tools:install": "node scripts/security/install-tools.mjs",
     "test:clean-dist": "node --test scripts/clean-package-dist.test.mjs",
-    "test:public-readiness": "node --test scripts/public-readiness/*.test.mjs",
+    "test:public-readiness": "node --test --test-concurrency=1 scripts/public-readiness/*.test.mjs",
     "test:security": "node --test scripts/security/*.test.mjs",
   }),
   "apps/sso": Object.freeze({
@@ -136,7 +136,7 @@ const codeOwnedPackageScripts = Object.freeze({
     "security:tools:install": "node scripts/security/install-tools.mjs",
     test: "pnpm -r --if-present test",
     "test:clean-dist": "node --test scripts/clean-package-dist.test.mjs",
-    "test:public-readiness": "node --test scripts/public-readiness/*.test.mjs",
+    "test:public-readiness": "node --test --test-concurrency=1 scripts/public-readiness/*.test.mjs",
     "test:security": "node --test scripts/security/*.test.mjs",
     typecheck: "pnpm -r --if-present typecheck",
   }),
@@ -172,7 +172,7 @@ const codeOwnedPackageScripts = Object.freeze({
 const codeOwnedLeafCommands = Object.freeze([
   "node ../../scripts/clean-package-dist.mjs",
   "node --test scripts/clean-package-dist.test.mjs",
-  "node --test scripts/public-readiness/*.test.mjs",
+  "node --test --test-concurrency=1 scripts/public-readiness/*.test.mjs",
   "node --test scripts/security/*.test.mjs",
   "node --test scripts/summary.test.mjs",
   "node scripts/remove-built-dev-vars.mjs",
@@ -657,7 +657,12 @@ export function loadWorkflowCommandContext(root = repoRoot, policy = workflowPol
 function localScriptError(command, packageRoot) {
   if (!command.startsWith("node ")) return null;
   const tokens = command.split(/\s+/);
-  const scriptIndex = tokens[1] === "--test" ? 2 : 1;
+  const scriptIndex =
+    tokens[1] === "--test" && tokens[2] === "--test-concurrency=1"
+      ? 3
+      : tokens[1] === "--test"
+        ? 2
+        : 1;
   const script = tokens[scriptIndex];
   if (!script || script.startsWith("-")) return `does not name an approved local Node script: ${command}`;
   const resolved = path.posix.normalize(path.posix.join(packageRoot, script));

@@ -13,7 +13,7 @@ PGID is the custom identity provider for PG72 services. Phase 0 runs on Cloudfla
 - a local archive source boundary with an unwired create-only R2 writer and a pure non-HTTP one-object restore verifier. The verifier checks an externally supplied expected manifest, object identity, metadata, size, and stored/computed digests before returning detached records. Authenticated independently retained manifest provenance, KEK custody, runtime R2 integration, a restore sink/exercise, external backup/retention, and remote proof remain absent; observability remains `source_present_unverified` and `encrypted_r2_archive` remains `dependency_missing`;
 - a tightly scoped mail introspection path for Dovecot: local source authorizes only `pgid-mail-introspect` to inspect eligible `pg72-webmail` access tokens and disclose verified email; the last production record did not include deployment or provisioning of this path, and live state must be reverified;
 - Passkey step-up before every OAuth client mutation, using a one-time session/user-bound challenge, required user verification, and a D1 session timestamp; this path is implemented and tested locally, while the last production record did not include its migration/deployment, independent review, or smoke test, and the current live state must be reverified;
-- a local, default-disabled recovery path: ten one-use 160-bit `PGID-R1` codes, hash-only storage, an isolated ten-minute recovery session, required-UV Passkey replacement, atomic code rotation, and central session/token revocation; the last production record did not include `0019`, enabled `RECOVERY_MODE`, or a recovery drill, and must be reverified;
+- a local, default-disabled recovery path: ten one-use 160-bit `PGID-R1` codes, hash-only storage, an isolated ten-minute recovery session, required-UV Passkey replacement, atomic code rotation, and central session/token revocation; the last production record did not include `0019`, enabled `RECOVERY_MODE`, or a recovery drill, and an authorized operator must reverify live state before rollout;
 - an independent OIDC relying party based on `oauth4webapi`;
 - workerd regression tests for discovery, security headers, registration policy, request aborts, D1 constraints, PKCE transactions, and callback replay.
 
@@ -101,12 +101,12 @@ the remaining gates are tracked in `codex.md` §18:
 
 | Service | Integration | Status |
 | --- | --- | --- |
-| Copy (`copy.pg72.tw`) | Native OIDC confidential client + PKCE, guest-code path kept separate | Recorded as production live; reverify. Guest six-digit code retained. |
-| Link (`link.pg72.tw`) | `oauth4webapi` BFF, stable `sub` session | Recorded as production live; reverify. PGID delivery is local-only; Link receiver/rollout remains pending. |
-| Status (`status.pg72.tw`) | OIDC BFF + D1 opaque session | Local-source login integration complete; Preview and receiver state require authorized live re-verification. |
-| Upload admin (`upload.pg72.tw/admin`) | Authlib OIDC + SQLite session (`client_secret_post`) | Local-source integration complete; Preview and cutover state require authorized live re-verification. |
-| File Browser (`file.pg72.tw`) | oauth2-proxy gateway + proxy auth header | Source plan only; deployment state requires authorized live re-verification. |
-| Roundcube (`webmail.pg72.tw`) | Native Generic OIDC + Dovecot XOAUTH2 for mail | PGID prerequisite implemented locally; deployment, service-client provisioning, and mail-cutover state require authorized live re-verification. |
+| Copy (`copy.pg72.tw`) | Native OIDC confidential client + PKCE, guest-code path kept separate | Last recorded as production live; current traffic and configuration require authorized re-verification. Guest six-digit code retained. |
+| Link (`link.pg72.tw`) | `oauth4webapi` BFF, stable `sub` session | Last recorded as production live; current traffic and configuration require authorized re-verification. PGID delivery is local-only; Link receiver/rollout remains pending. |
+| Status (`status.pg72.tw`) | OIDC BFF + D1 opaque session | Local-source login integration complete; no current Preview or receiver state is asserted without authorized live re-verification. |
+| Upload admin (`upload.pg72.tw/admin`) | Authlib OIDC + SQLite session (`client_secret_post`) | Local-source integration complete; no current Preview or cutover state is asserted without authorized live re-verification. |
+| File Browser (`file.pg72.tw`) | oauth2-proxy gateway + proxy auth header | Source plan only; no deployment state is asserted without authorized live re-verification. |
+| Roundcube (`webmail.pg72.tw`) | Native Generic OIDC + Dovecot XOAUTH2 for mail | PGID prerequisite implemented locally; no deployment, service-client provisioning, or mail-cutover state is asserted without authorized live re-verification. |
 
 Existing records show Copy and Link switched production traffic to PGID; live
 state must be reverified. Relying parties must use
@@ -275,9 +275,9 @@ operation; never treat the placeholder as a production resource.
 
 Full Production GO checklist:
 
-1. Production queues, secrets, exact bindings, custom domain, and migrations are configured.
-2. The promoted identity database is now production-only; the old Preview Worker, domain, queues, and Preview OAuth grants were removed.
-3. Do not run the local test client seed against production. The remote test client and its grants were removed.
+1. An authorized operator verifies production queues, secrets, exact bindings, custom domain, and migrations for the release.
+2. An authorized operator verifies that the target identity database is production-only and that the retired Preview Worker, domain, queues, and Preview OAuth grants remain absent; historical cleanup records do not establish current state.
+3. Do not run the local test client seed against production. An authorized operator verifies that no remote test client or grants remain before the release.
 4. Create production OAuth clients through an authenticated admin operation with exact HTTPS redirect URIs.
 5. Configure Google callback `https://sso.pg72.tw/callback/google`.
 6. Re-run real Google and production Passkey flows, verify Copy/Link sign-out, and complete the `0018`/dedicated Queue/DLQ rollout, each RP receiver, multi-RP/failure/rollback drills, external alerts, the `0019` recovery-code rollout and lost-device drill, signing-key rotation, restore, and independent-review gates before changing the beta status.

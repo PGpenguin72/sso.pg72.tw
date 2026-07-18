@@ -75,6 +75,10 @@ exploit against a live PG72 service. Email
 
 ## Invite Beta Release Gate
 
+The following are release criteria, not evidence that any candidate or current
+production deployment has passed them. Each release requires contemporaneous,
+candidate-specific evidence.
+
 An invite-beta release requires:
 
 - strict TypeScript, workerd tests, production builds, dependency audit, and secret scan appropriate to the change;

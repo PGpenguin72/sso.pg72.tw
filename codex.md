@@ -119,7 +119,10 @@ PG72 目前有多個需要登入的網站，每個服務各自使用 Google OAut
 - SSO 負責 authentication；各應用程式仍負責自己的業務 authorization。
 - 瀏覽器 SSO 不自動解決 IMAP、SMTP 或其他非 HTTP 協議驗證。
 
-## 4. 現況盤點
+## 4. 服務整合盤點
+
+下表的 implementation 描述是 repository/local-source contract；production
+狀態只引用最後一份保留紀錄，且不得取代授權 operator 的 live re-verification。
 
 | 服務 | Ownership | 現有狀況 | 預定整合方式 | 狀態 |
 | --- | --- | --- | --- | --- |
@@ -397,7 +400,7 @@ access:                  standard <-> restricted
 - 使用者可查看、命名與移除每一組 Passkey。
 - 管理員至少登錄兩組不同復原路徑的 Passkey。
 - 移除最後一組 Passkey、變更 Email、管理 client，以及建立、輪替或撤銷 recovery codes 必須 fresh authentication；recovery-code mutation 另要求同一 session 最近完成 Passkey step-up。
-- 所有 client mutation 同時要求 session 建立時間在 10 分鐘內，並要求該 D1 session 的 Passkey step-up 時戳仍在 `PASSKEY_STEP_UP_MAX_AGE_SECONDS`（60-600 秒，現行 600）內；兩者缺一不可。
+- 所有 client mutation 同時要求 session 建立時間在 10 分鐘內，並要求該 D1 session 的 Passkey step-up 時戳仍在 `PASSKEY_STEP_UP_MAX_AGE_SECONDS`（60-600 秒；committed production-target value 為 600，live value 待重驗）內；兩者缺一不可。
 - Step-up 使用 `POST /api/account/passkey-step-up/challenge` 與 `/verify`。Challenge 由 Web Crypto/SimpleWebAuthn 產生、兩分鐘內有效、一次性且綁定 user + session；assertion 強制 exact origin、RP ID、credential ownership 與 user verification。成功後先以 guarded CAS 更新 credential counter，再以 D1 batch 先寫 success audit、最後寫入依賴該 exact audit event 的 session timestamp；任何 guard 失敗都不會產生有效 step-up。
 - 沒有 Passkey 的帳號一律回 `PASSKEY_ENROLLMENT_REQUIRED`，包含 `bootadmin`，沒有 runtime bypass。首次 bootstrap 以既有 Google fresh session 註冊 Passkey 後再 step-up。Local recovery source 只能在使用者事先建立且仍持有未使用 recovery code 時替換 Passkey；它不是 client-management bypass。最後一份 production record 未包含 enabled recovery，live state 必須重新驗證。
 - 以上行為已在 local source 以真實 P-256 assertion、replay、cross-session、expiry、missing-Passkey 與 UV regression 驗證；最後一份 production record 未包含 `0014` 或這個 deployment，current remote state 必須重新驗證，不能宣稱遠端 blocker 已關閉。
@@ -432,7 +435,7 @@ access:                  standard <-> restricted
 
 第一階段所有 clients 由管理員手動建立，dynamic client registration 關閉。
 
-現行第一方 confidential RP 在 token endpoint 使用 `client_secret_post`。Better Auth `1.6.23` 對 HTTP Basic credentials 的解析與 `oauth4webapi` RFC 6749 percent-encoding 不互通；在 provider 有可追蹤 patch、protocol regression test 且 RP 完成 migration 前，不把 `client_secret_basic` 寫成現行 contract。
+Repository contract 要求第一方 confidential RP 在 token endpoint 使用 `client_secret_post`。Better Auth `1.6.23` 對 HTTP Basic credentials 的解析與 `oauth4webapi` RFC 6749 percent-encoding 不互通；在 provider 有可追蹤 patch、protocol regression test 且 RP 完成 migration 前，不把 `client_secret_basic` 寫成 supported contract。這項 source contract 不證明任何 RP 的 current live configuration；rollout 前必須由授權 operator 重新驗證。
 
 ### 10.2 Redirect URI
 
@@ -693,8 +696,8 @@ Audit metadata 不得包含 access token、refresh token、session token、autho
 - 不建立 `Domain=.pg72.tw` 共用 session cookie。
 - OAuth Authorization Code Flow 強制 PKCE S256、`state`、`nonce` 與 issuer/audience 驗證。
 - Redirect URI 完整比對，不允許 wildcard。
-- ID token 與 back-channel logout JWT 使用非對稱簽章並透過 JWKS 驗證。現行
-  `pg72_at_` access token 是 opaque；一般 RP 使用 UserInfo，Mail Path A 使用
+- ID token 與 back-channel logout JWT 使用非對稱簽章並透過 JWKS 驗證。Repository
+  protocol contract 的 `pg72_at_` access token 是 opaque；一般 RP 使用 UserInfo，Mail Path A 使用
   §10.5 的 scoped introspection，不得解析 access token 或用 JWKS 本地驗證。
 - 支援 signing key overlap rotation，舊 key 在既有短效 token 到期後才移除。
 - 所有 secret 經 Wrangler secrets/Secrets Store 管理，不寫入 repo、log 或 D1 明文。
@@ -778,6 +781,9 @@ Trusted-manifest provenance adapter/evidence source 仍未實作；上述 pure r
 
 ### 18.3 第一方服務 migration blockers
 
+除非句子明確標示為最後一份 deployment record，本節的 implementation
+描述都只代表 local/service source contract，不宣稱目前 production behavior。
+
 #### Copy
 
 - 最後一份 deployment record 記載 Copy 已切換為 PGID OIDC confidential client + PKCE + consent、不再直接使用 Google client secret，且 client auth 為 `client_secret_post`；current traffic 與 configuration 必須由授權 operator 重新驗證。
@@ -786,7 +792,7 @@ Trusted-manifest provenance adapter/evidence source 仍未實作；上述 pure r
 - Auth.js JWT 只保存 opaque vault session ID；access/refresh token 以獨立 key 做 AES-GCM 加密後存 D1。
 - Refresh 使用 `active -> refreshing -> active` 與 lease/generation CAS；timeout、5xx、write-back unknown 或 abandoned refresh 不重用舊 token，只允許 terminal reauthentication。
 - 主動登出先撤銷 server-side vault row，成功後才清瀏覽器 cookie。
-- 既有部署紀錄顯示本機登出修復已上線，仍待 owner 實機確認；PGID local source 已有 central `sid`/delivery，但 Copy receiver、`0018`/Queue rollout 與 multi-RP 實機驗收尚未完成，因此不代表完整 Production GO。
+- 最後一份 deployment record 記載本機登出修復已上線，也記載仍待 owner 實機確認；current deployment 與 behavior 必須由授權 operator 重新驗證。PGID local source 已有 central `sid`/delivery，但 Copy receiver、`0018`/Queue rollout 與 multi-RP 實機驗收尚未完成，因此不代表完整 Production GO。
 
 #### Link
 
@@ -981,10 +987,10 @@ Repository source 選定的 Mail Path A 使用 Dovecot introspection + XOAUTH2�
 | 公開服務撤銷 SLA | 30 秒內 | 待確認 |
 | 管理服務撤銷 SLA | 立即，fail closed | 待確認 |
 | Audit retention | 365 天 | 待確認 |
-| 管理員復原 | 兩組 Passkey + recovery codes；local source complete，committed production target disabled，live setting 待重驗 | Preview / drill 待完成 |
+| 管理員復原 | 兩組 Passkey + recovery codes；local source complete，committed production target disabled，live setting 待重驗 | Source policy confirmed；Preview / drill 待完成；live setting unverified |
 | Dynamic client registration | 關閉 | 建議固定 |
-| Public registration | Committed target 與最後一份 remote record 均為 `invite`；live mode 待重驗，§9.2 gate 通過並經 owner 核准部署後才開啟 | 已確認 |
-| Better Auth runtime | 目前 `1.6.23` exact pin；安裝前重新查 stable/advisories，不使用 beta/RC | 建議固定 |
+| Public registration | Committed target 與最後一份 remote record 均為 `invite`；live mode 待重驗，§9.2 gate 通過並經 owner 核准部署後才開啟 | Source policy confirmed；live mode unverified |
+| Better Auth runtime | Repository exact-pins `1.6.23`；安裝前重新查 stable/advisories，不使用 beta/RC | 建議固定 |
 | Passkey RP ID | `sso.pg72.tw` | 建議固定 |
 | Cloudflare Access | 不使用 | 已確認 |
 | 日常登入方式 | Google + Passkey | 已確認 |

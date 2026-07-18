@@ -9,8 +9,10 @@ import {
   finalizeAuditArchiveLease,
   initializeOrVerifyAuditArchiveKey,
   queueAuditArchiveBatch,
+  readClaimedAuditArchiveBatch,
   renewAuditArchiveLease,
   replayDeadAuditArchiveBatch,
+  selectAuditArchiveRuntimeWork,
   selectAuditArchiveSource,
   type AuditArchiveLease,
   type AuditArchiveR2Evidence,
@@ -26,7 +28,7 @@ const KEY_VERSION = "v1";
 const ZERO_KEK = "A".repeat(43);
 const FINGERPRINT = reference(91);
 
-async function resetArchiveLedger(): Promise<void> {
+async function dropArchiveLedger(): Promise<void> {
   const triggers = await env.PG72_ID_DB.prepare(
     `SELECT name FROM sqlite_schema
       WHERE type = 'trigger'
@@ -46,13 +48,20 @@ async function resetArchiveLedger(): Promise<void> {
     env.PG72_ID_DB.prepare("DROP TABLE audit_archive_source"),
   ]);
   await env.PG72_ID_DB.prepare("DELETE FROM audit_event").run();
-  const migration = env.TEST_MIGRATIONS.find(
-    ({ name }) => name === "0021_audit_archive.sql",
-  );
-  if (!migration) throw new Error("missing archive migration");
+}
+
+async function applyArchiveMigration(migrationName: string): Promise<void> {
+  const migration = env.TEST_MIGRATIONS.find(({ name }) => name === migrationName);
+  if (!migration) throw new Error(`missing archive migration: ${migrationName}`);
   await env.PG72_ID_DB.batch(
     migration.queries.map((query) => env.PG72_ID_DB.prepare(query)),
   );
+}
+
+async function resetArchiveLedger(): Promise<void> {
+  await dropArchiveLedger();
+  await applyArchiveMigration("0021_audit_archive.sql");
+  await applyArchiveMigration("0023_audit_archive_r2_evidence.sql");
 }
 
 function mutateBatchResult(
@@ -67,6 +76,38 @@ function mutateBatchResult(
           mutate(results);
           return results;
         };
+      }
+      const result: unknown = Reflect.get(target, property, target);
+      return typeof result === "function" ? result.bind(target) : result;
+    },
+  });
+}
+
+function mutateAllResult(
+  database: D1Database,
+  mutate: (result: D1Result) => void,
+): D1Database {
+  const wrap = (statement: D1PreparedStatement): D1PreparedStatement =>
+    new Proxy(statement, {
+      get(target, property) {
+        if (property === "all") {
+          return async () => {
+            const result = await target.all();
+            mutate(result);
+            return result;
+          };
+        }
+        if (property === "bind") {
+          return (...values: unknown[]) => wrap(target.bind(...values));
+        }
+        const result: unknown = Reflect.get(target, property, target);
+        return typeof result === "function" ? result.bind(target) : result;
+      },
+    });
+  return new Proxy(database, {
+    get(target, property) {
+      if (property === "prepare") {
+        return (query: string) => wrap(target.prepare(query));
       }
       const result: unknown = Reflect.get(target, property, target);
       return typeof result === "function" ? result.bind(target) : result;
@@ -190,10 +231,12 @@ async function acquire(
   claimedAt: string,
   leaseExpiresAt: string,
   leaseId = reference(),
+  dispatchGeneration = 1,
 ): Promise<AuditArchiveLease> {
   const result = await acquireAuditArchiveLease(env.PG72_ID_DB, {
     batchKey: fixture.input.batchKey,
     claimedAt,
+    dispatchGeneration,
     leaseExpiresAt,
     leaseId,
   });
@@ -209,8 +252,10 @@ function evidence(
 ): AuditArchiveR2Evidence {
   return {
     etag: `etag-${suffix}`,
+    observedBytes: manifest.objectBytes,
     readbackAt: completedAt,
     readbackSha256: manifest.objectSha256,
+    storedSha256: manifest.objectSha256,
     version: `version-${suffix}`,
   };
 }
@@ -327,6 +372,44 @@ describe.sequential("audit archive D1 repository", () => {
       reason: { code: "key_mismatch" },
       status: "rejected",
     });
+  });
+
+  it("preserves an active 0021 lease while rebuilding the evidence table", async () => {
+    await dropArchiveLedger();
+    await applyArchiveMigration("0021_audit_archive.sql");
+    const fixture = await queuedFixture();
+    const lease = await acquire(fixture, at(11_000), at(311_000));
+    expect(
+      (await env.PG72_ID_DB.prepare(
+        "PRAGMA table_info(audit_archive_attempt)",
+      ).all<{ name: string }>()).results.map(({ name }) => name),
+    ).not.toContain("r2_observed_bytes");
+
+    await applyArchiveMigration("0023_audit_archive_r2_evidence.sql");
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT outcome, lease_id, r2_observed_bytes, r2_stored_sha256
+           FROM audit_archive_attempt WHERE id = ?`,
+      )
+        .bind(lease.leaseId)
+        .first(),
+    ).toEqual({
+      lease_id: lease.leaseId,
+      outcome: "in_flight",
+      r2_observed_bytes: null,
+      r2_stored_sha256: null,
+    });
+    const claimed = await readClaimedAuditArchiveBatch(env.PG72_ID_DB, { lease });
+    expect(claimed?.objectSha256).toBe(fixture.manifest.objectSha256);
+    claimed?.encryptedEnvelope.fill(0);
+    const completedAt = at(20_000);
+    expect(
+      await finalizeAuditArchiveLease(env.PG72_ID_DB, {
+        completedAt,
+        evidence: evidence(fixture.manifest, completedAt),
+        lease,
+      }),
+    ).toBe("applied");
   });
 
   it("selects a monotonic head prefix, preserves legitimate gaps, and caps at 100", async () => {
@@ -489,6 +572,7 @@ describe.sequential("audit archive D1 repository", () => {
     const input = {
       batchKey: fixture.input.batchKey,
       claimedAt: at(11_000),
+      dispatchGeneration: 1,
       leaseExpiresAt: at(311_000),
       leaseId,
     };
@@ -515,6 +599,7 @@ describe.sequential("audit archive D1 repository", () => {
       await acquireAuditArchiveLease(env.PG72_ID_DB, {
         batchKey: fixture.input.batchKey,
         claimedAt: at(9_000),
+        dispatchGeneration: 1,
         leaseExpiresAt: at(309_000),
         leaseId: reference(),
       }),
@@ -523,6 +608,7 @@ describe.sequential("audit archive D1 repository", () => {
       acquireAuditArchiveLease(env.PG72_ID_DB, {
         batchKey: fixture.input.batchKey,
         claimedAt: at(11_000),
+        dispatchGeneration: 1,
         leaseExpiresAt: at(311_001),
         leaseId: reference(),
       }),
@@ -533,12 +619,14 @@ describe.sequential("audit archive D1 repository", () => {
       acquireAuditArchiveLease(env.PG72_ID_DB, {
         batchKey: fixture.input.batchKey,
         claimedAt: at(11_000),
+        dispatchGeneration: 1,
         leaseExpiresAt: at(311_000),
         leaseId: reference(),
       }),
       acquireAuditArchiveLease(env.PG72_ID_DB, {
         batchKey: fixture.input.batchKey,
         claimedAt: at(11_000),
+        dispatchGeneration: 1,
         leaseExpiresAt: at(311_000),
         leaseId: reference(),
       }),
@@ -547,6 +635,256 @@ describe.sequential("audit archive D1 repository", () => {
       "acquired",
       "conflict",
     ]);
+  });
+
+  it("fences stale and future Queue generations across a manual replay", async () => {
+    const fixture = await queuedFixture();
+    for (const dispatchGeneration of [2, 1_000_000]) {
+      expect(
+        await acquireAuditArchiveLease(env.PG72_ID_DB, {
+          batchKey: fixture.input.batchKey,
+          claimedAt: at(11_000),
+          dispatchGeneration,
+          leaseExpiresAt: at(311_000),
+          leaseId: reference(),
+        }),
+      ).toEqual({ lease: null, status: "conflict" });
+    }
+
+    await driveFixtureToDead(fixture);
+    const replayedAt = at(2_000_000);
+    expect(
+      await replayDeadAuditArchiveBatch(env.PG72_ID_DB, {
+        auditEventId: `archive.replay.${crypto.randomUUID()}`,
+        batchKey: fixture.input.batchKey,
+        dispatchGeneration: 1,
+        nextAttemptAt: replayedAt,
+        replayedAt,
+      }),
+    ).toBe("applied");
+    for (const dispatchGeneration of [1, 3]) {
+      expect(
+        await acquireAuditArchiveLease(env.PG72_ID_DB, {
+          batchKey: fixture.input.batchKey,
+          claimedAt: at(2_000_001),
+          dispatchGeneration,
+          leaseExpiresAt: at(2_300_001),
+          leaseId: reference(),
+        }),
+      ).toEqual({ lease: null, status: "conflict" });
+    }
+    const exact = await acquireAuditArchiveLease(env.PG72_ID_DB, {
+      batchKey: fixture.input.batchKey,
+      claimedAt: at(2_000_001),
+      dispatchGeneration: 2,
+      leaseExpiresAt: at(2_300_001),
+      leaseId: reference(),
+    });
+    expect(exact.status).toBe("acquired");
+    expect(exact.lease?.dispatchGeneration).toBe(2);
+  });
+
+  it("reads one immutable envelope only for the exact active lease", async () => {
+    const fixture = await queuedFixture();
+    const lease = await acquire(fixture, at(11_000), at(311_000));
+    const claimed = await readClaimedAuditArchiveBatch(env.PG72_ID_DB, { lease });
+    expect(claimed).not.toBeNull();
+    expect(claimed).toMatchObject({
+      batchKey: fixture.input.batchKey,
+      checkpointFromSequence: fixture.manifest.checkpointFromSequence,
+      checkpointRevision: fixture.manifest.batchGeneration - 1,
+      contentType: fixture.manifest.contentType,
+      keyVersion: fixture.manifest.keyVersion,
+      manifest: fixture.manifest,
+      objectBytes: fixture.manifest.objectBytes,
+      objectKey: fixture.manifest.objectKey,
+      objectSha256: fixture.manifest.objectSha256,
+    });
+    expect(claimed?.encryptedEnvelope).not.toBe(fixture.input.encryptedEnvelope);
+    expect(Array.from(claimed?.encryptedEnvelope ?? [])).toEqual(
+      Array.from(fixture.input.encryptedEnvelope),
+    );
+    claimed?.encryptedEnvelope.fill(0);
+
+    for (const staleLease of [
+      { ...lease, leaseId: reference() },
+      { ...lease, dispatchGeneration: lease.dispatchGeneration + 1 },
+      { ...lease, updatedAt: at(12_000) },
+    ]) {
+      expect(
+        await readClaimedAuditArchiveBatch(env.PG72_ID_DB, { lease: staleLease }),
+      ).toBeNull();
+    }
+  });
+
+  it("fails the claimed-envelope reader closed on shape and digest corruption", async () => {
+    const fixture = await queuedFixture();
+    const lease = await acquire(fixture, at(11_000), at(311_000));
+    const shapeDatabase = mutateAllResult(env.PG72_ID_DB, (result) => {
+      const row = result.results[0];
+      if (typeof row === "object" && row !== null) {
+        result.results[0] = { ...row, unexpected: true };
+      }
+    });
+    await expectRepositoryError(
+      readClaimedAuditArchiveBatch(shapeDatabase, { lease }),
+      "source_invalid",
+      [fixture.input.batchKey, lease.leaseId],
+    );
+
+    const missingDatabase = mutateAllResult(env.PG72_ID_DB, (result) => {
+      const row = result.results[0];
+      if (typeof row === "object" && row !== null) {
+        result.results[0] = { ...row, encrypted_envelope: null };
+      }
+    });
+    await expectRepositoryError(
+      readClaimedAuditArchiveBatch(missingDatabase, { lease }),
+      "source_invalid",
+    );
+
+    const lengthDatabase = mutateAllResult(env.PG72_ID_DB, (result) => {
+      const row = result.results[0];
+      if (typeof row === "object" && row !== null) {
+        result.results[0] = { ...row, envelope_bytes: fixture.manifest.objectBytes - 1 };
+      }
+    });
+    await expectRepositoryError(
+      readClaimedAuditArchiveBatch(lengthDatabase, { lease }),
+      "source_invalid",
+    );
+
+    const sparseDatabase = mutateAllResult(env.PG72_ID_DB, (result) => {
+      const row = result.results[0];
+      if (typeof row === "object" && row !== null) {
+        result.results[0] = {
+          ...row,
+          encrypted_envelope: new Array(fixture.manifest.objectBytes),
+        };
+      }
+    });
+    await expectRepositoryError(
+      readClaimedAuditArchiveBatch(sparseDatabase, { lease }),
+      "source_invalid",
+    );
+
+    const digestDatabase = mutateAllResult(env.PG72_ID_DB, (result) => {
+      const row = result.results[0];
+      if (typeof row !== "object" || row === null) return;
+      const corrupted = Array.from(fixture.input.encryptedEnvelope);
+      corrupted[corrupted.length - 1] ^= 1;
+      result.results[0] = { ...row, encrypted_envelope: corrupted };
+    });
+    await expectRepositoryError(
+      readClaimedAuditArchiveBatch(digestDatabase, { lease }),
+      "source_invalid",
+      [fixture.manifest.objectSha256, lease.leaseId],
+    );
+  });
+
+  it("selects bounded due, expired, and checkpoint-blocking runtime work", async () => {
+    expect(
+      await selectAuditArchiveRuntimeWork(env.PG72_ID_DB, {
+        asOf: at(1),
+        limit: 25,
+      }),
+    ).toEqual({
+      checkpointBatch: null,
+      due: [],
+      dueHasMore: false,
+      expired: [],
+      expiredHasMore: false,
+    });
+
+    const fixture = await queuedFixture();
+    const beforeDue = await selectAuditArchiveRuntimeWork(env.PG72_ID_DB, {
+      asOf: at(10_000),
+      limit: 25,
+    });
+    expect(beforeDue).toEqual({
+      checkpointBatch: { batchKey: fixture.input.batchKey, status: "pending" },
+      due: [],
+      dueHasMore: false,
+      expired: [],
+      expiredHasMore: false,
+    });
+    const due = await selectAuditArchiveRuntimeWork(env.PG72_ID_DB, {
+      asOf: fixture.manifest.createdAt,
+      limit: 25,
+    });
+    expect(due.due).toEqual([{
+      batchKey: fixture.input.batchKey,
+      dispatchGeneration: 1,
+    }]);
+    expect(due.checkpointBatch?.status).toBe("pending");
+
+    const lease = await acquire(fixture, at(11_000), at(311_000));
+    const beforeExpiry = await selectAuditArchiveRuntimeWork(env.PG72_ID_DB, {
+      asOf: at(310_999),
+      limit: 25,
+    });
+    expect(beforeExpiry.due).toEqual([]);
+    expect(beforeExpiry.expired).toEqual([]);
+    expect(beforeExpiry.checkpointBatch).toEqual({
+      batchKey: fixture.input.batchKey,
+      status: "processing",
+    });
+    const atExpiry = await selectAuditArchiveRuntimeWork(env.PG72_ID_DB, {
+      asOf: lease.leaseExpiresAt,
+      limit: 25,
+    });
+    expect(atExpiry.expired).toEqual([lease]);
+    expect(atExpiry.expiredHasMore).toBe(false);
+  });
+
+  it("caps runtime discovery at 25 and reports the 26th row", async () => {
+    const fixture = await queuedFixture();
+    const dueDatabase = mutateBatchResult(env.PG72_ID_DB, (results) => {
+      if (!results[0]) return;
+      results[0].results = Array.from({ length: 26 }, (_, index) => ({
+        batch_key: reference(index + 1),
+        dispatch_generation: 1,
+        next_attempt_at: fixture.manifest.createdAt,
+        status: "pending",
+      }));
+    });
+    const due = await selectAuditArchiveRuntimeWork(dueDatabase, {
+      asOf: fixture.manifest.createdAt,
+      limit: 25,
+    });
+    expect(due.due).toHaveLength(25);
+    expect(due.dueHasMore).toBe(true);
+
+    await acquire(fixture, at(11_000), at(311_000));
+    const expiredDatabase = mutateBatchResult(env.PG72_ID_DB, (results) => {
+      if (!results[1]) return;
+      results[1].results = Array.from({ length: 26 }, (_, index) => ({
+        attempt_number: 1,
+        batch_key: reference(index + 1),
+        dispatch_generation: 1,
+        lease_expires_at: at(311_000),
+        lease_id: reference(index + 101),
+        outcome: "in_flight",
+        started_at: at(11_000),
+        updated_at: at(11_000),
+      }));
+    });
+    const expired = await selectAuditArchiveRuntimeWork(expiredDatabase, {
+      asOf: at(311_000),
+      limit: 25,
+    });
+    expect(expired.expired).toHaveLength(25);
+    expect(expired.expiredHasMore).toBe(true);
+
+    for (const limit of [0, 26]) {
+      await expectRepositoryError(
+        selectAuditArchiveRuntimeWork(env.PG72_ID_DB, {
+          asOf: at(311_000),
+          limit,
+        }),
+        "invalid_input",
+      );
+    }
   });
 
   it("renews the same in-flight attempt with exact CAS and no second attempt row", async () => {
@@ -794,18 +1132,100 @@ describe.sequential("audit archive D1 repository", () => {
     ).toBe(5);
   });
 
-  it("restricts corrupt terminalization to complete readback evidence", async () => {
+  it("records pre-R2 crypto integrity failure without inventing R2 evidence", async () => {
+    const fixture = await queuedFixture();
+    const lease = await acquire(fixture, at(11_000), at(311_000));
+    const completedAt = at(20_000);
+    const input = {
+      completedAt,
+      errorCode: "crypto_integrity" as const,
+      evidence: null,
+      lease,
+      nextAttemptAt: null,
+    };
+    expect(await failAuditArchiveLease(env.PG72_ID_DB, input)).toBe("applied");
+    expect(await failAuditArchiveLease(env.PG72_ID_DB, input)).toBe("duplicate");
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT outcome, error_code, r2_version, r2_etag,
+                r2_observed_bytes, r2_stored_sha256,
+                r2_readback_sha256, r2_readback_at
+           FROM audit_archive_attempt WHERE id = ?`,
+      )
+        .bind(lease.leaseId)
+        .first(),
+    ).toEqual({
+      error_code: "crypto_integrity",
+      outcome: "corrupt",
+      r2_etag: null,
+      r2_observed_bytes: null,
+      r2_readback_at: null,
+      r2_readback_sha256: null,
+      r2_stored_sha256: null,
+      r2_version: null,
+    });
+  });
+
+  it("records bounded metadata-only object conflicts without a body hash", async () => {
+    const fixture = await queuedFixture();
+    const lease = await acquire(fixture, at(11_000), at(311_000));
+    const completedAt = at(20_000);
+    const conflictEvidence = {
+      etag: "etag-existing-oversized",
+      observedBytes: 524_289,
+      readbackAt: completedAt,
+      readbackSha256: null,
+      storedSha256: null,
+      version: "version-existing-oversized",
+    };
+    expect(
+      await failAuditArchiveLease(env.PG72_ID_DB, {
+        completedAt,
+        errorCode: "r2_object_conflict",
+        evidence: conflictEvidence,
+        lease,
+        nextAttemptAt: null,
+      }),
+    ).toBe("applied");
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT outcome, error_code, r2_version, r2_etag,
+                r2_observed_bytes, r2_stored_sha256,
+                r2_readback_sha256, r2_readback_at
+           FROM audit_archive_attempt WHERE id = ?`,
+      )
+        .bind(lease.leaseId)
+        .first(),
+    ).toEqual({
+      error_code: "r2_object_conflict",
+      outcome: "corrupt",
+      r2_etag: conflictEvidence.etag,
+      r2_observed_bytes: conflictEvidence.observedBytes,
+      r2_readback_at: completedAt,
+      r2_readback_sha256: null,
+      r2_stored_sha256: null,
+      r2_version: conflictEvidence.version,
+    });
+  });
+
+  it("requires a full body hash for readback mismatch evidence", async () => {
     const fixture = await queuedFixture();
     const lease = await acquire(fixture, at(11_000), at(311_000));
     const completedAt = at(20_000);
     await expectRepositoryError(
-      failAuditArchiveLease(env.PG72_ID_DB, {
-        completedAt,
-        errorCode: "crypto_integrity",
-        evidence: null,
-        lease,
-        nextAttemptAt: null,
-      }),
+      Reflect.apply(failAuditArchiveLease, undefined, [
+        env.PG72_ID_DB,
+        {
+          completedAt,
+          errorCode: "r2_readback_mismatch",
+          evidence: {
+            ...evidence(fixture.manifest, completedAt, "incomplete"),
+            readbackSha256: null,
+          },
+          lease,
+          nextAttemptAt: null,
+        },
+      ]),
       "invalid_input",
     );
     const corruptionEvidence = {
@@ -1024,7 +1444,7 @@ describe.sequential("audit archive D1 repository", () => {
        SELECT batch_key FROM audit_archive_batch
         WHERE status IN ('pending', 'retry') AND next_attempt_at <= ?
         ORDER BY status, next_attempt_at, batch_key
-        LIMIT 101`,
+        LIMIT 26`,
     )
       .bind(at(1))
       .all<{ detail: string }>();
@@ -1034,10 +1454,18 @@ describe.sequential("audit archive D1 repository", () => {
 
     const expiredPlan = await env.PG72_ID_DB.prepare(
       `EXPLAIN QUERY PLAN
-       SELECT batch_key FROM audit_archive_batch
-        WHERE status = 'processing' AND lease_expires_at <= ?
-        ORDER BY lease_expires_at, batch_key
-        LIMIT 101`,
+       SELECT batch.batch_key
+         FROM audit_archive_batch AS batch
+         JOIN audit_archive_attempt AS attempt
+           ON attempt.batch_key = batch.batch_key
+          AND attempt.dispatch_generation = batch.dispatch_generation
+          AND attempt.attempt_number = batch.attempts
+          AND attempt.lease_id = batch.lease_id
+        WHERE batch.status = 'processing'
+          AND batch.lease_expires_at <= ?
+          AND attempt.outcome = 'in_flight'
+        ORDER BY batch.lease_expires_at, batch.batch_key
+        LIMIT 26`,
     )
       .bind(at(1))
       .all<{ detail: string }>();

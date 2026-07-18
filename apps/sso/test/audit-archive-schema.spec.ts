@@ -430,6 +430,19 @@ describe("audit archive 0021 schema", () => {
     expect("AUDIT_ARCHIVE" in env).toBe(false);
     expect("AUDIT_ARCHIVE_DELIVERIES" in env).toBe(false);
 
+    const attemptColumns = await env.PG72_ID_DB.prepare(
+      "PRAGMA table_info(audit_archive_attempt)",
+    ).all<{ name: string }>();
+    expect(attemptColumns.results.map(({ name }) => name)).toEqual(
+      expect.arrayContaining(["r2_observed_bytes", "r2_stored_sha256"]),
+    );
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT count(*) AS count FROM sqlite_schema
+          WHERE type = 'table' AND name = 'audit_archive_attempt_0021'`,
+      ).first<number>("count"),
+    ).toBe(0);
+
     const parentGuard = await env.PG72_ID_DB.prepare(
       `SELECT sql FROM sqlite_schema
         WHERE type = 'trigger'

@@ -176,6 +176,33 @@ only the optional native packages for the current runner. Linux CI evidence and
 a macOS local inventory can therefore differ in optional package rows while
 remaining derived from the same frozen lockfile.
 
+## Production Version Evidence Model
+
+`scripts/security/production-version-upload-gate.mjs` is currently an
+`OFFLINE_MODEL_ONLY`, structurally non-executable model. Its production entry
+fails before any remote adapter or child process can run. Ordinary GitHub CI,
+package scripts, workflow commands, and local-script allowlists do not expose a
+direct command for it. An offline model result is never production deploy
+evidence and does not authorize version promotion, traffic changes, routes,
+triggers, or DAST.
+
+A future Workers Builds production command must invoke a separately reviewed
+gate that can upload only an inactive version. That path remains blocked on all
+of the following:
+
+- external-C review of the normalized Cloudflare API adapter;
+- owner review of the Workers Builds trigger and token custody;
+- a non-retrying upload adapter, or a reviewed way to disable upload retries;
+- complete child-process-tree custody;
+- a sealed identity for Wrangler's executable dependency closure;
+- trusted Git binary and configuration custody.
+
+Pinned Wrangler 4.110.0 still retries some internal API failures during
+`versions upload`; pinning its package, CLI, and launcher files does not remove
+that behavior or identify all transitively loaded executable bytes. Until every
+blocker above is closed in reviewed source, this model must remain a production
+NO-GO and no runnable production command may be published.
+
 ## Advisory Acceptance
 
 `security/accepted-advisories.json` is the only waiver input. Each entry must

@@ -678,7 +678,13 @@ describe("alert observability migration", () => {
           'oauth_client_report_time_client_reason_reporter_bounded_idx',
           'logout_delivery_time_client_status_bounded_idx',
           'logout_delivery_status_client_time_bounded_idx',
-          'logout_delivery_attempt_completion_bounded_idx'
+          'logout_delivery_attempt_completion_bounded_idx',
+          'logout_delivery_invalid_created_at_bounded_idx',
+          'logout_delivery_attempt_invalid_completed_at_bounded_idx',
+          'logout_delivery_created_at_insert_guard',
+          'logout_delivery_created_at_update_guard',
+          'logout_delivery_attempt_completed_at_insert_guard',
+          'logout_delivery_attempt_completed_at_update_guard'
         )
         ORDER BY name`,
     ).all<{ name: string; sql: string; type: string }>();
@@ -699,7 +705,13 @@ describe("alert observability migration", () => {
       "audit_event_type_actor_time_bounded_idx",
       "audit_event_type_subject_time_bounded_idx",
       "audit_event_type_time_bounded_idx",
+      "logout_delivery_attempt_completed_at_insert_guard",
+      "logout_delivery_attempt_completed_at_update_guard",
       "logout_delivery_attempt_completion_bounded_idx",
+      "logout_delivery_attempt_invalid_completed_at_bounded_idx",
+      "logout_delivery_created_at_insert_guard",
+      "logout_delivery_created_at_update_guard",
+      "logout_delivery_invalid_created_at_bounded_idx",
       "logout_delivery_status_client_time_bounded_idx",
       "logout_delivery_time_client_status_bounded_idx",
       "oauth_client_report_created_at_insert_guard",
@@ -778,6 +790,37 @@ describe("alert observability migration", () => {
     expect(trackedStateIndex).toContain('WHERE "source_kind" = \'d1_exact\'');
     expect(trackedStateIndex).toContain('"subject_ref" IS NOT NULL');
     expect(trackedStateIndex).toContain('"consecutive_clears" > 0');
+    const invalidDeliveryIndex = schema.results.find(
+      ({ name }) => name === "logout_delivery_invalid_created_at_bounded_idx",
+    )?.sql;
+    expect(invalidDeliveryIndex).toContain('ON "logout_delivery" ("created_at")');
+    expect(invalidDeliveryIndex).toContain("WHERE NOT");
+    expect(invalidDeliveryIndex).toContain("%Y-%m-%dT%H:%M:%fZ");
+    const invalidAttemptIndex = schema.results.find(
+      ({ name }) =>
+        name === "logout_delivery_attempt_invalid_completed_at_bounded_idx",
+    )?.sql;
+    expect(invalidAttemptIndex).toContain(
+      'ON "logout_delivery_attempt" ("completed_at")',
+    );
+    expect(invalidAttemptIndex).toContain('"completed_at" IS NOT NULL');
+    for (const name of [
+      "logout_delivery_created_at_insert_guard",
+      "logout_delivery_created_at_update_guard",
+      "logout_delivery_attempt_completed_at_insert_guard",
+      "logout_delivery_attempt_completed_at_update_guard",
+    ]) {
+      const trigger = schema.results.find((entry) => entry.name === name);
+      expect(trigger?.type).toBe("trigger");
+      expect(trigger?.sql).toContain("must be canonical");
+      expect(trigger?.sql).toContain("%Y-%m-%dT%H:%M:%fZ");
+      expect(trigger?.sql).toContain("IS NOT NULL");
+      if (name.includes("completed_at")) {
+        expect(trigger?.sql).toContain('NEW."completed_at" IS NOT NULL');
+      } else {
+        expect(trigger?.sql).toContain('typeof(NEW."created_at") = \'text\'');
+      }
+    }
     const actorPlan = await env.PG72_ID_DB.prepare(
       `EXPLAIN QUERY PLAN
        SELECT actor_ref, actor_user_id, occurred_at, id

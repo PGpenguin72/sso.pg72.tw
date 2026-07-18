@@ -2757,3 +2757,94 @@ CREATE INDEX "logout_delivery_attempt_completion_bounded_idx"
   ON "logout_delivery_attempt" (
     "completed_at" DESC, "outcome", "delivery_id"
   );
+
+-- Migration 0018 predates canonical timestamp guards. Keep any legacy-invalid
+-- row visible through sparse covering indexes so lexical alert windows cannot
+-- silently exclude corrupt evidence, then reject new invalid timestamps.
+CREATE INDEX "logout_delivery_invalid_created_at_bounded_idx"
+  ON "logout_delivery" ("created_at")
+  WHERE NOT (
+    typeof("created_at") = 'text'
+    AND length("created_at") = 24
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds') IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%fZ', "created_at", '+0 seconds')
+        = "created_at"
+  );
+
+CREATE INDEX "logout_delivery_attempt_invalid_completed_at_bounded_idx"
+  ON "logout_delivery_attempt" ("completed_at")
+  WHERE "completed_at" IS NOT NULL
+    AND NOT (
+      typeof("completed_at") = 'text'
+      AND length("completed_at") = 24
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "completed_at", '+0 seconds'
+      ) IS NOT NULL
+      AND strftime(
+        '%Y-%m-%dT%H:%M:%fZ', "completed_at", '+0 seconds'
+      ) = "completed_at"
+    );
+
+CREATE TRIGGER "logout_delivery_created_at_insert_guard"
+BEFORE INSERT ON "logout_delivery"
+WHEN NOT (
+  typeof(NEW."created_at") = 'text'
+  AND length(NEW."created_at") = 24
+  AND strftime(
+    '%Y-%m-%dT%H:%M:%fZ', NEW."created_at", '+0 seconds'
+  ) IS NOT NULL
+  AND strftime('%Y-%m-%dT%H:%M:%fZ', NEW."created_at", '+0 seconds')
+      = NEW."created_at"
+)
+BEGIN
+  SELECT RAISE(ABORT, 'logout delivery created_at must be canonical');
+END;
+
+CREATE TRIGGER "logout_delivery_created_at_update_guard"
+BEFORE UPDATE OF "created_at" ON "logout_delivery"
+WHEN NOT (
+  typeof(NEW."created_at") = 'text'
+  AND length(NEW."created_at") = 24
+  AND strftime(
+    '%Y-%m-%dT%H:%M:%fZ', NEW."created_at", '+0 seconds'
+  ) IS NOT NULL
+  AND strftime('%Y-%m-%dT%H:%M:%fZ', NEW."created_at", '+0 seconds')
+      = NEW."created_at"
+)
+BEGIN
+  SELECT RAISE(ABORT, 'logout delivery created_at must be canonical');
+END;
+
+CREATE TRIGGER "logout_delivery_attempt_completed_at_insert_guard"
+BEFORE INSERT ON "logout_delivery_attempt"
+WHEN NEW."completed_at" IS NOT NULL
+  AND NOT (
+    typeof(NEW."completed_at") = 'text'
+    AND length(NEW."completed_at") = 24
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', NEW."completed_at", '+0 seconds'
+    ) IS NOT NULL
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', NEW."completed_at", '+0 seconds'
+    ) = NEW."completed_at"
+  )
+BEGIN
+  SELECT RAISE(ABORT, 'logout attempt completed_at must be canonical');
+END;
+
+CREATE TRIGGER "logout_delivery_attempt_completed_at_update_guard"
+BEFORE UPDATE OF "completed_at" ON "logout_delivery_attempt"
+WHEN NEW."completed_at" IS NOT NULL
+  AND NOT (
+    typeof(NEW."completed_at") = 'text'
+    AND length(NEW."completed_at") = 24
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', NEW."completed_at", '+0 seconds'
+    ) IS NOT NULL
+    AND strftime(
+      '%Y-%m-%dT%H:%M:%fZ', NEW."completed_at", '+0 seconds'
+    ) = NEW."completed_at"
+  )
+BEGIN
+  SELECT RAISE(ABORT, 'logout attempt completed_at must be canonical');
+END;

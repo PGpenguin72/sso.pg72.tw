@@ -164,6 +164,43 @@ function createDependencyFixture() {
        AFTER UPDATE ON "audit_archive_batch" BEGIN SELECT 1; END;`,
   );
   writeFixture(
+    path.join(
+      identityRoot,
+      "migrations",
+      "0022_alert_evaluator_run_proof.sql",
+    ),
+    `CREATE TABLE "alert_evaluator_run" (
+       trigger_cron text,
+       trigger_scheduled_at text,
+       UNIQUE ("trigger_cron", "trigger_scheduled_at")
+     );
+     CREATE TABLE "alert_evaluator_run_source" (
+       run_id text,
+       source_id text,
+       PRIMARY KEY (run_id, source_id)
+     );
+     CREATE TABLE "alert_evaluator_run_decision" (
+       run_id text,
+       source_id text,
+       FOREIGN KEY ("run_id", "source_id")
+         REFERENCES "alert_evaluator_run_source" (run_id, source_id)
+     );
+     CREATE TRIGGER "alert_evaluator_run_acquire_runtime"
+       AFTER INSERT ON "alert_evaluator_run" BEGIN SELECT 1; END;
+     CREATE TRIGGER "alert_runtime_evaluator_lease_run_guard"
+       AFTER INSERT ON "alert_evaluator_run" BEGIN SELECT 1; END;
+     CREATE TRIGGER "alert_runtime_evaluator_idle_update_guard"
+       AFTER INSERT ON "alert_evaluator_run" BEGIN SELECT 1; END;
+     CREATE TRIGGER "alert_evaluator_run_renew_runtime"
+       AFTER INSERT ON "alert_evaluator_run" BEGIN SELECT 1; END;
+     CREATE TRIGGER "alert_runtime_evaluator_terminal_run_guard"
+       AFTER INSERT ON "alert_evaluator_run" BEGIN SELECT 1; END;
+     CREATE TRIGGER "alert_runtime_evaluator_terminalize_run"
+       AFTER INSERT ON "alert_evaluator_run" BEGIN SELECT 1; END;
+     CREATE INDEX "alert_evaluator_run_status_expiry_idx"
+       ON "alert_evaluator_run" (trigger_scheduled_at);`,
+  );
+  writeFixture(
     path.join(identityRoot, "worker", "audit-archive.ts"),
     `export const PUBLIC_READINESS_ARCHIVE_CONTRACT = "pgid-audit-archive-v1";
      export async function archiveAuditBatch() { return true; }
@@ -764,6 +801,7 @@ test("lookalike filenames do not satisfy exact dependency paths", () => {
     ["apps", "sso", "migrations", "0018_global_logout.sql"],
     ["apps", "sso", "migrations", "0019_recovery_codes.sql"],
     ["apps", "sso", "migrations", "0020_alert_observability.sql"],
+    ["apps", "sso", "migrations", "0022_alert_evaluator_run_proof.sql"],
     ["apps", "sso", "worker", "audit-archive.ts"],
     ["security", "release-policy.json"],
   ];
@@ -815,6 +853,34 @@ test("encrypted archive requires the exact 0021 ledger before runtime source", (
       assert.equal(
         statusOf(dependencyStatus(fixture), "encrypted_r2_archive"),
         "source_invalid",
+      );
+    } finally {
+      rmSync(fixture.repositoryRoot, { force: true, recursive: true });
+    }
+  }
+});
+
+test("observability evidence requires the exact 0022 run-proof companion", () => {
+  for (const mutation of ["missing", "empty", "truncated", "commented"]) {
+    const fixture = createDependencyFixture();
+    try {
+      const target = path.join(
+        fixture.identityRoot,
+        "migrations",
+        "0022_alert_evaluator_run_proof.sql",
+      );
+      if (mutation === "missing") renameSync(target, `${target}.lookalike`);
+      if (mutation === "empty") writeFileSync(target, "");
+      if (mutation === "truncated") {
+        writeFileSync(target, 'CREATE TABLE "alert_evaluator_run" (id text);');
+      }
+      if (mutation === "commented") {
+        const original = readFileSync(target, "utf8");
+        writeFileSync(target, `-- ${original.replaceAll("\n", "\n-- ")}\n`);
+      }
+      assert.equal(
+        statusOf(dependencyStatus(fixture), "observability_0020"),
+        mutation === "missing" ? "dependency_missing" : "source_invalid",
       );
     } finally {
       rmSync(fixture.repositoryRoot, { force: true, recursive: true });

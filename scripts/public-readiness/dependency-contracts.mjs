@@ -161,6 +161,28 @@ const SQL_CONTRACTS = Object.freeze({
   },
   observability_0020: {
     filename: path.join("migrations", "0020_alert_observability.sql"),
+    companions: [
+      {
+        filename: path.join(
+          "migrations",
+          "0022_alert_evaluator_run_proof.sql",
+        ),
+        markers: [
+          /create table\s+"alert_evaluator_run"/i,
+          /create table\s+"alert_evaluator_run_source"/i,
+          /create table\s+"alert_evaluator_run_decision"/i,
+          /unique\s*\(\s*"trigger_cron"\s*,\s*"trigger_scheduled_at"\s*\)/i,
+          /foreign key\s*\(\s*"run_id"\s*,\s*"source_id"\s*\)/i,
+          /create trigger\s+"alert_evaluator_run_acquire_runtime"/i,
+          /create trigger\s+"alert_runtime_evaluator_lease_run_guard"/i,
+          /create trigger\s+"alert_runtime_evaluator_idle_update_guard"/i,
+          /create trigger\s+"alert_evaluator_run_renew_runtime"/i,
+          /create trigger\s+"alert_runtime_evaluator_terminal_run_guard"/i,
+          /create trigger\s+"alert_runtime_evaluator_terminalize_run"/i,
+          /create index\s+"alert_evaluator_run_status_expiry_idx"/i,
+        ],
+      },
+    ],
     markers: [
       /alter table\s+"audit_event"\s+add column\s+"actor_ref"/i,
       /"actor_ref_hash_version"\s+integer/i,
@@ -316,19 +338,27 @@ function sqlWithoutComments(text) {
 }
 
 function sqlContractState(identityRoot, contract) {
-  const filename = path.join(identityRoot, contract.filename);
-  const source = allFilesPresent([filename]);
+  const contracts = [contract, ...(contract.companions ?? [])];
+  const source = allFilesPresent(
+    contracts.map(({ filename }) => path.join(identityRoot, filename)),
+  );
   if (source.state !== "present") return source.state;
-  const text = sqlWithoutComments(source.files[0].text);
-  return contract.markers.every((marker) => marker.test(text))
+  return contracts.every(({ markers }, index) => {
+    const text = sqlWithoutComments(source.files[index].text);
+    return markers.every((marker) => marker.test(text));
+  })
     ? "source_present_unverified"
     : "source_invalid";
 }
 
 function sqlContractFingerprint(identityRoot, contract) {
-  const source = fileState(path.join(identityRoot, contract.filename));
-  assert.equal(source.state, "present");
-  return createHash("sha256").update(source.text).digest("hex");
+  const contracts = [contract, ...(contract.companions ?? [])];
+  const sources = contracts.map(({ filename }) => {
+    const source = fileState(path.join(identityRoot, filename));
+    assert.equal(source.state, "present");
+    return { filename, sha256: createHash("sha256").update(source.text).digest("hex") };
+  });
+  return createHash("sha256").update(JSON.stringify(sources)).digest("hex");
 }
 
 const STABLE_FILE_STAT_FIELDS = Object.freeze([

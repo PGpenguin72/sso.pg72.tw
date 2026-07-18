@@ -4,9 +4,11 @@
 > evaluator runtime-status/lease/bootstrap and alert state/incident/outbox CAS
 > repositories, bounded audit, OAuth-report, global fan-out-gap, and logout
 > delivery source repositories, a bounded approximate Queue-DLQ source and D1
-> streak repository, and `0021` archive-ledger source. None of these repositories
-> is imported by the Worker entry point or a scheduler. Evaluator Cron,
-> alert/archive Queue/DLQ, Email/admin delivery, same-run proof, R2 archive
+> streak repository, `0021` archive-ledger source, and the additive `0022`
+> evaluator run/source/decision proof schema. None of these repositories is
+> imported by the Worker entry point or a scheduler. The `0022` repository/state
+> integration is not in this schema checkpoint. Evaluator Cron, alert/archive
+> Queue/DLQ, Email/admin delivery, complete same-run execution proof, R2 archive
 > runtime, bounded restore, external backup, and deployment remain absent.
 > Production records remain through migration `0012`.
 
@@ -54,6 +56,34 @@ and is not interchangeable with subject, actor, client, reporter or archive-KEK
 references. The local audit source slice verifies the singleton before deriving
 hashed observations; this does not mean an evaluator or production writer is
 deployed.
+
+## What `0022` provides
+
+`0022_alert_evaluator_run_proof.sql` adds exactly three redacted proof tables:
+
+- `alert_evaluator_run` owns one logical `(* * * * *, scheduledTime)` occurrence,
+  an exact evaluator runtime generation/lease fence, nullable-once `asOf`,
+  immutable source/decision manifests, and a closed run lifecycle;
+- `alert_evaluator_run_source` owns the exact closed nine-source set and only
+  bounded status/count/digest evidence;
+- `alert_evaluator_run_decision` attributes each immutable planned decision to
+  one source proof and optionally to the exact resulting alert-state revision.
+
+Run insert/renewal and runtime terminal triggers are reverse-coupled inside one
+SQLite statement. A failed CAS aborts the outer statement; direct legacy
+evaluator acquire, renew, idle status, and terminal updates cannot bypass the
+run ledger after `0022`. Workerd regression fixes the observed D1 accounting:
+acquire changes two rows, expired takeover three, renewal two, and terminal two,
+while the next SQL `changes()` remains one for the outer statement. Exact
+source rows are required before sealing; healthy requires all nine complete,
+the sealed decision count, no suppressed-partial decision, and a terminal time
+after every proof write. Failure status/error pairs are closed.
+
+This is schema evidence only. No compatible run repository, lifecycle-state
+proof integration, Cron import, Queue binding, Email adapter, config, secret,
+remote migration, or deployment is part of this checkpoint. Applying `0022`
+while continuing to call the legacy evaluator runtime lease methods would fail
+closed, so migration rollout must wait for the reviewed compatible Worker.
 
 Rule IDs are restricted to reviewed PGID registration, restricted-account,
 recovery, Passkey step-up, OAuth-report, admin, audit-fanout, logout, alert
@@ -495,13 +525,14 @@ losers without R2 or Queue I/O.
 
 ## Remaining gates
 
-Schema, pure evaluator/parser, the two unwired evaluator repositories, and the
+Schema, pure evaluator/parser, the two unwired evaluator repositories, the
+unwired `0022` proof-ledger foundation, and the
 bounded local `audit_event`, OAuth-report, fan-out-gap, logout-delivery, and
 approximate Queue-DLQ source repositories must still report observability as
 `source_present_unverified`, leaving continuity and drills blocked. Later
 reviewed slices must wire both evaluator repositories and all five source
 repositories into Cron with
-repository-controlled successful-run and same-run proof; and add dedicated
+repository-controlled successful-run and complete same-run proof; and add dedicated
 alert Queue/DLQ, an Email Service adapter, admin acknowledge/resolve/replay
 operations, and redaction/race/failure tests. Archive crypto plus the `0021`
 ledger and unwired D1 repository do not satisfy the separate encrypted archive

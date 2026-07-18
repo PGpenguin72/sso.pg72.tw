@@ -4,12 +4,14 @@
 > evaluator runtime-status/lease/bootstrap and alert state/incident/outbox CAS
 > repositories, bounded audit, OAuth-report, global fan-out-gap, logout
 > delivery, global runtime-health, and approximate Queue-DLQ source repositories,
-> a D1 Queue streak repository, `0021` archive-ledger source and unwired archive
-> D1 repository, plus the additive `0022` evaluator run/source/decision proof
-> ledger with compatible local run and lifecycle-state proof repositories. None
-> of these repositories is imported by the Worker entry point or a scheduler.
-> Evaluator Cron, alert/archive Queue/DLQ, Email/admin delivery, complete same-run
-> execution proof, R2 archive
+> a D1 Queue streak repository, `0021` archive-ledger source, additive `0023`
+> R2-evidence contract and unwired archive D1 repository, plus the additive
+> `0022` evaluator run/source/decision proof
+> ledger with compatible local run and lifecycle-state proof repositories, and
+> an unwired local nine-source evaluator orchestration module. None of these
+> modules is imported by the Worker entry point or a scheduler. A scheduled
+> handler, reviewed bindings/configuration, alert/archive Queue/DLQ,
+> Email/admin delivery, R2 archive
 > runtime, bounded restore, external backup, and deployment remain absent.
 > Production records remain through migration `0012`.
 
@@ -98,11 +100,45 @@ semantic state identity is absent. Exact proof/state coordinates and canonical
 product readback are required before response-loss or concurrent retries return
 `duplicate`.
 
-These are local, unwired transaction contracts. No Cron import, source/decision
-orchestration, Queue binding, Email adapter, config, secret, remote migration,
-or deployment is part of this checkpoint. Applying `0022` while continuing to
-call the legacy evaluator runtime lease methods would fail closed, so rollout
-still requires a Worker that uses the compatible run path.
+The local `alert-evaluator-orchestration` module now composes those transaction
+contracts without importing them from the Worker entry point. It deliberately:
+
+- makes `disabled` a no-clock, no-D1, no-Queue result and makes a newly created
+  runtime row an initialization-only tick;
+- starts all four real `Queue.metrics()` promises before awaiting their common
+  barrier, then captures one completion `asOf` used by every Queue sample, D1
+  source, decision, run watermark, and terminal proof;
+- records the exact closed nine-source order, canonicalizes observations with a
+  locale-independent code-point comparison, deduplicates exact same-source
+  identities before hashing, and marks every conflicting duplicate source
+  invalid;
+- reserves one canonical observation for every nonempty source in closed source
+  order, fills the remaining work slots in global rule/dimension order, and
+  attributes every dropped observation back to a recomputed partial source
+  proof;
+- suppresses partial clears, downgrades, cooldown changes, resolutions, and
+  stale reminders as proof-only work while allowing retained evidence that is
+  at least as severe as active or pending state;
+- directly awaits source, proof, product CAS, and terminal work, renews the exact
+  run fence, retries one proof-stable state conflict with a fresh timestamp, and
+  treats ownership loss as `lease_lost` without fabricating a failure row.
+
+The work cap is derived from Cloudflare D1's per-Worker-invocation statement
+limit. The conservative checked budget reserves 150 of the Paid plan's 1,000
+statements, bounds fixed work at 110 (including terminal-success response loss followed by
+the failure-terminal fallback) and a conflict/recovery-heavy item at 36, and
+therefore admits at most 20 lifecycle items (`830` worst-case statements). The fixed path
+alone exceeds the Free plan's 50-statement limit, so this evaluator contract does
+not support the Free plan. Each statement inside `batch()` counts separately;
+the focused Workerd integration counts the actual complete local path rather
+than treating one batch as one query. See [D1 limits](https://developers.cloudflare.com/d1/platform/limits/).
+
+This remains local and unwired. There is no scheduled-handler import, Queue
+binding, mode/config variable, secret declaration, Email adapter, remote
+migration, or deployment in this checkpoint. Applying `0022` while continuing
+to call the legacy evaluator runtime lease methods would fail closed, so rollout
+still requires reviewed entry-point/configuration wiring to this compatible run
+path.
 
 Rule IDs are restricted to reviewed PGID registration, restricted-account,
 recovery, Passkey step-up, OAuth-report, admin, audit-fanout, logout, alert
@@ -160,9 +196,11 @@ codes independently of the alert delivery path. Acquisition or renewal that
 cannot preserve its required increment plus terminal revision fails closed with
 the fixed repository error `counter_exhausted`; ordinary lease contention still
 returns no lease.
-The runtime repository also owns the exact projection read below. Both modules
-are local source only: the Worker entry point and scheduler do not import or
-invoke them, and no complete source-collection/decision orchestration exists.
+The runtime repository also owns the exact projection read below. The local
+evaluator orchestrator invokes these modules in focused and real-D1 Workerd
+integration, but the Worker entry point and scheduler do not import it. No
+scheduled handler, generated bindings/configuration, or deployed execution path
+exists.
 
 The bounded audit repository executes one timestamp-integrity projection and
 its fourteen closed rule projections in one awaited D1 batch. The integrity
@@ -309,12 +347,13 @@ the global source incomplete; malformed or unavailable D1 evidence returns only
 a fixed repository error. No query projects payload, incident, idempotency,
 subject, user, email, token, or delivery-provider data.
 
-This repository is not imported by the Worker entry point or scheduler. It does
-not initialize or run the evaluator, persist alert lifecycle state, claim or
-deliver outbox work, add Cron/Queue/Email/admin/configuration wiring, change the
-artifact identity, or itself establish same-run proof. The separate local
-`0022` ledger and compatible run/state repositories remain unwired transaction
-contracts.
+This repository is not imported by the Worker entry point or scheduler. By
+itself it does not initialize or run the evaluator, persist alert lifecycle
+state, claim or deliver outbox work, add Cron/Queue/Email/admin/configuration
+wiring, or change the artifact identity. The local evaluator orchestrator now
+composes this source with the `0022` run/state contracts and proves a synthetic
+same-run path in Workerd, but that orchestrator remains absent from the Worker
+entry point, scheduled handler, bindings, and configuration.
 
 OAuth reporter coverage is a whole-evaluation gate. Until every in-window row
 has either its legacy raw reporter ID or the persisted reporter reference, the
@@ -473,11 +512,14 @@ records. It preserves the nullable `actorRef`/`actorRefHashVersion` pair and
 authenticates `checkpointFromSequence` across the header, manifest, and AES-GCM
 AAD. Migration `0021` now owns the monotonic source ledger, deterministic
 backfill, immutable batch snapshots, archive-key sentinel schema, and terminal
-checkpoint/BLOB-cleanup transaction described in
+checkpoint/BLOB-cleanup transaction. Additive migration `0023` preserves legacy
+conflict receipts without inventing observations and adds exact current conflict
+and successful object-size/stored-SHA/readback-SHA evidence described in
 [`audit-archive.md`](./audit-archive.md). The unwired request-scoped archive D1
 repository owns fingerprint-only sentinel continuity, bounded source selection,
-canonical batch persistence, exact lease/terminal receipts, and audited dead
-replay. These remain local source contracts, not an archive service: there is no
+canonical batch persistence, dispatch-generation claims, lease-bound envelope
+reads, bounded due/expired/checkpoint work selection, exact lease/terminal
+receipts, and audited dead replay. These remain local source contracts, not an archive service: there is no
 `audit-archive.ts` runtime module, archive-domain fingerprint derivation or KEK
 custody, `AUDIT_ARCHIVE` R2 binding/writer, Queue/DLQ, Cron, bounded restore,
 retention exercise, or external backup. `encrypted_r2_archive` therefore
@@ -548,8 +590,9 @@ repairs them to canonical text, and proves the indexes become empty without a
 base-table scan.
 It proves the existing audit insert/delete compensation still works before the
 separate source ledger is added. The archive schema/migration suites apply the
-ordered ledger through `0021`, verify its six-table transaction contract, and
-retain that compensation behavior. The pure evaluator suites verify the exact
+ordered ledger through `0023`, verify the six-table `0021` transaction contract,
+the forward-only evidence rebuild and legacy-conflict preservation, and retain
+that compensation behavior. The pure evaluator suites verify the exact
 15-rule matrix, redacted dimensions, source projections, deterministic lifecycle
 and persistence shape without scheduling work. The state repository suites use
 real Workerd D1 to verify stale-revision races, duplicate evaluations, trigger
@@ -559,6 +602,14 @@ dimensions, same-batch decision proof, no-state proof, response loss, and full
 state/incident/outbox/proof rollback. The run-proof suites verify the schema,
 closed source/decision manifests, exact lease fencing, terminal/bootstrap
 coupling, replay, takeover, and strict rejection of legacy evaluator mutation.
+The orchestration suite verifies disabled and initialization-only no-ops, one
+four-provider completion barrier and `asOf`, exact nine-source order, canonical
+deduplication/digests, code-point order, fair bounded allocation, partial
+suppression/escalation, unavailable/invalid precedence, renewal/loss, response
+loss, conflict chronology, and terminal visibility. Its real Workerd D1 path
+executes Queue snapshots, all D1 sources, source/decision proof, lifecycle CAS,
+seal, healthy terminal, and bootstrap while counting every D1 batch statement
+against the checked budget.
 The runtime repository suite retains initialization, source projection, counter
 boundaries, and explicit legacy-mutation rejection. The OAuth
 source suite verifies its global sparse-index preflight, exact half-open
@@ -586,25 +637,28 @@ overflow/incomplete behavior, result-shape and chronology validation, redacted
 errors, and all three existing-index query plans without claiming or delivering
 work. The archive schema and migration suites verify that one invalid parent
 aborts backfill and that a repaired canonical parent succeeds, plus the `0021`
-ledger transaction contract. The archive-crypto and repository suites verify the
-record/envelope/checkpoint binding, bounded source and persistence behavior,
+ledger transaction and additive `0023` evidence contracts. The archive-crypto
+and repository suites verify the record/envelope/checkpoint binding, bounded
+source and persistence behavior, dispatch-generation and lease-bound reads,
 exact lease/terminal/replay receipts, response-loss retries, and concurrent
 losers without R2 or Queue I/O.
 
 ## Remaining gates
 
 Schema, pure evaluator/parser, the unwired source/run/state repositories, the
-unwired `0022` proof-ledger transaction foundation, and the
+unwired `0022` proof-ledger transaction foundation, the local evaluator
+orchestrator, and the
 bounded local `audit_event`, OAuth-report, fan-out-gap, logout-delivery,
 runtime-health, and approximate Queue-DLQ source repositories must still report
 observability as `source_present_unverified`, leaving continuity and drills
-blocked. Later reviewed slices must wire the compatible run/state repositories
-and all bounded source repositories into Cron with one orchestrated
-source/decision plan and repository-controlled terminal proof; and add dedicated
-alert Queue/DLQ, an Email Service adapter, admin acknowledge/resolve/replay
+blocked. A later reviewed slice must add generated binding/config types and wire
+the compatible orchestrator into the directly awaited scheduled handler; it
+must also add dedicated alert Queue/DLQ, an Email Service adapter, admin
+acknowledge/resolve/replay
 operations, and redaction/race/failure tests. Archive crypto plus the `0021`
-ledger and unwired D1 repository do not satisfy the separate encrypted archive
-dependency; `encrypted_r2_archive` remains `dependency_missing` until
+ledger, `0023` evidence contract and unwired D1 repository do not satisfy the
+separate encrypted archive dependency; `encrypted_r2_archive` remains
+`dependency_missing` until
 archive-domain fingerprint derivation and KEK custody, the R2 writer/bounded
 restore, Queue/DLQ, Cron redrive, retention proof, and external-backup exercise
 exist.

@@ -2,10 +2,11 @@
 
 > Status: local schema, pure evaluator/parser and archive-crypto contracts,
 > evaluator runtime-status/lease/bootstrap and alert state/incident/outbox CAS
-> repositories, bounded audit, OAuth-report, global fan-out-gap, and logout
-> delivery source repositories, a bounded approximate Queue-DLQ source and D1
-> streak repository, and `0021` archive-ledger source. None of these repositories
-> is imported by the Worker entry point or a scheduler. Evaluator Cron,
+> repositories, bounded audit, OAuth-report, global fan-out-gap, logout
+> delivery, and global runtime-health source repositories, a bounded approximate
+> Queue-DLQ source and D1 streak repository, `0021` archive-ledger source, and an
+> unwired request-scoped archive D1 repository. These nine repositories are not
+> imported by the Worker entry point or a scheduler. Evaluator Cron,
 > alert/archive Queue/DLQ, Email/admin delivery, same-run proof, R2 archive
 > runtime, bounded restore, external backup, and deployment remain absent.
 > Production records remain through migration `0012`.
@@ -236,6 +237,36 @@ read/write failures yield a fixed, redacted unknown observation instead of a
 clear. This module is not imported by the Worker or scheduler and adds no
 binding, configuration, Cron, Queue producer/consumer, or production behavior.
 
+The local runtime-health source repository reads the evaluator and Email outbox
+health for the global `pgid.alert.runtime_health.v1` rule. One awaited D1 batch
+uses the exact existing immutable-bootstrap/runtime query and completeness
+parser, then runs one aggregate projection over `alert_outbox`. Before the
+immutable first-success anchor exists, the whole rule produces no observation.
+After bootstrap, a missing or corrupt current evaluator projection preserves the
+reviewed `evaluatorAgeSeconds: null` immediate-critical input; it never reverts
+to pre-bootstrap. A valid runtime projection derives the age from its retained
+`last_success_at` at the same canonical `asOf`.
+
+The outbox projection is current-state and all-age: every row whose current
+status is `dead` remains counted, regardless of its age; pending/retry work is
+due when `next_attempt_at <= asOf`; and processing work is expired when
+`lease_expires_at <= asOf`. The oldest of the latter two clocks determines the
+floored due age. The existing status-first `alert_outbox_due_idx` covers all
+three paths, including the schema-required null `next_attempt_at` for processing
+rows, so this slice adds no migration or index. Exact result keys, one-row D1
+shape, safe integer counts, canonical timestamps, chronology, combined cap, and
+age cap are validated before the pure observation parser runs. Overflow marks
+the global source incomplete; malformed or unavailable D1 evidence returns only
+a fixed repository error. No query projects payload, incident, idempotency,
+subject, user, email, token, or delivery-provider data.
+
+This repository is not imported by the Worker entry point or scheduler. It does
+not initialize or run the evaluator, persist alert lifecycle state, claim or
+deliver outbox work, add Cron/Queue/Email/admin/configuration wiring, change the
+artifact identity, or establish same-run proof. It also adds no `0022`
+evaluator-run-proof migration, run/source/decision ledger, or validated
+previous-state/CAS reader.
+
 OAuth reporter coverage is a whole-evaluation gate. Until every in-window row
 has either its legacy raw reporter ID or the persisted reporter reference, the
 evaluator reports the source as partial, records runtime `source_incomplete`, and
@@ -431,6 +462,7 @@ pnpm --filter @pg72/id exec vitest run \
   test/alert-logout-source-repository.spec.ts \
   test/alert-oauth-source-repository.spec.ts \
   test/alert-queue-source-repository.spec.ts \
+  test/alert-runtime-health-source-repository.spec.ts \
   test/alert-evaluator.spec.ts test/alert-rules.spec.ts \
   test/audit-archive-crypto.spec.ts \
   test/audit-archive-repository.spec.ts
@@ -486,7 +518,12 @@ exact 60-second increment/reset behavior, 15-minute critical duration, D1
 revision/lease/`changes()` CAS, exact replay ownership, response-loss replay,
 out-of-order and concurrent losers, strict provider/D1 parsing, fixed redacted
 errors, and primary-key query plans without adding a binding, Cron, or evaluator
-wiring. The archive schema and migration suites verify that one invalid parent
+wiring. The runtime-health source suite verifies the one-batch runtime/outbox
+snapshot, pre-/post-bootstrap boundary, exact current all-age dead count,
+pending/retry due and expired-processing boundary clocks, age flooring, bounded
+overflow/incomplete behavior, result-shape and chronology validation, redacted
+errors, and all three existing-index query plans without claiming or delivering
+work. The archive schema and migration suites verify that one invalid parent
 aborts backfill and that a repaired canonical parent succeeds, plus the `0021`
 ledger transaction contract. The archive-crypto and repository suites verify the
 record/envelope/checkpoint binding, bounded source and persistence behavior,
@@ -496,10 +533,11 @@ losers without R2 or Queue I/O.
 ## Remaining gates
 
 Schema, pure evaluator/parser, the two unwired evaluator repositories, and the
-bounded local `audit_event`, OAuth-report, fan-out-gap, logout-delivery, and
-approximate Queue-DLQ source repositories must still report observability as
-`source_present_unverified`, leaving continuity and drills blocked. Later
-reviewed slices must wire both evaluator repositories and all five source
+bounded local `audit_event`, OAuth-report, fan-out-gap, logout-delivery,
+runtime-health, and approximate Queue-DLQ source repositories must still report
+observability as `source_present_unverified`, leaving continuity and drills
+blocked. Later
+reviewed slices must wire both evaluator repositories and all six source
 repositories into Cron with
 repository-controlled successful-run and same-run proof; and add dedicated
 alert Queue/DLQ, an Email Service adapter, admin acknowledge/resolve/replay
@@ -508,7 +546,9 @@ ledger and unwired D1 repository do not satisfy the separate encrypted archive
 dependency; `encrypted_r2_archive` remains `dependency_missing` until
 archive-domain fingerprint derivation and KEK custody, the R2 writer/bounded
 restore, Queue/DLQ, Cron redrive, retention proof, and external-backup exercise
-exist.
+exist. The planned `0022_alert_evaluator_run_proof.sql`, evaluator
+run/source/decision ledger, and validated previous-state/CAS readers do not
+exist in this source slice.
 
 Isolated Preview must then apply the ordered migration ledger, tune thresholds,
 exercise exact D1 and approximate Queue evidence, prove real Email receipt and

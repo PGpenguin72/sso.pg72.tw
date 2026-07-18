@@ -99,8 +99,8 @@ export function expectedMigrationHead(migrationsDirectory) {
 }
 
 export const INTEGRATED_MIGRATION_LEDGER = Object.freeze({
-  count: 22,
-  head: "0022_alert_evaluator_run_proof.sql",
+  count: 23,
+  head: "0023_audit_archive_r2_evidence.sql",
 });
 
 export function assertIntegratedMigrationLedger(ledger) {

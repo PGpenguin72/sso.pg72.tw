@@ -192,16 +192,42 @@ of the following:
 
 - external-C review of the normalized Cloudflare API adapter;
 - owner review of the Workers Builds trigger and token custody;
-- a non-retrying upload adapter, or a reviewed way to disable upload retries;
+- a reviewed owner-acceptance issuance/provenance channel for pinned Wrangler's
+  bounded internal version-create retries;
 - complete child-process-tree custody;
 - a sealed identity for Wrangler's executable dependency closure;
+- a normalized script-content manifest and provenance proof that correlates an
+  observed server ETag with the reviewed local artifact;
 - trusted Git binary and configuration custody.
 
 Pinned Wrangler 4.110.0 still retries some internal API failures during
 `versions upload`; pinning its package, CLI, and launcher files does not remove
-that behavior or identify all transitively loaded executable bytes. Until every
-blocker above is closed in reviewed source, this model must remain a production
-NO-GO and no runnable production command may be published.
+that behavior or identify all transitively loaded executable bytes. The offline
+model accepts only an exact, maximum-24-hour owner record for `PGpenguin72`,
+`pg72-id`, one candidate commit/tree, one redacted production-target binding,
+the pinned Wrangler identities, at most three version-create attempts, and at
+most two duplicate inactive versions. Its `current-workers-build` selector is
+resolved against one canonical Workers Build UUID and binds only that UUID's
+SHA-256 into the receipt. It is not evidence that the owner pre-approved the
+server-assigned UUID. Retrigger replay, input injection, issuance provenance,
+and build/token custody remain production blockers.
+
+For one to three added versions, every normalized detail must retain the exact
+candidate tag/message, runtime, binding and secret-name inventory, remain
+inactive, and share one observed script ETag. Only an exact successful output
+for the newest added version yields `VERIFIED_INACTIVE_VERSION`. Missing output
+or a nonzero child result with fully verified inactive additions yields
+`REVIEW_REQUIRED`; zero additions yields
+`NO_MUTATION_RETRY_REQUIRES_OWNER`. Neither result retries, deletes, promotes,
+deploys, or changes triggers. Observed ETag equality does not prove local
+artifact identity, so the receipt records its hash and keeps
+`scriptArtifactIdentityVerified=false`.
+
+Wrangler's separate content-addressed asset retry is also unresolved. The model
+does not claim asset identity or idempotency without a reviewed normalized
+adapter and exact manifest proof. Until every blocker above is closed in
+reviewed source, this model must remain a production NO-GO and no runnable
+production command may be published.
 
 ## Advisory Acceptance
 

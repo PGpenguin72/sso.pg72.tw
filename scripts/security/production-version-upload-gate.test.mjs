@@ -17,9 +17,16 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  ASSET_RETRY_RESIDUAL,
+  BOUNDED_RETRY_ACCEPTANCE_SCOPE,
+  BUILD_UUID_ACCEPTANCE_RESIDUAL,
+  MAX_DUPLICATE_INACTIVE_VERSIONS,
+  MAX_VERSION_CREATE_ATTEMPTS,
   PINNED_WRANGLER,
   PRODUCTION_EXECUTION_BLOCKERS,
+  PRODUCTION_OWNER_ID,
   PRODUCTION_WORKER_NAME,
+  SCRIPT_IDENTITY_RESIDUAL,
   ProductionUploadGateError,
   UPLOAD_MESSAGE_PREFIX,
   WRANGLER_OUTPUT_MAX_BYTES,
@@ -35,6 +42,7 @@ import {
   runProductionVersionUploadGate,
   sha256,
   validateNormalizedSnapshot,
+  validateBoundedRetryOwnerAcceptance,
   validateLocalReleaseContext,
   validateProductionEnvironment,
   verifyUploadedVersion,
@@ -48,7 +56,10 @@ const ACCOUNT_ID = "c".repeat(32);
 const D1_UUID = "11111111-1111-1111-1111-111111111111";
 const ACTIVE_VERSION = "33333333-3333-4333-8333-333333333333";
 const NEW_VERSION = "22222222-2222-4222-8222-222222222222";
+const NEW_VERSION_2 = "66666666-6666-4666-8666-666666666666";
+const NEW_VERSION_3 = "77777777-7777-4777-8777-777777777777";
 const SERVICE_TAG = "service-tag-fixture";
+const OBSERVED_SCRIPT_ETAG = "observed-script-etag-fixture";
 const NOW = Date.parse("2026-07-19T00:00:00.000Z");
 const BUILD_UUID = "55555555-5555-4555-8555-555555555555";
 const RELEASE_POLICY = JSON.parse(
@@ -130,6 +141,7 @@ function versionDetail(
     tag = "old",
     message = "old",
     secretNames = config.secrets.required,
+    scriptEtag = OBSERVED_SCRIPT_ETAG,
   } = {},
 ) {
   return {
@@ -139,6 +151,7 @@ function versionDetail(
     },
     id,
     metadata: { hasPreview: false },
+    scriptEtag,
     resources: {
       bindings: runtimeBindings(config, secretNames),
       script_runtime: {
@@ -149,7 +162,10 @@ function versionDetail(
   };
 }
 
-function normalizedSnapshot(config, { uploaded = false } = {}) {
+function normalizedSnapshot(
+  config,
+  { uploaded = false, addedVersionIds = uploaded ? [NEW_VERSION] : [] } = {},
+) {
   return {
     activeVersion: versionDetail(ACTIVE_VERSION, config),
     deployments: [
@@ -158,8 +174,8 @@ function normalizedSnapshot(config, { uploaded = false } = {}) {
         versions: [{ percentage: 100, version_id: ACTIVE_VERSION }],
       },
     ],
-    latestVersion: uploaded
-      ? versionDetail(NEW_VERSION, config, {
+    latestVersion: addedVersionIds.length > 0
+      ? versionDetail(addedVersionIds[0], config, {
           tag: CANDIDATE,
           message: `${UPLOAD_MESSAGE_PREFIX}${CANDIDATE}`,
         })
@@ -174,11 +190,82 @@ function normalizedSnapshot(config, { uploaded = false } = {}) {
     serviceTag: SERVICE_TAG,
     singleWriter: true,
     subdomain: { enabled: false, previews_enabled: false },
-    versions: uploaded
-      ? [{ id: NEW_VERSION }, { id: ACTIVE_VERSION }]
-      : [{ id: ACTIVE_VERSION }],
+    versions: [
+      ...addedVersionIds.map((id) => ({ id })),
+      { id: ACTIVE_VERSION },
+    ],
     workerName: PRODUCTION_WORKER_NAME,
   };
+}
+
+function offlineContext(overrides = {}) {
+  return {
+    accountId: ACCOUNT_ID,
+    d1Uuid: D1_UUID,
+    matchTag: SERVICE_TAG,
+    candidateSha: CANDIDATE,
+    tree: TREE,
+    workersBuildUuid: BUILD_UUID,
+    buildCorrelationSha256: sha256(BUILD_UUID),
+    ...overrides,
+  };
+}
+
+function ownerAcceptance(overrides = {}) {
+  const baseline = {
+    schemaVersion: 1,
+    decision: "accept-exact-bounded-inactive-version-duplicates-only",
+    scope: BOUNDED_RETRY_ACCEPTANCE_SCOPE,
+    ownerId: PRODUCTION_OWNER_ID,
+    workerName: PRODUCTION_WORKER_NAME,
+    scriptIdentity: {
+      etagRule: "all-added-versions-share-one-observed-script-etag",
+      residual: SCRIPT_IDENTITY_RESIDUAL,
+    },
+    candidateSha: CANDIDATE,
+    candidateTree: TREE,
+    targetBindingSha256: sha256(
+      Buffer.from(
+        canonicalJson({
+          accountId: ACCOUNT_ID,
+          d1Uuid: D1_UUID,
+          serviceTag: SERVICE_TAG,
+          workerName: PRODUCTION_WORKER_NAME,
+        }),
+      ),
+    ),
+    workersBuild: {
+      uuidBinding: "current-workers-build",
+      sha256Binding: "sha256-current-workers-build",
+      residual: BUILD_UUID_ACCEPTANCE_RESIDUAL,
+    },
+    wrangler: {
+      version: "4.110.0",
+      packageSha256: PINNED_WRANGLER.package,
+      cliSha256: PINNED_WRANGLER.cli,
+      launcherSha256: PINNED_WRANGLER.launcher,
+    },
+    issuedAt: new Date(NOW - 1_000).toISOString(),
+    expiresAt: new Date(NOW + 60_000).toISOString(),
+    maximumVersionCreateAttempts: MAX_VERSION_CREATE_ATTEMPTS,
+    maximumDuplicateInactiveVersions: MAX_DUPLICATE_INACTIVE_VERSIONS,
+    assetRetryResidual: ASSET_RETRY_RESIDUAL,
+  };
+  return {
+    ...baseline,
+    ...overrides,
+    workersBuild: overrides.workersBuild ?? baseline.workersBuild,
+    wrangler: overrides.wrangler ?? baseline.wrangler,
+  };
+}
+
+function uploadedDetails(config, versionIds = [NEW_VERSION]) {
+  return versionIds.map((id) =>
+    versionDetail(id, config, {
+      tag: CANDIDATE,
+      message: `${UPLOAD_MESSAGE_PREFIX}${CANDIDATE}`,
+    }),
+  );
 }
 
 function makeFixture(context) {
@@ -295,6 +382,44 @@ function outputRecord(overrides = {}) {
   };
 }
 
+function offlineEvidence({
+  addedVersionIds = [NEW_VERSION],
+  outputBytes =
+    addedVersionIds.length === 0
+      ? Buffer.alloc(0)
+      : Buffer.from(
+          `${JSON.stringify(
+            outputRecord({ version_id: addedVersionIds[0] }),
+          )}\n`,
+        ),
+  childResult = normalizedChildResult(),
+  details,
+  context = offlineContext(),
+  acceptance = ownerAcceptance(),
+} = {}) {
+  const generated = generatedConfig("/reviewed");
+  const privateConfig = derivePrivateProductionConfig(generated, {
+    accountId: ACCOUNT_ID,
+    d1Uuid: D1_UUID,
+  });
+  const before = normalizedSnapshot(privateConfig);
+  const after = normalizedSnapshot(privateConfig, { addedVersionIds });
+  return {
+    before,
+    after,
+    outputBytes,
+    childResult,
+    details: details ?? uploadedDetails(privateConfig, addedVersionIds),
+    context,
+    ownerAcceptance: acceptance,
+    privateConfig,
+    generatedConfig: generated,
+    startedAt: NOW,
+    finishedAt: NOW,
+    evaluatedAt: NOW,
+  };
+}
+
 async function validateHarness(harness, options = {}) {
   return await validateLocalReleaseContext({
     repositoryRoot: harness.fixture.root,
@@ -319,9 +444,10 @@ test("production entry is structurally blocked before any injected action", asyn
   assert.deepEqual(PRODUCTION_EXECUTION_BLOCKERS, [
     "external-c-normalized-api-adapter-review",
     "owner-workers-builds-trigger-and-token-custody",
-    "pinned-wrangler-retry-disable-or-nonretrying-upload-adapter-review",
+    "bounded-pinned-wrangler-internal-retry-owner-acceptance-review",
     "child-process-tree-custody-review",
     "sealed-wrangler-executable-dependency-closure",
+    "normalized-script-content-manifest-and-provenance-review",
     "trusted-git-binary-and-config-custody",
   ]);
 });
@@ -331,6 +457,7 @@ test("validates local identity using only injected offline dependencies", async 
   const result = await validateHarness(harness);
   assert.equal(result.head, CANDIDATE);
   assert.equal(result.tree, TREE);
+  assert.equal(result.workersBuildUuid, BUILD_UUID);
   assert.equal(result.buildCorrelationSha256, sha256(BUILD_UUID));
   assert.equal(result.wranglerCliPath, realpathSync(harness.fixture.wranglerPaths.cli));
   assert.equal(harness.gitCalls, 3);
@@ -480,7 +607,7 @@ test("parses exactly one bounded JSONL record without preview fields", () => {
   );
 });
 
-test("classifies only one new version with unchanged control-plane state", () => {
+test("classifies bounded inactive versions with unchanged control-plane state", () => {
   const config = derivePrivateProductionConfig(generatedConfig("/reviewed"), {
     accountId: ACCOUNT_ID,
     d1Uuid: D1_UUID,
@@ -489,15 +616,28 @@ test("classifies only one new version with unchanged control-plane state", () =>
   const after = normalizedSnapshot(config, { uploaded: true });
   const outputRecord = { version_id: NEW_VERSION };
   const success = normalizedChildResult();
-  assert.equal(
+  assert.deepEqual(
     classifyPostflight({ before, after, outputRecord, childResult: success }),
-    NEW_VERSION,
+    {
+      status: "VERIFIED_INACTIVE_VERSION",
+      addedVersionIds: [NEW_VERSION],
+      duplicateInactiveVersionCount: 0,
+      outputVersionId: NEW_VERSION,
+    },
   );
   for (const [code, mutate] of [
     ["UNEXPECTED_SUBDOMAIN_OR_IDENTITY_MUTATION", (value) => (value.subdomain.enabled = true)],
     ["UNEXPECTED_SCRIPT_SETTINGS_MUTATION", (value) => value.scriptSettings.tags.push("drift")],
     ["UNEXPECTED_ACTIVE_DEPLOYMENT_MUTATION", (value) => (value.deployments[0].id = NEW_VERSION)],
-    ["MULTIPLE_OR_FOREIGN_VERSION_MUTATION", (value) => value.versions.unshift({ id: "55555555-5555-4555-8555-555555555555" })],
+    [
+      "BOUNDED_RETRY_VERSION_LIMIT_EXCEEDED",
+      (value) =>
+        value.versions.unshift(
+          { id: "88888888-8888-4888-8888-888888888888" },
+          { id: "99999999-9999-4999-8999-999999999999" },
+          { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+        ),
+    ],
   ]) {
     const changed = structuredClone(after);
     mutate(changed);
@@ -519,37 +659,49 @@ test("classifies only one new version with unchanged control-plane state", () =>
         outputRecord,
         childResult: success,
       }),
-    "EXPECTED_VERSION_NOT_LATEST",
+    "FOREIGN_VERSION_INVENTORY_MUTATION",
   );
-  expectCode(
-    () =>
-      classifyPostflight({
-        before,
-        after,
-        outputRecord: null,
-        childResult: normalizedChildResult({ status: 1 }),
-      }),
-    "UNKNOWN_OUTCOME_VERSION_CREATED",
+  assert.deepEqual(
+    classifyPostflight({
+      before,
+      after,
+      outputRecord: null,
+      childResult: normalizedChildResult({ status: 1 }),
+    }),
+    {
+      status: "REVIEW_REQUIRED",
+      addedVersionIds: [NEW_VERSION],
+      duplicateInactiveVersionCount: 0,
+      outputVersionId: null,
+    },
   );
-  expectCode(
-    () =>
-      classifyPostflight({
-        before,
-        after: before,
-        outputRecord: null,
-        childResult: normalizedChildResult({ status: 1 }),
-      }),
-    "UNKNOWN_OUTCOME_NO_VERSION",
+  assert.deepEqual(
+    classifyPostflight({
+      before,
+      after: before,
+      outputRecord: null,
+      childResult: normalizedChildResult({ status: 1 }),
+    }),
+    {
+      status: "NO_MUTATION_RETRY_REQUIRES_OWNER",
+      addedVersionIds: [],
+      duplicateInactiveVersionCount: 0,
+      outputVersionId: null,
+    },
   );
-  expectCode(
-    () =>
-      classifyPostflight({
-        before,
-        after,
-        outputRecord,
-        childResult: normalizedChildResult({ overflow: true }),
-      }),
-    "UNKNOWN_OUTCOME_VERSION_CREATED",
+  assert.deepEqual(
+    classifyPostflight({
+      before,
+      after,
+      outputRecord,
+      childResult: normalizedChildResult({ overflow: true }),
+    }),
+    {
+      status: "REVIEW_REQUIRED",
+      addedVersionIds: [NEW_VERSION],
+      duplicateInactiveVersionCount: 0,
+      outputVersionId: NEW_VERSION,
+    },
   );
   expectCode(
     () =>
@@ -582,6 +734,7 @@ test("fails closed on unreviewed version annotations, preview, secrets, and bind
       message: `${UPLOAD_MESSAGE_PREFIX}${CANDIDATE}`,
       privateConfig,
       latestVersion: latest,
+      observedScriptEtag: OBSERVED_SCRIPT_ETAG,
     }).length > 0,
   );
   const latestWithExtraSecret = versionDetail(ACTIVE_VERSION, privateConfig, {
@@ -596,6 +749,7 @@ test("fails closed on unreviewed version annotations, preview, secrets, and bind
         message: `${UPLOAD_MESSAGE_PREFIX}${CANDIDATE}`,
         privateConfig,
         latestVersion: latestWithExtraSecret,
+        observedScriptEtag: OBSERVED_SCRIPT_ETAG,
       }),
     "RUNTIME_SECRET_INVENTORY_MISMATCH",
   );
@@ -618,6 +772,7 @@ test("fails closed on unreviewed version annotations, preview, secrets, and bind
           message: `${UPLOAD_MESSAGE_PREFIX}${CANDIDATE}`,
           privateConfig,
           latestVersion: latest,
+          observedScriptEtag: OBSERVED_SCRIPT_ETAG,
         }),
       code,
     );
@@ -819,49 +974,125 @@ test("does not report workspace success when cleanup fails", async (context) => 
   }
 });
 
-test("evaluates synthetic evidence only as a blocked offline model", () => {
-  const generated = generatedConfig("/reviewed");
-  const privateConfig = derivePrivateProductionConfig(generated, {
-    accountId: ACCOUNT_ID,
-    d1Uuid: D1_UUID,
+test("validates an exact, expiring owner acceptance and resolved build binding", () => {
+  const context = offlineContext();
+  const valid = ownerAcceptance();
+  const result = validateBoundedRetryOwnerAcceptance({
+    acceptance: valid,
+    context,
+    evaluatedAt: NOW,
   });
-  const before = normalizedSnapshot(privateConfig);
-  const after = normalizedSnapshot(privateConfig, { uploaded: true });
-  const evidence = {
-    before,
-    after,
-    outputBytes: Buffer.from(`${JSON.stringify(outputRecord())}\n`),
-    childResult: normalizedChildResult(),
-    detail: after.latestVersion,
-    context: {
-      accountId: ACCOUNT_ID,
-      d1Uuid: D1_UUID,
-      matchTag: SERVICE_TAG,
-      candidateSha: CANDIDATE,
-      tree: TREE,
-      buildCorrelationSha256: sha256(BUILD_UUID),
-    },
-    privateConfig,
-    generatedConfig: generated,
-    startedAt: NOW,
-    finishedAt: NOW,
-  };
+  assert.equal(result.buildCorrelationSha256, sha256(BUILD_UUID));
+  assert.match(result.bindingSha256, /^[0-9a-f]{64}$/);
+  for (const [code, acceptance] of [
+    ["OWNER_ACCEPTANCE_SCHEMA", { ...valid, unreviewed: true }],
+    ["OWNER_ACCEPTANCE_SCOPE", ownerAcceptance({ ownerId: "other" })],
+    ["OWNER_ACCEPTANCE_SCOPE", ownerAcceptance({ candidateTree: "c".repeat(40) })],
+    ["OWNER_ACCEPTANCE_SCOPE", ownerAcceptance({ targetBindingSha256: "d".repeat(64) })],
+    ["OWNER_ACCEPTANCE_SCOPE", ownerAcceptance({ maximumVersionCreateAttempts: 4 })],
+    ["OWNER_ACCEPTANCE_SCOPE", ownerAcceptance({ maximumDuplicateInactiveVersions: 3 })],
+    ["OWNER_ACCEPTANCE_SCOPE", ownerAcceptance({ assetRetryResidual: "assets-may-retry" })],
+    [
+      "OWNER_ACCEPTANCE_SCRIPT_IDENTITY",
+      ownerAcceptance({
+        scriptIdentity: {
+          ...valid.scriptIdentity,
+          etagRule: "any-observed-etag",
+        },
+      }),
+    ],
+    [
+      "OWNER_ACCEPTANCE_BUILD_BINDING",
+      ownerAcceptance({
+        workersBuild: {
+          ...valid.workersBuild,
+          uuidBinding: "any-workers-build",
+        },
+      }),
+    ],
+    [
+      "OWNER_ACCEPTANCE_TOOL_IDENTITY",
+      ownerAcceptance({
+        wrangler: { ...valid.wrangler, cliSha256: "e".repeat(64) },
+      }),
+    ],
+    [
+      "OWNER_ACCEPTANCE_STALE",
+      ownerAcceptance({ expiresAt: new Date(NOW).toISOString() }),
+    ],
+    [
+      "OWNER_ACCEPTANCE_STALE",
+      ownerAcceptance({
+        issuedAt: new Date(NOW - 1_000).toISOString(),
+        expiresAt: new Date(NOW + 24 * 60 * 60 * 1_000).toISOString(),
+      }),
+    ],
+  ]) {
+    expectCode(
+      () =>
+        validateBoundedRetryOwnerAcceptance({
+          acceptance,
+          context,
+          evaluatedAt: NOW,
+        }),
+      code,
+    );
+  }
+  expectCode(
+    () =>
+      validateBoundedRetryOwnerAcceptance({
+        acceptance: valid,
+        context: offlineContext({ workersBuildUuid: NEW_VERSION }),
+        evaluatedAt: NOW,
+      }),
+    "OFFLINE_CONTEXT_IDENTITY",
+  );
+});
+
+test("evaluates exact output as one blocked verified inactive version", () => {
+  const evidence = offlineEvidence();
   const result = evaluateOfflineProductionVersionUploadEvidence(evidence);
-  assert.equal(result.status, "OFFLINE_MODEL_ONLY");
+  assert.equal(result.evidenceMode, "OFFLINE_MODEL_ONLY");
+  assert.equal(result.status, "VERIFIED_INACTIVE_VERSION");
   assert.equal(result.productionExecutionBlocked, true);
-  assert.equal(result.versionId, NEW_VERSION);
+  assert.deepEqual(result.addedVersionIds, [NEW_VERSION]);
+  assert.equal(result.verifiedVersionId, NEW_VERSION);
+  assert.equal(result.duplicateInactiveVersionCount, 0);
+  assert.equal(result.wrapperRetryAuthorized, false);
+  assert.equal(result.pinnedToolInternalRetryAccepted, true);
+  assert.equal(result.assetIdentityVerified, false);
+  assert.equal(result.scriptArtifactIdentityVerified, false);
+  assert.equal(result.assetRetryResidual, ASSET_RETRY_RESIDUAL);
+  assert.equal(result.scriptIdentityResidual, SCRIPT_IDENTITY_RESIDUAL);
+  assert.equal(
+    result.observedScriptEtagSha256,
+    sha256(OBSERVED_SCRIPT_ETAG),
+  );
   assert.equal(result.buildCorrelationSha256, sha256(BUILD_UUID));
   const serialized = JSON.stringify(result);
   for (const forbidden of [ACCOUNT_ID, D1_UUID, SERVICE_TAG, "fixture", BUILD_UUID]) {
     assert.equal(serialized.includes(forbidden), false);
   }
-  const contradictoryDetail = structuredClone(after.latestVersion);
+  const alternateEtagEvidence = offlineEvidence();
+  alternateEtagEvidence.after.latestVersion.scriptEtag = "alternate-observed-etag";
+  alternateEtagEvidence.details[0].scriptEtag = "alternate-observed-etag";
+  const alternateEtagResult =
+    evaluateOfflineProductionVersionUploadEvidence(alternateEtagEvidence);
+  assert.notEqual(
+    alternateEtagResult.ownerAcceptanceResolutionSha256,
+    result.ownerAcceptanceResolutionSha256,
+  );
+  assert.equal(
+    alternateEtagResult.observedScriptEtagSha256,
+    sha256("alternate-observed-etag"),
+  );
+  const contradictoryDetail = structuredClone(evidence.after.latestVersion);
   contradictoryDetail.annotations["workers/message"] = "contradictory";
   expectCode(
     () =>
       evaluateOfflineProductionVersionUploadEvidence({
         ...evidence,
-        detail: contradictoryDetail,
+        details: [contradictoryDetail],
       }),
     "UPLOADED_VERSION_DETAIL_MISMATCH",
   );
@@ -869,7 +1100,7 @@ test("evaluates synthetic evidence only as a blocked offline model", () => {
     () =>
       evaluateOfflineProductionVersionUploadEvidence({
         ...evidence,
-        privateConfig: { ...privateConfig, unreviewed: true },
+        privateConfig: { ...evidence.privateConfig, unreviewed: true },
       }),
     "OFFLINE_CONFIG_CONTRACT",
   );
@@ -886,36 +1117,128 @@ test("evaluates synthetic evidence only as a blocked offline model", () => {
   );
 });
 
-test("ambiguous synthetic evidence remains an unknown outcome", () => {
-  const generated = generatedConfig("/reviewed");
-  const privateConfig = derivePrivateProductionConfig(generated, {
-    accountId: ACCOUNT_ID,
-    d1Uuid: D1_UUID,
-  });
-  const before = normalizedSnapshot(privateConfig);
-  const after = normalizedSnapshot(privateConfig, { uploaded: true });
+test("accepts at most two fully verified inactive duplicate versions", () => {
+  const versionIds = [NEW_VERSION_3, NEW_VERSION_2, NEW_VERSION];
+  const result = evaluateOfflineProductionVersionUploadEvidence(
+    offlineEvidence({ addedVersionIds: versionIds }),
+  );
+  assert.equal(result.status, "VERIFIED_INACTIVE_VERSION");
+  assert.deepEqual(result.addedVersionIds, versionIds);
+  assert.equal(result.verifiedVersionId, NEW_VERSION_3);
+  assert.equal(result.duplicateInactiveVersionCount, 2);
+  assert.equal(result.acceptedMaximumVersionCreateAttempts, 3);
+  assert.equal(result.acceptedMaximumDuplicateInactiveVersions, 2);
+});
+
+test("an older added output ID remains review-required", () => {
+  const versionIds = [NEW_VERSION_2, NEW_VERSION];
+  const result = evaluateOfflineProductionVersionUploadEvidence(
+    offlineEvidence({
+      addedVersionIds: versionIds,
+      outputBytes: Buffer.from(
+        `${JSON.stringify(outputRecord({ version_id: NEW_VERSION }))}\n`,
+      ),
+    }),
+  );
+  assert.equal(result.status, "REVIEW_REQUIRED");
+  assert.deepEqual(result.addedVersionIds, versionIds);
+  assert.equal(result.reportedVersionId, NEW_VERSION);
+  assert.equal(result.verifiedVersionId, null);
+});
+
+test("output loss or nonzero child state returns a bounded review receipt", () => {
+  for (const evidence of [
+    offlineEvidence({ outputBytes: Buffer.alloc(0) }),
+    offlineEvidence({ childResult: normalizedChildResult({ status: 1 }) }),
+  ]) {
+    const result = evaluateOfflineProductionVersionUploadEvidence(evidence);
+    assert.equal(result.status, "REVIEW_REQUIRED");
+    assert.deepEqual(result.addedVersionIds, [NEW_VERSION]);
+    assert.equal(result.verifiedVersionId, null);
+    assert.equal(result.productionExecutionBlocked, true);
+    assert.equal(result.wrapperRetryAuthorized, false);
+  }
+});
+
+test("zero mutation requires a new owner decision and rejects contradictory output", () => {
+  const evidence = offlineEvidence({ addedVersionIds: [] });
+  const result = evaluateOfflineProductionVersionUploadEvidence(evidence);
+  assert.equal(result.status, "NO_MUTATION_RETRY_REQUIRES_OWNER");
+  assert.deepEqual(result.addedVersionIds, []);
+  assert.equal(result.verifiedVersionId, null);
   expectCode(
     () =>
       evaluateOfflineProductionVersionUploadEvidence({
-        before,
-        after,
-        outputBytes: Buffer.alloc(0),
-        childResult: normalizedChildResult({ status: 1 }),
-        detail: after.latestVersion,
-        context: {
-          accountId: ACCOUNT_ID,
-          d1Uuid: D1_UUID,
-          matchTag: SERVICE_TAG,
-          candidateSha: CANDIDATE,
-          tree: TREE,
-          buildCorrelationSha256: sha256(BUILD_UUID),
-        },
-        privateConfig,
-        generatedConfig: generated,
-        startedAt: NOW,
-        finishedAt: NOW,
+        ...evidence,
+        outputBytes: Buffer.from(`${JSON.stringify(outputRecord())}\n`),
       }),
-    "UNKNOWN_OUTCOME_VERSION_CREATED",
+    "OUTPUT_VERSION_NOT_CREATED",
+  );
+  const latestDrift = structuredClone(evidence.after);
+  latestDrift.latestVersion.annotations["workers/message"] = "drift";
+  expectCode(
+    () =>
+      evaluateOfflineProductionVersionUploadEvidence({
+        ...evidence,
+        after: latestDrift,
+      }),
+    "FOREIGN_LATEST_VERSION_MUTATION",
+  );
+});
+
+test("present malformed or foreign output fails instead of becoming output loss", () => {
+  const evidence = offlineEvidence();
+  expectCode(
+    () =>
+      evaluateOfflineProductionVersionUploadEvidence({
+        ...evidence,
+        outputBytes: Buffer.from("{not-json}\n"),
+      }),
+    "WRANGLER_OUTPUT_JSON",
+  );
+  expectCode(
+    () =>
+      evaluateOfflineProductionVersionUploadEvidence({
+        ...evidence,
+        outputBytes: Buffer.from(
+          `${JSON.stringify(outputRecord({ version_id: NEW_VERSION_2 }))}\n`,
+        ),
+      }),
+    "OUTPUT_VERSION_NOT_ADDED",
+  );
+});
+
+test("every added detail must share one observed etag and runtime inventory", () => {
+  const versionIds = [NEW_VERSION_2, NEW_VERSION];
+  const evidence = offlineEvidence({ addedVersionIds: versionIds });
+  const etagDrift = structuredClone(evidence.details);
+  etagDrift[1].scriptEtag = "foreign-etag";
+  expectCode(
+    () =>
+      evaluateOfflineProductionVersionUploadEvidence({
+        ...evidence,
+        details: etagDrift,
+      }),
+    "UPLOADED_SCRIPT_ETAG_MISMATCH",
+  );
+  expectCode(
+    () =>
+      evaluateOfflineProductionVersionUploadEvidence({
+        ...evidence,
+        details: evidence.details.slice(0, 1),
+      }),
+    "UPLOADED_VERSION_DETAILS_INCOMPLETE",
+  );
+  const bindingDrift = structuredClone(evidence.details);
+  bindingDrift[1].resources.bindings.find(({ type }) => type === "plain_text").text =
+    "foreign";
+  expectCode(
+    () =>
+      evaluateOfflineProductionVersionUploadEvidence({
+        ...evidence,
+        details: bindingDrift,
+      }),
+    "UPLOADED_BINDING_INVENTORY_MISMATCH",
   );
 });
 

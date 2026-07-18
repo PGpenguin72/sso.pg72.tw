@@ -367,7 +367,7 @@ const releaseTestCounts = new Map([
   ["artifact-gate.test.mjs", 11],
   ["dast.test.mjs", 6],
   ["dependency-inventory.test.mjs", 2],
-  ["production-version-upload-gate.test.mjs", 20],
+  ["production-version-upload-gate.test.mjs", 26],
   ["release-identity.test.mjs", 13],
   ["secret-family.test.mjs", 21],
   ["secret-scan.test.mjs", 2],

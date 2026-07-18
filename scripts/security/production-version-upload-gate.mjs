@@ -5,14 +5,26 @@ import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 
 export const PRODUCTION_WORKER_NAME = "pg72-id";
+export const PRODUCTION_OWNER_ID = "PGpenguin72";
 export const UPLOAD_MESSAGE_PREFIX = "PGID release ";
 export const WRANGLER_OUTPUT_MAX_BYTES = 8 * 1024;
+export const MAX_VERSION_CREATE_ATTEMPTS = 3;
+export const MAX_DUPLICATE_INACTIVE_VERSIONS = 2;
+export const BOUNDED_RETRY_ACCEPTANCE_SCOPE =
+  "pgid-production-version-upload:bounded-inactive-retry:v1";
+export const ASSET_RETRY_RESIDUAL =
+  "content-addressed-asset-retry-requires-reviewed-normalized-adapter-and-exact-manifest-proof";
+export const BUILD_UUID_ACCEPTANCE_RESIDUAL =
+  "current-build-selector-does-not-prove-owner-preapproval-of-an-assigned-uuid;retrigger-replay-injection-provenance-and-custody-remain-production-blocking";
+export const SCRIPT_IDENTITY_RESIDUAL =
+  "observed-script-etag-equality-does-not-prove-local-artifact-identity;sealed-toolchain-and-normalized-content-manifest-proof-remain-production-blocking";
 export const PRODUCTION_EXECUTION_BLOCKERS = Object.freeze([
   "external-c-normalized-api-adapter-review",
   "owner-workers-builds-trigger-and-token-custody",
-  "pinned-wrangler-retry-disable-or-nonretrying-upload-adapter-review",
+  "bounded-pinned-wrangler-internal-retry-owner-acceptance-review",
   "child-process-tree-custody-review",
   "sealed-wrangler-executable-dependency-closure",
+  "normalized-script-content-manifest-and-provenance-review",
   "trusted-git-binary-and-config-custody",
 ]);
 
@@ -27,6 +39,13 @@ const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ACCOUNT_ID_PATTERN = /^[0-9a-f]{32}$/;
 const SAFE_OPAQUE_TAG_PATTERN = /^[\x21-\x7e]{1,256}$/;
+const WRANGLER_VERSION = "4.110.0";
+const OWNER_ACCEPTANCE_DECISION =
+  "accept-exact-bounded-inactive-version-duplicates-only";
+const BUILD_UUID_BINDING = "current-workers-build";
+const BUILD_UUID_SHA256_BINDING = "sha256-current-workers-build";
+const SCRIPT_ETAG_RULE = "all-added-versions-share-one-observed-script-etag";
+const OWNER_ACCEPTANCE_MAX_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const REQUIRED_OUTPUT_KEYS = Object.freeze([
   "timestamp",
   "type",
@@ -318,9 +337,154 @@ export function validateProductionEnvironment(environment) {
     d1Uuid,
     matchTag,
     candidateSha: environment.WORKERS_CI_COMMIT_SHA,
+    workersBuildUuid: environment.WORKERS_CI_BUILD_UUID,
     buildCorrelationSha256: sha256(environment.WORKERS_CI_BUILD_UUID),
     apiToken: environment.CLOUDFLARE_API_TOKEN,
   };
+}
+
+function canonicalTimestamp(value, code) {
+  requireCondition(typeof value === "string", code);
+  const timestamp = Date.parse(value);
+  requireCondition(
+    Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value,
+    code,
+  );
+  return timestamp;
+}
+
+export function validateBoundedRetryOwnerAcceptance({
+  acceptance,
+  context,
+  evaluatedAt,
+}) {
+  requireCondition(
+    exactKeys(context, [
+      "accountId",
+      "buildCorrelationSha256",
+      "candidateSha",
+      "d1Uuid",
+      "matchTag",
+      "tree",
+      "workersBuildUuid",
+    ]) &&
+      matchesPattern(context.candidateSha, SHA_PATTERN) &&
+      matchesPattern(context.tree, SHA_PATTERN) &&
+      matchesPattern(context.accountId, ACCOUNT_ID_PATTERN) &&
+      matchesPattern(context.d1Uuid, UUID_PATTERN) &&
+      context.d1Uuid !== "00000000-0000-0000-0000-000000000001" &&
+      matchesPattern(context.matchTag, SAFE_OPAQUE_TAG_PATTERN) &&
+      matchesPattern(context.workersBuildUuid, UUID_PATTERN) &&
+      matchesPattern(context.buildCorrelationSha256, DIGEST_PATTERN) &&
+      sha256(context.workersBuildUuid) === context.buildCorrelationSha256,
+    "OFFLINE_CONTEXT_IDENTITY",
+  );
+  requireCondition(
+    Number.isSafeInteger(evaluatedAt) && evaluatedAt >= 0,
+    "OWNER_ACCEPTANCE_EVALUATION_TIME",
+  );
+  requireCondition(
+    exactKeys(acceptance, [
+      "assetRetryResidual",
+      "candidateSha",
+      "candidateTree",
+      "decision",
+      "expiresAt",
+      "issuedAt",
+      "maximumDuplicateInactiveVersions",
+      "maximumVersionCreateAttempts",
+      "ownerId",
+      "schemaVersion",
+      "scriptIdentity",
+      "scope",
+      "targetBindingSha256",
+      "workerName",
+      "workersBuild",
+      "wrangler",
+    ]),
+    "OWNER_ACCEPTANCE_SCHEMA",
+  );
+  requireCondition(
+    acceptance.schemaVersion === 1 &&
+      acceptance.decision === OWNER_ACCEPTANCE_DECISION &&
+      acceptance.scope === BOUNDED_RETRY_ACCEPTANCE_SCOPE &&
+      acceptance.ownerId === PRODUCTION_OWNER_ID &&
+      acceptance.workerName === PRODUCTION_WORKER_NAME &&
+      acceptance.candidateSha === context.candidateSha &&
+      acceptance.candidateTree === context.tree &&
+      acceptance.targetBindingSha256 ===
+        sha256(
+          Buffer.from(
+            canonicalJson({
+              accountId: context.accountId,
+              d1Uuid: context.d1Uuid,
+              serviceTag: context.matchTag,
+              workerName: PRODUCTION_WORKER_NAME,
+            }),
+          ),
+        ) &&
+      acceptance.maximumVersionCreateAttempts === MAX_VERSION_CREATE_ATTEMPTS &&
+      acceptance.maximumDuplicateInactiveVersions ===
+        MAX_DUPLICATE_INACTIVE_VERSIONS &&
+      acceptance.assetRetryResidual === ASSET_RETRY_RESIDUAL,
+    "OWNER_ACCEPTANCE_SCOPE",
+  );
+  requireCondition(
+    exactKeys(acceptance.scriptIdentity, ["etagRule", "residual"]) &&
+      acceptance.scriptIdentity.etagRule === SCRIPT_ETAG_RULE &&
+      acceptance.scriptIdentity.residual === SCRIPT_IDENTITY_RESIDUAL,
+    "OWNER_ACCEPTANCE_SCRIPT_IDENTITY",
+  );
+  requireCondition(
+    exactKeys(acceptance.workersBuild, [
+      "residual",
+      "sha256Binding",
+      "uuidBinding",
+    ]) &&
+      acceptance.workersBuild.uuidBinding === BUILD_UUID_BINDING &&
+      acceptance.workersBuild.sha256Binding === BUILD_UUID_SHA256_BINDING &&
+      acceptance.workersBuild.residual === BUILD_UUID_ACCEPTANCE_RESIDUAL,
+    "OWNER_ACCEPTANCE_BUILD_BINDING",
+  );
+  requireCondition(
+    exactKeys(acceptance.wrangler, [
+      "cliSha256",
+      "launcherSha256",
+      "packageSha256",
+      "version",
+    ]) &&
+      acceptance.wrangler.version === WRANGLER_VERSION &&
+      acceptance.wrangler.packageSha256 === PINNED_WRANGLER.package &&
+      acceptance.wrangler.cliSha256 === PINNED_WRANGLER.cli &&
+      acceptance.wrangler.launcherSha256 === PINNED_WRANGLER.launcher,
+    "OWNER_ACCEPTANCE_TOOL_IDENTITY",
+  );
+  const issuedAt = canonicalTimestamp(
+    acceptance.issuedAt,
+    "OWNER_ACCEPTANCE_ISSUED_AT",
+  );
+  const expiresAt = canonicalTimestamp(
+    acceptance.expiresAt,
+    "OWNER_ACCEPTANCE_EXPIRES_AT",
+  );
+  requireCondition(
+    issuedAt <= evaluatedAt &&
+      evaluatedAt < expiresAt &&
+      issuedAt < expiresAt &&
+      expiresAt - issuedAt <= OWNER_ACCEPTANCE_MAX_LIFETIME_MS,
+    "OWNER_ACCEPTANCE_STALE",
+  );
+  return Object.freeze({
+    bindingSha256: sha256(
+      Buffer.from(
+        canonicalJson({
+          acceptance,
+          resolvedBuildCorrelationSha256: context.buildCorrelationSha256,
+        }),
+      ),
+    ),
+    buildCorrelationSha256: context.buildCorrelationSha256,
+  });
 }
 
 export function derivePrivateProductionConfig(
@@ -738,8 +902,15 @@ function validateVersionDetail(detail) {
   requireCondition(
     detail &&
       typeof detail === "object" &&
-      exactKeys(detail, ["annotations", "id", "metadata", "resources"]) &&
+      exactKeys(detail, [
+        "annotations",
+        "id",
+        "metadata",
+        "resources",
+        "scriptEtag",
+      ]) &&
       matchesPattern(detail.id, UUID_PATTERN) &&
+      matchesPattern(detail.scriptEtag, SAFE_OPAQUE_TAG_PATTERN) &&
       detail.resources &&
       typeof detail.resources === "object" &&
       exactKeys(detail.resources, ["bindings", "script_runtime"]) &&
@@ -991,9 +1162,15 @@ export function verifyUploadedVersion({
   message,
   privateConfig,
   latestVersion,
+  observedScriptEtag,
 }) {
   validateVersionDetail(detail);
   requireCondition(detail.id === versionId, "UPLOADED_VERSION_ID_MISMATCH");
+  requireCondition(
+    matchesPattern(observedScriptEtag, SAFE_OPAQUE_TAG_PATTERN) &&
+      detail.scriptEtag === observedScriptEtag,
+    "UPLOADED_SCRIPT_ETAG_MISMATCH",
+  );
   // Pinned Wrangler reads annotations here, but the public OpenAPI model is
   // incomplete. Keep this exact and fail closed until external C verifies it.
   requireCondition(
@@ -1084,6 +1261,7 @@ export function classifyPostflight({ before, after, outputRecord, childResult })
   requireCondition(
     before.workerName === after.workerName &&
       before.serviceTag === after.serviceTag &&
+      before.singleWriter === after.singleWriter &&
       isDeepStrictEqual(before.subdomain, after.subdomain),
     "UNEXPECTED_SUBDOMAIN_OR_IDENTITY_MUTATION",
   );
@@ -1108,26 +1286,74 @@ export function classifyPostflight({ before, after, outputRecord, childResult })
     );
   }
   const added = [...afterVersions.keys()].filter((id) => !beforeVersions.has(id));
-  requireCondition(added.length <= 1, "MULTIPLE_OR_FOREIGN_VERSION_MUTATION");
-  if (
-    childResult.status !== 0 ||
-    childResult.signal !== null ||
-    childResult.timedOut ||
-    childResult.overflow ||
-    !outputRecord
-  ) {
-    fail(added.length === 1 ? "UNKNOWN_OUTCOME_VERSION_CREATED" : "UNKNOWN_OUTCOME_NO_VERSION");
+  requireCondition(
+    added.length <= MAX_VERSION_CREATE_ATTEMPTS,
+    "BOUNDED_RETRY_VERSION_LIMIT_EXCEEDED",
+  );
+  requireCondition(
+    after.versions.length === before.versions.length + added.length &&
+      isDeepStrictEqual(after.versions.slice(added.length), before.versions) &&
+      isDeepStrictEqual(
+        after.versions.slice(0, added.length).map(({ id }) => id),
+        added,
+      ),
+    "FOREIGN_VERSION_INVENTORY_MUTATION",
+  );
+  if (added.length === 0) {
+    requireCondition(outputRecord === null, "OUTPUT_VERSION_NOT_CREATED");
+    requireCondition(
+      isDeepStrictEqual(after.latestVersion, before.latestVersion),
+      "FOREIGN_LATEST_VERSION_MUTATION",
+    );
+    return Object.freeze({
+      status: "NO_MUTATION_RETRY_REQUIRES_OWNER",
+      addedVersionIds: Object.freeze([]),
+      duplicateInactiveVersionCount: 0,
+      outputVersionId: null,
+    });
   }
+
   requireCondition(
-    added.length === 1 && added[0] === outputRecord.version_id,
-    "EXPECTED_VERSION_MUTATION_MISSING",
+    added.length - 1 <= MAX_DUPLICATE_INACTIVE_VERSIONS,
+    "BOUNDED_RETRY_DUPLICATE_LIMIT_EXCEEDED",
+  );
+
+  requireCondition(
+    after.versions[0]?.id === added[0] &&
+      after.latestVersion?.id === added[0],
+    "EXPECTED_ADDED_VERSION_NOT_LATEST",
+  );
+  const activeIds = new Set(
+    after.deployments.flatMap((deployment) =>
+      deployment.versions.map((version) => version.version_id),
+    ),
   );
   requireCondition(
-    after.versions[0]?.id === outputRecord.version_id &&
-      after.latestVersion?.id === outputRecord.version_id,
-    "EXPECTED_VERSION_NOT_LATEST",
+    added.every((id) => !activeIds.has(id)),
+    "ADDED_VERSION_BECAME_ACTIVE",
   );
-  return outputRecord.version_id;
+  if (outputRecord !== null) {
+    requireCondition(
+      matchesPattern(outputRecord?.version_id, UUID_PATTERN) &&
+        added.includes(outputRecord.version_id),
+      "OUTPUT_VERSION_NOT_ADDED",
+    );
+  }
+  const childSucceeded =
+    childResult.status === 0 &&
+    childResult.signal === null &&
+    !childResult.timedOut &&
+    !childResult.overflow;
+  const outputMatchesLatest = outputRecord?.version_id === added[0];
+  return Object.freeze({
+    status:
+      childSucceeded && outputMatchesLatest
+        ? "VERIFIED_INACTIVE_VERSION"
+        : "REVIEW_REQUIRED",
+    addedVersionIds: Object.freeze([...added]),
+    duplicateInactiveVersionCount: added.length - 1,
+    outputVersionId: outputRecord?.version_id ?? null,
+  });
 }
 
 export function buildWranglerChildEnvironment({
@@ -1311,19 +1537,20 @@ export function evaluateOfflineProductionVersionUploadEvidence({
   after,
   outputBytes,
   childResult,
-  detail,
+  details,
   context,
+  ownerAcceptance,
   privateConfig,
   generatedConfig,
   startedAt,
   finishedAt,
+  evaluatedAt,
 }) {
-  requireCondition(
-    matchesPattern(context?.candidateSha, SHA_PATTERN) &&
-      matchesPattern(context?.tree, SHA_PATTERN) &&
-      matchesPattern(context?.buildCorrelationSha256, DIGEST_PATTERN),
-    "OFFLINE_CONTEXT_IDENTITY",
-  );
+  const acceptance = validateBoundedRetryOwnerAcceptance({
+    acceptance: ownerAcceptance,
+    context,
+    evaluatedAt,
+  });
   requireCondition(
     isDeepStrictEqual(
       privateConfig,
@@ -1337,43 +1564,122 @@ export function evaluateOfflineProductionVersionUploadEvidence({
   );
   validateNormalizedSnapshot(before, context);
   validateNormalizedSnapshot(after, context);
-  let outputRecord = null;
-  try {
-    outputRecord = parseWranglerOutputJsonl(outputBytes, {
-      matchTag: context.matchTag,
-      startedAt,
-      finishedAt,
-    });
-  } catch (error) {
-    if (!(error instanceof ProductionUploadGateError)) throw error;
-  }
-  const versionId = classifyPostflight({ before, after, outputRecord, childResult });
-  requireCondition(
-    isDeepStrictEqual(detail, after.latestVersion),
-    "UPLOADED_VERSION_DETAIL_MISMATCH",
-  );
-  const message = `${UPLOAD_MESSAGE_PREFIX}${context.candidateSha}`;
-  const inventory = verifyUploadedVersion({
-    detail,
-    versionId,
-    candidateSha: context.candidateSha,
-    message,
-    privateConfig,
-    latestVersion: before.latestVersion,
+  requireCondition(Buffer.isBuffer(outputBytes), "WRANGLER_OUTPUT_TYPE");
+  const outputRecord =
+    outputBytes.length === 0
+      ? null
+      : parseWranglerOutputJsonl(outputBytes, {
+          matchTag: context.matchTag,
+          startedAt,
+          finishedAt,
+        });
+  const classification = classifyPostflight({
+    before,
+    after,
+    outputRecord,
+    childResult,
   });
+  requireCondition(Array.isArray(details), "UPLOADED_VERSION_DETAILS_SCHEMA");
+  const detailById = new Map();
+  for (const detail of details) {
+    validateVersionDetail(detail);
+    requireCondition(
+      !detailById.has(detail.id),
+      "UPLOADED_VERSION_DETAIL_DUPLICATE",
+    );
+    detailById.set(detail.id, detail);
+  }
+  requireCondition(
+    details.length === classification.addedVersionIds.length &&
+      classification.addedVersionIds.every((id) => detailById.has(id)),
+    "UPLOADED_VERSION_DETAILS_INCOMPLETE",
+  );
+
+  let inventory = null;
+  let observedScriptEtag = null;
+  if (classification.addedVersionIds.length > 0) {
+    requireCondition(
+      isDeepStrictEqual(
+        detailById.get(after.latestVersion.id),
+        after.latestVersion,
+      ),
+      "UPLOADED_VERSION_DETAIL_MISMATCH",
+    );
+    observedScriptEtag = detailById.get(
+      classification.addedVersionIds[0],
+    ).scriptEtag;
+    const message = `${UPLOAD_MESSAGE_PREFIX}${context.candidateSha}`;
+    for (const versionId of classification.addedVersionIds) {
+      const nextInventory = verifyUploadedVersion({
+        detail: detailById.get(versionId),
+        versionId,
+        candidateSha: context.candidateSha,
+        message,
+        privateConfig,
+        latestVersion: before.latestVersion,
+        observedScriptEtag,
+      });
+      if (inventory === null) inventory = nextInventory;
+      else {
+        requireCondition(
+          isDeepStrictEqual(nextInventory, inventory),
+          "UPLOADED_RUNTIME_INVENTORY_INCONSISTENT",
+        );
+      }
+    }
+  }
+
+  const observedScriptEtagSha256 =
+    observedScriptEtag === null
+      ? null
+      : sha256(Buffer.from(observedScriptEtag));
+  const ownerAcceptanceResolutionSha256 = sha256(
+    Buffer.from(
+      canonicalJson({
+        acceptanceBindingSha256: acceptance.bindingSha256,
+        resolvedObservedScriptEtagSha256: observedScriptEtagSha256,
+      }),
+    ),
+  );
+
   return Object.freeze({
-    schemaVersion: 1,
-    status: "OFFLINE_MODEL_ONLY",
+    schemaVersion: 2,
+    evidenceMode: "OFFLINE_MODEL_ONLY",
+    status: classification.status,
     productionExecutionBlocked: true,
     candidateSha: context.candidateSha,
     candidateTree: context.tree,
     buildCorrelationSha256: context.buildCorrelationSha256,
-    versionId,
+    targetBindingSha256: ownerAcceptance.targetBindingSha256,
+    ownerAcceptanceResolutionSha256,
+    addedVersionIds: classification.addedVersionIds,
+    duplicateInactiveVersionCount:
+      classification.duplicateInactiveVersionCount,
+    reportedVersionId: classification.outputVersionId,
+    verifiedVersionId:
+      classification.status === "VERIFIED_INACTIVE_VERSION"
+        ? classification.outputVersionId
+        : null,
     generatedConfigSha256: sha256(Buffer.from(canonicalJson(generatedConfig))),
-    runtimeInventorySha256: sha256(Buffer.from(canonicalJson(inventory))),
-    expectedMutations: ["content-addressed-assets", "worker-version"],
+    runtimeInventorySha256:
+      inventory === null
+        ? null
+        : sha256(Buffer.from(canonicalJson(inventory))),
+    observedScriptEtagSha256,
     activeDeploymentUnchanged: true,
+    nonVersionedSettingsUnchanged: true,
+    addedVersionsInactive: true,
     previewDisabled: true,
+    wrapperRetryAuthorized: false,
+    pinnedToolInternalRetryAccepted: true,
+    acceptedMaximumVersionCreateAttempts: MAX_VERSION_CREATE_ATTEMPTS,
+    acceptedMaximumDuplicateInactiveVersions:
+      MAX_DUPLICATE_INACTIVE_VERSIONS,
+    assetIdentityVerified: false,
+    scriptArtifactIdentityVerified: false,
+    assetRetryResidual: ASSET_RETRY_RESIDUAL,
+    scriptIdentityResidual: SCRIPT_IDENTITY_RESIDUAL,
+    buildUuidAcceptanceResidual: BUILD_UUID_ACCEPTANCE_RESIDUAL,
   });
 }
 

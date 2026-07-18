@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -7,6 +14,7 @@ import test from "node:test";
 
 import {
   validateArtifactFiles,
+  validateProductionInstallTopology,
   validateProductionWorkerArtifactFiles,
   validateProductionWorkerEntrypointIdentity,
 } from "./artifact-gate.mjs";
@@ -26,6 +34,30 @@ function fixture() {
   writeFileSync(path.join(directory, "index.js"), "export default {};");
   writeFileSync(path.join(directory, "assets", "chunk-a.js"), "export const value = 1;");
   return directory;
+}
+
+function installTopologyFixture(context) {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "pgid-install-topology-test-"));
+  context.after(() => rmSync(directory, { force: true, recursive: true }));
+  const root = realpathSync(directory);
+  for (const packageRoot of [".", "apps/sso", "apps/test-rp", "wiki"]) {
+    mkdirSync(path.join(root, packageRoot, "node_modules"), { recursive: true });
+  }
+  const internalPackage = path.join(
+    root,
+    "node_modules",
+    ".pnpm",
+    "example@1.0.0",
+    "node_modules",
+    "example",
+  );
+  mkdirSync(internalPackage, { recursive: true });
+  symlinkSync(
+    internalPackage,
+    path.join(root, "apps", "sso", "node_modules", "example"),
+    "dir",
+  );
+  return root;
 }
 
 function reviewedGeneratedFallbacks(body) {
@@ -48,11 +80,68 @@ function fallbackBehavioralDecoys(count) {
   return `${reviewedGeneratedFallbacks("")}\n${overrides.slice(0, count).join("\n")}`;
 }
 
-test("accepts a bounded allowlisted Worker artifact", (context) => {
+test("accepts a bounded artifact and local install while rejecting nonlocal topology", (context) => {
   const directory = fixture();
   context.after(() => rmSync(directory, { force: true, recursive: true }));
   const result = validateArtifactFiles(directory, basePolicy);
   assert.equal(result.files.length, 3);
+
+  const root = installTopologyFixture(context);
+  assert.doesNotThrow(() => validateProductionInstallTopology(root));
+  const outside = mkdtempSync(path.join(os.tmpdir(), "pgid-external-node-modules-"));
+  context.after(() => rmSync(outside, { force: true, recursive: true }));
+  const packageNodeModules = path.join(root, "wiki", "node_modules");
+  rmSync(packageNodeModules, { recursive: true });
+  symlinkSync(outside, packageNodeModules, "dir");
+  assert.throws(
+    () => validateProductionInstallTopology(root),
+    /package node_modules must be a local directory/,
+  );
+
+  const dependencyRoot = installTopologyFixture(context);
+  const outsideDependency = mkdtempSync(
+    path.join(os.tmpdir(), "pgid-external-dependency-"),
+  );
+  context.after(() => rmSync(outsideDependency, { force: true, recursive: true }));
+  symlinkSync(
+    outsideDependency,
+    path.join(
+      dependencyRoot,
+      "apps",
+      "test-rp",
+      "node_modules",
+      "external-dependency",
+    ),
+    "dir",
+  );
+  assert.throws(
+    () => validateProductionInstallTopology(dependencyRoot),
+    /dependency symlink escapes the repository/,
+  );
+
+  const transitiveRoot = installTopologyFixture(context);
+  const localDependency = path.join(transitiveRoot, "vendor", "local-dependency");
+  mkdirSync(localDependency, { recursive: true });
+  const outsideTransitiveDependency = mkdtempSync(
+    path.join(os.tmpdir(), "pgid-external-transitive-dependency-"),
+  );
+  context.after(() =>
+    rmSync(outsideTransitiveDependency, { force: true, recursive: true }),
+  );
+  symlinkSync(
+    outsideTransitiveDependency,
+    path.join(localDependency, "external-transitive-dependency"),
+    "dir",
+  );
+  symlinkSync(
+    localDependency,
+    path.join(transitiveRoot, "wiki", "node_modules", "local-dependency"),
+    "dir",
+  );
+  assert.throws(
+    () => validateProductionInstallTopology(transitiveRoot),
+    /dependency symlink escapes the repository/,
+  );
 });
 
 test("rejects source maps and unexpected files", (context) => {
@@ -125,13 +214,19 @@ test("allows only exact reviewed Worker error-enum assignments", (context) => {
   );
 });
 
-test("rejects wrong production entry digests before the structural artifact scanner", (context) => {
+test("rejects runtime and import mutations before the structural artifact scanner", (context) => {
   const directory = fixture();
   context.after(() => rmSync(directory, { force: true, recursive: true }));
-  assert.throws(
-    () => validateProductionWorkerEntrypointIdentity(Buffer.from("export default {};")),
-    /entrypoint identity/,
-  );
+  for (const source of [
+    "export default {};",
+    'import "./assets/replaced-runtime.js";\nexport default {};',
+    'export default { fetch() { return new Response("changed"); } };',
+  ]) {
+    assert.throws(
+      () => validateProductionWorkerEntrypointIdentity(Buffer.from(source)),
+      /entrypoint identity/,
+    );
+  }
   assert.throws(
     () => validateProductionWorkerArtifactFiles(directory, basePolicy),
     /entrypoint identity/,

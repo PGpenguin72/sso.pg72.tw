@@ -18,6 +18,7 @@ const MAX_DISPATCH_GENERATION = 1_000_000;
 const MAX_ATTEMPTS = 5;
 const MAX_LEASE_SECONDS = 300;
 const MAX_RUNTIME_WORK_ITEMS = 25;
+const CURRENT_R2_CONFLICT_EVIDENCE_FORMAT = "observed_v1";
 const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/;
 const KEY_VERSION_PATTERN = /^v[1-9][0-9]{0,5}$/;
 const SAFE_IDENTIFIER_PATTERN = /^[A-Za-z0-9._:-]{1,256}$/;
@@ -1921,6 +1922,7 @@ const TERMINAL_RECEIPT_KEYS = [
   "next_attempt_at",
   "outcome",
   "r2_etag",
+  "r2_conflict_evidence_format",
   "r2_observed_bytes",
   "r2_readback_at",
   "r2_readback_sha256",
@@ -1958,6 +1960,10 @@ function terminalReceiptMatches(value: unknown, intent: TerminalIntent): boolean
       nullableCanonicalTimestamp(row.next_attempt_at) === intent.nextAttemptAt &&
       nullableR2Text(row.r2_version) === (intent.evidence?.version ?? null) &&
       nullableR2Text(row.r2_etag) === (intent.evidence?.etag ?? null) &&
+      row.r2_conflict_evidence_format ===
+        (intent.errorCode === "r2_object_conflict"
+          ? CURRENT_R2_CONFLICT_EVIDENCE_FORMAT
+          : null) &&
       nullableObservedBytes(row.r2_observed_bytes) ===
         (intent.evidence?.observedBytes ?? null) &&
       nullableSha256(row.r2_readback_sha256) ===
@@ -1983,7 +1989,8 @@ function terminalReceiptStatement(
     `SELECT batch_key, dispatch_generation, attempt_number, lease_id,
             outcome, resulting_status, next_attempt_at, r2_version, r2_etag,
             r2_observed_bytes, r2_stored_sha256, r2_readback_sha256,
-            r2_readback_at, error_code, started_at, completed_at
+            r2_readback_at, r2_conflict_evidence_format, error_code,
+            started_at, completed_at
        FROM audit_archive_attempt
       WHERE id = ?
         ${changesGated ? "AND changes() = 1" : ""}`,
@@ -2061,7 +2068,8 @@ async function terminalizeAuditArchiveAttempt(
             SET outcome = ?, resulting_status = ?, next_attempt_at = ?,
                 r2_version = ?, r2_etag = ?, r2_observed_bytes = ?,
                 r2_stored_sha256 = ?, r2_readback_sha256 = ?,
-                r2_readback_at = ?, error_code = ?, completed_at = ?
+                r2_readback_at = ?, r2_conflict_evidence_format = ?,
+                error_code = ?, completed_at = ?
           WHERE id = ? AND batch_key = ? AND dispatch_generation = ?
             AND attempt_number = ? AND lease_id = ? AND started_at = ?
             AND outcome = 'in_flight'
@@ -2074,6 +2082,11 @@ async function terminalizeAuditArchiveAttempt(
                  AND batch.lease_id = ?
                  AND batch.lease_expires_at = ?
                  AND batch.updated_at = ?
+                 AND (? <> 'archived' OR (
+                   batch.object_bytes = ?
+                   AND batch.object_sha256 = ?
+                   AND batch.object_sha256 = ?
+                 ))
             )`,
       ).bind(
         intent.outcome,
@@ -2085,6 +2098,9 @@ async function terminalizeAuditArchiveAttempt(
         evidence?.storedSha256 ?? null,
         evidence?.readbackSha256 ?? null,
         evidence?.readbackAt ?? null,
+        intent.errorCode === "r2_object_conflict"
+          ? CURRENT_R2_CONFLICT_EVIDENCE_FORMAT
+          : null,
         intent.errorCode,
         intent.completedAt,
         intent.lease.leaseId,
@@ -2098,6 +2114,10 @@ async function terminalizeAuditArchiveAttempt(
         intent.lease.leaseId,
         intent.lease.leaseExpiresAt,
         intent.lease.updatedAt,
+        intent.outcome,
+        evidence?.observedBytes ?? null,
+        evidence?.storedSha256 ?? null,
+        evidence?.readbackSha256 ?? null,
       ),
       terminalReceiptStatement(database, intent.lease.leaseId, true),
       terminalReceiptStatement(database, intent.lease.leaseId, false),
@@ -2160,7 +2180,12 @@ export async function finalizeAuditArchiveLease(
     const completedAt = canonicalTimestamp(input.completedAt);
     validateNormalCompletion(lease, completedAt);
     const evidence = parseR2Evidence(input.evidence);
-    if (evidence.readbackAt !== completedAt.iso) fail("invalid_input");
+    if (
+      evidence.readbackAt !== completedAt.iso ||
+      evidence.storedSha256 === null
+    ) {
+      fail("invalid_input");
+    }
     return await terminalizeAuditArchiveAttempt(database, {
       completedAt: completedAt.iso,
       errorCode: null,

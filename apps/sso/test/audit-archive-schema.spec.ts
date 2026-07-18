@@ -396,7 +396,7 @@ async function assertIntegrity(): Promise<void> {
   ).toBe("ok");
 }
 
-describe("audit archive 0021 schema", () => {
+describe("audit archive schema", () => {
   it("starts disabled with exactly six durable tables and captures audit source", async () => {
     const tables = await env.PG72_ID_DB.prepare(
       `SELECT name FROM sqlite_schema
@@ -707,10 +707,13 @@ describe("audit archive 0021 schema", () => {
       `UPDATE audit_archive_attempt
           SET outcome = 'archived', resulting_status = 'archived',
               r2_version = 'version-gap', r2_etag = 'etag-gap',
+              r2_observed_bytes = ?, r2_stored_sha256 = ?,
               r2_readback_sha256 = ?, r2_readback_at = ?, completed_at = ?
         WHERE id = ?`,
     )
       .bind(
+        build.manifest.objectBytes,
+        build.manifest.objectSha256,
         build.manifest.objectSha256,
         completedAt,
         completedAt,
@@ -785,10 +788,13 @@ describe("audit archive 0021 schema", () => {
         `UPDATE audit_archive_attempt
             SET outcome = 'archived', resulting_status = 'archived',
                 r2_version = 'version-expired', r2_etag = 'etag-expired',
+                r2_observed_bytes = ?, r2_stored_sha256 = ?,
                 r2_readback_sha256 = ?, r2_readback_at = ?, completed_at = ?
           WHERE id = ?`,
       )
         .bind(
+          build.manifest.objectBytes,
+          build.manifest.objectSha256,
           build.manifest.objectSha256,
           at(701_100),
           at(701_100),
@@ -797,14 +803,94 @@ describe("audit archive 0021 schema", () => {
         .run(),
     ).rejects.toThrow();
     const completedAt = at(700_700);
+    const checkpoint = await env.PG72_ID_DB.prepare(
+      `SELECT revision, last_sequence, last_batch_key, last_archived_at
+         FROM audit_archive_checkpoint WHERE id = 1`,
+    ).first();
+    for (const invalid of [
+      {
+        observedBytes: build.manifest.objectBytes - 1,
+        readbackSha256: build.manifest.objectSha256,
+        storedSha256: build.manifest.objectSha256,
+      },
+      {
+        observedBytes: build.manifest.objectBytes,
+        readbackSha256: build.manifest.objectSha256,
+        storedSha256: null,
+      },
+      {
+        observedBytes: build.manifest.objectBytes,
+        readbackSha256: build.manifest.objectSha256,
+        storedSha256: "f".repeat(64),
+      },
+      {
+        observedBytes: build.manifest.objectBytes,
+        readbackSha256: "f".repeat(64),
+        storedSha256: build.manifest.objectSha256,
+      },
+    ]) {
+      await expect(
+        env.PG72_ID_DB.prepare(
+          `UPDATE audit_archive_attempt
+              SET outcome = 'archived', resulting_status = 'archived',
+                  r2_version = 'version-invalid', r2_etag = 'etag-invalid',
+                  r2_observed_bytes = ?, r2_stored_sha256 = ?,
+                  r2_readback_sha256 = ?, r2_readback_at = ?,
+                  completed_at = ?
+            WHERE id = ?`,
+        )
+          .bind(
+            invalid.observedBytes,
+            invalid.storedSha256,
+            invalid.readbackSha256,
+            completedAt,
+            completedAt,
+            lease,
+          )
+          .run(),
+      ).rejects.toThrow(/invalid audit archive attempt transition/);
+      expect(
+        await env.PG72_ID_DB.prepare(
+          `SELECT outcome, r2_version, r2_observed_bytes, r2_stored_sha256,
+                  r2_readback_sha256, completed_at
+             FROM audit_archive_attempt WHERE id = ?`,
+        )
+          .bind(lease)
+          .first(),
+      ).toEqual({
+        completed_at: null,
+        outcome: "in_flight",
+        r2_observed_bytes: null,
+        r2_readback_sha256: null,
+        r2_stored_sha256: null,
+        r2_version: null,
+      });
+      expect(
+        await env.PG72_ID_DB.prepare(
+          `SELECT status, encrypted_envelope IS NOT NULL AS has_envelope
+             FROM audit_archive_batch WHERE batch_key = ?`,
+        )
+          .bind(build.batchKey)
+          .first(),
+      ).toEqual({ has_envelope: 1, status: "processing" });
+      expect(
+        await env.PG72_ID_DB.prepare(
+          `SELECT revision, last_sequence, last_batch_key, last_archived_at
+             FROM audit_archive_checkpoint WHERE id = 1`,
+        ).first(),
+      ).toEqual(checkpoint);
+    }
     await env.PG72_ID_DB.prepare(
       `UPDATE audit_archive_attempt
           SET outcome = 'archived', resulting_status = 'archived',
               r2_version = 'version-1', r2_etag = 'etag-1',
+              r2_observed_bytes = ?, r2_stored_sha256 = ?,
               r2_readback_sha256 = ?, r2_readback_at = ?, completed_at = ?
         WHERE id = ?`,
     )
       .bind(
+        build.manifest.objectBytes,
+        build.manifest.objectSha256,
         build.manifest.objectSha256,
         completedAt,
         completedAt,
@@ -934,10 +1020,13 @@ describe("audit archive 0021 schema", () => {
       `UPDATE audit_archive_attempt
           SET outcome = 'archived', resulting_status = 'archived',
               r2_version = 'version-retry', r2_etag = 'etag-retry',
+              r2_observed_bytes = ?, r2_stored_sha256 = ?,
               r2_readback_sha256 = ?, r2_readback_at = ?, completed_at = ?
         WHERE id = ?`,
     )
       .bind(
+        build.manifest.objectBytes,
+        build.manifest.objectSha256,
         build.manifest.objectSha256,
         archivedAt,
         archivedAt,
@@ -1063,10 +1152,18 @@ describe("audit archive 0021 schema", () => {
       `UPDATE audit_archive_attempt
           SET outcome = 'archived', resulting_status = 'archived',
               r2_version = 'version-renewed', r2_etag = 'etag-renewed',
+              r2_observed_bytes = ?, r2_stored_sha256 = ?,
               r2_readback_sha256 = ?, r2_readback_at = ?, completed_at = ?
         WHERE id = ?`,
     )
-      .bind(build.manifest.objectSha256, completedAt, completedAt, lease)
+      .bind(
+        build.manifest.objectBytes,
+        build.manifest.objectSha256,
+        build.manifest.objectSha256,
+        completedAt,
+        completedAt,
+        lease,
+      )
       .run();
     await assertIntegrity();
   });
@@ -1083,6 +1180,36 @@ describe("audit archive 0021 schema", () => {
       at(1_100_100),
     );
     const completedAt = at(800_500);
+    await expect(
+      env.PG72_ID_DB.prepare(
+        `UPDATE audit_archive_attempt
+            SET outcome = 'corrupt', resulting_status = 'corrupt',
+                r2_version = 'legacy-version', r2_etag = 'legacy-etag',
+                r2_readback_sha256 = ?, r2_readback_at = ?,
+                r2_conflict_evidence_format = 'legacy_0021_full',
+                error_code = 'r2_object_conflict', completed_at = ?
+          WHERE id = ?`,
+      )
+        .bind(
+          build.manifest.objectSha256,
+          completedAt,
+          completedAt,
+          lease,
+        )
+        .run(),
+    ).rejects.toThrow(/invalid audit archive attempt transition/);
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT outcome, r2_conflict_evidence_format, completed_at
+           FROM audit_archive_attempt WHERE id = ?`,
+      )
+        .bind(lease)
+        .first(),
+    ).toEqual({
+      completed_at: null,
+      outcome: "in_flight",
+      r2_conflict_evidence_format: null,
+    });
     const invalidEvidence = [
       { constraint: "r2_version", etag: "etag", version: "version\u0000suffix" },
       { constraint: "r2_version", etag: "etag", version: "version\nsuffix" },
@@ -1130,11 +1257,14 @@ describe("audit archive 0021 schema", () => {
       `UPDATE audit_archive_attempt
           SET outcome = 'archived', resulting_status = 'archived',
               r2_version = 'version-valid', r2_etag = 'etag-valid',
+              r2_observed_bytes = ?, r2_stored_sha256 = ?,
               r2_readback_sha256 = ?, r2_readback_at = ?,
               error_code = NULL, completed_at = ?
         WHERE id = ?`,
     )
       .bind(
+        build.manifest.objectBytes,
+        build.manifest.objectSha256,
         build.manifest.objectSha256,
         completedAt,
         completedAt,
@@ -1318,10 +1448,13 @@ describe("audit archive 0021 schema", () => {
       `UPDATE audit_archive_attempt
           SET outcome = 'archived', resulting_status = 'archived',
               r2_version = 'version-replay', r2_etag = 'etag-replay',
+              r2_observed_bytes = ?, r2_stored_sha256 = ?,
               r2_readback_sha256 = ?, r2_readback_at = ?, completed_at = ?
         WHERE id = ?`,
     )
       .bind(
+        build.manifest.objectBytes,
+        build.manifest.objectSha256,
         build.manifest.objectSha256,
         archivedAt,
         archivedAt,
@@ -1369,10 +1502,13 @@ describe("audit archive 0021 schema", () => {
         `UPDATE audit_archive_attempt
             SET outcome = 'archived', resulting_status = 'archived',
                 r2_version = 'version-stale', r2_etag = 'etag-stale',
+                r2_observed_bytes = ?, r2_stored_sha256 = ?,
                 r2_readback_sha256 = ?, r2_readback_at = ?, completed_at = ?
           WHERE id = ?`,
       )
         .bind(
+          build.manifest.objectBytes,
+          build.manifest.objectSha256,
           build.manifest.objectSha256,
           completedAt,
           completedAt,

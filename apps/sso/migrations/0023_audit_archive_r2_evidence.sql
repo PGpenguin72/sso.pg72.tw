@@ -100,6 +100,10 @@ CREATE TABLE "audit_archive_attempt" (
       ) = "r2_readback_at"
     )
   ),
+  "r2_conflict_evidence_format" text CHECK (
+    "r2_conflict_evidence_format" IS NULL OR
+    "r2_conflict_evidence_format" IN ('legacy_0021_full', 'observed_v1')
+  ),
   "error_code" text CHECK (
     "error_code" IS NULL OR "error_code" IN (
       'queue_unavailable', 'r2_transient', 'r2_object_conflict',
@@ -142,6 +146,25 @@ CREATE TABLE "audit_archive_attempt" (
       AND "r2_readback_at" IS NOT NULL)
   ),
   CHECK (
+    ("r2_conflict_evidence_format" IS NULL
+      AND "error_code" IS NOT 'r2_object_conflict')
+    OR ("r2_conflict_evidence_format" = 'legacy_0021_full'
+      AND "outcome" = 'corrupt' AND "resulting_status" = 'corrupt'
+      AND "error_code" = 'r2_object_conflict'
+      AND "r2_version" IS NOT NULL AND "r2_etag" IS NOT NULL
+      AND "r2_observed_bytes" IS NULL AND "r2_stored_sha256" IS NULL
+      AND "r2_readback_sha256" IS NOT NULL
+      AND "r2_readback_at" = "completed_at"
+      AND "completed_at" IS NOT NULL)
+    OR ("r2_conflict_evidence_format" = 'observed_v1'
+      AND "outcome" = 'corrupt' AND "resulting_status" = 'corrupt'
+      AND "error_code" = 'r2_object_conflict'
+      AND "r2_version" IS NOT NULL AND "r2_etag" IS NOT NULL
+      AND "r2_observed_bytes" IS NOT NULL
+      AND "r2_readback_at" = "completed_at"
+      AND "completed_at" IS NOT NULL)
+  ),
+  CHECK (
     ("outcome" = 'in_flight' AND "resulting_status" = 'processing'
       AND "next_attempt_at" IS NULL AND "r2_version" IS NULL
       AND "error_code" IS NULL AND "completed_at" IS NULL)
@@ -169,7 +192,7 @@ CREATE TABLE "audit_archive_attempt" (
         ))
         OR ("error_code" = 'r2_object_conflict'
           AND "r2_version" IS NOT NULL
-          AND "r2_observed_bytes" IS NOT NULL
+          AND "r2_conflict_evidence_format" IS NOT NULL
           AND "r2_readback_at" = "completed_at")
         OR ("error_code" = 'r2_readback_mismatch'
           AND "r2_version" IS NOT NULL
@@ -196,12 +219,15 @@ INSERT INTO "audit_archive_attempt" (
   "id", "batch_key", "dispatch_generation", "attempt_number", "lease_id",
   "outcome", "resulting_status", "next_attempt_at", "r2_version", "r2_etag",
   "r2_observed_bytes", "r2_stored_sha256", "r2_readback_sha256",
-  "r2_readback_at", "error_code", "started_at", "completed_at"
+  "r2_readback_at", "r2_conflict_evidence_format", "error_code",
+  "started_at", "completed_at"
 )
 SELECT "id", "batch_key", "dispatch_generation", "attempt_number", "lease_id",
        "outcome", "resulting_status", "next_attempt_at", "r2_version", "r2_etag",
-       NULL, NULL, "r2_readback_sha256", "r2_readback_at", "error_code",
-       "started_at", "completed_at"
+       NULL, NULL, "r2_readback_sha256", "r2_readback_at",
+       CASE WHEN "error_code" = 'r2_object_conflict'
+         THEN 'legacy_0021_full' ELSE NULL END,
+       "error_code", "started_at", "completed_at"
   FROM "audit_archive_attempt_0021";
 
 DROP TABLE "audit_archive_attempt_0021";
@@ -273,7 +299,13 @@ WHEN OLD."outcome" <> 'in_flight'
        )
        AND (
          NEW."outcome" <> 'archived'
-         OR NEW."r2_readback_sha256" = batch."object_sha256"
+         OR (NEW."r2_observed_bytes" = batch."object_bytes"
+           AND NEW."r2_stored_sha256" = batch."object_sha256"
+           AND NEW."r2_readback_sha256" = batch."object_sha256")
+       )
+       AND (
+         NEW."error_code" IS NOT 'r2_object_conflict'
+         OR NEW."r2_conflict_evidence_format" = 'observed_v1'
        )
   )
 BEGIN
@@ -288,12 +320,12 @@ BEGIN
     "id", "batch_key", "dispatch_generation", "attempt_number", "lease_id",
     "outcome", "resulting_status", "next_attempt_at",
     "r2_version", "r2_etag", "r2_observed_bytes", "r2_stored_sha256",
-    "r2_readback_sha256", "r2_readback_at", "error_code", "started_at",
-    "completed_at"
+    "r2_readback_sha256", "r2_readback_at", "r2_conflict_evidence_format",
+    "error_code", "started_at", "completed_at"
   ) VALUES (
     NEW."lease_id", NEW."batch_key", NEW."dispatch_generation", NEW."attempts",
     NEW."lease_id", 'in_flight', 'processing', NULL,
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NEW."updated_at", NULL
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NEW."updated_at", NULL
   );
 END;
 
@@ -412,6 +444,8 @@ OR NOT (
              AND attempt."outcome" = 'archived'
              AND attempt."r2_version" = NEW."r2_version"
              AND attempt."r2_etag" = NEW."r2_etag"
+             AND attempt."r2_observed_bytes" = NEW."object_bytes"
+             AND attempt."r2_stored_sha256" = NEW."object_sha256"
              AND attempt."r2_readback_sha256" = NEW."r2_readback_sha256"
              AND attempt."r2_readback_at" = NEW."r2_readback_at"
              AND NEW."archived_at" = attempt."completed_at"

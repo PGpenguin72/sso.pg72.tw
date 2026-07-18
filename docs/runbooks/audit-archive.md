@@ -1,14 +1,15 @@
 # Audit archive D1 repository boundary
 
 > Status: local, request-scoped, unwired D1 repository. Migration
-> `0021_audit_archive.sql` and `worker/audit-archive-repository.ts` do not read
+> `0021_audit_archive.sql`, `0023_audit_archive_r2_evidence.sql`, and
+> `worker/audit-archive-repository.ts` do not read
 > a KEK, write or restore R2, publish or consume Queue messages, schedule Cron
 > work, delete retained objects, or provide an operator endpoint. Production
 > records remain through migration `0012`.
 
-## What `0021` provides
+## What `0021` and `0023` provide
 
-The migration is additive after `0020_alert_observability.sql` and creates
+`0021` is additive after `0020_alert_observability.sql` and creates
 exactly six durable tables:
 
 - `audit_archive_source` assigns a safe monotonic sequence to every committed
@@ -32,6 +33,14 @@ exactly six durable tables:
 There is no seventh GC table. The batch row owns envelope cleanup evidence;
 the checkpoint owns only the monotonic cursor.
 
+`0023` rebuilds only the immutable attempt-evidence table. It preserves an
+existing `0021` object-conflict receipt as `legacy_0021_full` without inventing
+an observed size or stored checksum. New conflict receipts must instead use the
+closed `observed_v1` format with an observed byte count. A successful archive
+transition requires observed bytes, R2 stored SHA-256, and full readback
+SHA-256 to match the immutable batch object identity before the envelope can be
+cleared or the checkpoint can advance.
+
 ## What the local repository provides
 
 The repository accepts only a pre-derived, archive-domain fingerprint
@@ -46,7 +55,9 @@ row. Queue preparation validates the canonical record array, manifest, object
 digest/key, encrypted-envelope digest/size, checkpoint predecessor and key
 version before one item-first/parent `D1Database.batch()` persists them.
 
-Claim, same-lease renewal, terminal success/failure/expiry and dead replay use
+Dispatch-generation claim, lease-bound claimed-envelope reads, bounded
+due/expired/checkpoint work selection, same-lease renewal, terminal
+success/failure/expiry and dead replay use
 exact compare-and-swap predicates. Adjacent `changes()` gates prevent dependent
 writes or projections from treating a concurrent no-op as success; exact
 immutable attempt/audit receipts distinguish response-loss retry from a
@@ -106,7 +117,7 @@ envelope or object identity.
 The success path is one nested SQLite transaction:
 
 ```text
-terminal attempt UPDATE
+terminal attempt UPDATE validates object bytes + stored/readback SHA-256
   -> batch UPDATE writes archived + complete R2 evidence
      + archived/GC time + encrypted_envelope = NULL
   -> checkpoint UPDATE advances exact predecessor revision/sequence
@@ -136,8 +147,9 @@ pnpm --filter @pg72/test-rp test
 git diff --check
 ```
 
-The focused suites cover fresh and seeded-`0020` migration, deterministic
-backfill, invalid-parent transactional abort and canonical repair,
+The focused suites cover fresh and seeded-`0020` migration, `0021` to `0023`
+active-lease and legacy-conflict preservation, deterministic backfill,
+invalid-parent transactional abort and canonical repair,
 bounded/byte-capped source selection, sentinel continuity, deferred canonical
 item-first persistence and rollback, hostile replace/update/delete with
 recursive triggers disabled, Passkey-compatible source cascade, response-loss

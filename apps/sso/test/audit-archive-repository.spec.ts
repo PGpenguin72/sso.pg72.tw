@@ -387,6 +387,15 @@ describe.sequential("audit archive D1 repository", () => {
 
     await applyArchiveMigration("0023_audit_archive_r2_evidence.sql");
     expect(
+      (await env.PG72_ID_DB.prepare(
+        "PRAGMA table_info(audit_archive_attempt)",
+      ).all<{ name: string }>()).results.map(({ name }) => name),
+    ).toEqual(expect.arrayContaining([
+      "r2_conflict_evidence_format",
+      "r2_observed_bytes",
+      "r2_stored_sha256",
+    ]));
+    expect(
       await env.PG72_ID_DB.prepare(
         `SELECT outcome, lease_id, r2_observed_bytes, r2_stored_sha256
            FROM audit_archive_attempt WHERE id = ?`,
@@ -410,6 +419,71 @@ describe.sequential("audit archive D1 repository", () => {
         lease,
       }),
     ).toBe("applied");
+  });
+
+  it("preserves legacy 0021 conflict evidence without inventing observations", async () => {
+    await dropArchiveLedger();
+    await applyArchiveMigration("0021_audit_archive.sql");
+    const fixture = await queuedFixture();
+    const lease = await acquire(fixture, at(11_000), at(311_000));
+    const completedAt = at(20_000);
+    const legacy = {
+      etag: "legacy-conflict-etag",
+      readbackSha256: "f".repeat(64),
+      version: "legacy-conflict-version",
+    };
+    await env.PG72_ID_DB.prepare(
+      `UPDATE audit_archive_attempt
+          SET outcome = 'corrupt', resulting_status = 'corrupt',
+              r2_version = ?, r2_etag = ?, r2_readback_sha256 = ?,
+              r2_readback_at = ?, error_code = 'r2_object_conflict',
+              completed_at = ?
+        WHERE id = ?`,
+    )
+      .bind(
+        legacy.version,
+        legacy.etag,
+        legacy.readbackSha256,
+        completedAt,
+        completedAt,
+        lease.leaseId,
+      )
+      .run();
+
+    await applyArchiveMigration("0023_audit_archive_r2_evidence.sql");
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT outcome, error_code, r2_version, r2_etag,
+                r2_observed_bytes, r2_stored_sha256, r2_readback_sha256,
+                r2_readback_at, r2_conflict_evidence_format
+           FROM audit_archive_attempt WHERE id = ?`,
+      )
+        .bind(lease.leaseId)
+        .first(),
+    ).toEqual({
+      error_code: "r2_object_conflict",
+      outcome: "corrupt",
+      r2_conflict_evidence_format: "legacy_0021_full",
+      r2_etag: legacy.etag,
+      r2_observed_bytes: null,
+      r2_readback_at: completedAt,
+      r2_readback_sha256: legacy.readbackSha256,
+      r2_stored_sha256: null,
+      r2_version: legacy.version,
+    });
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT status, last_error_code,
+                encrypted_envelope IS NOT NULL AS has_envelope
+           FROM audit_archive_batch WHERE batch_key = ?`,
+      )
+        .bind(fixture.input.batchKey)
+        .first(),
+    ).toEqual({
+      has_envelope: 1,
+      last_error_code: "r2_object_conflict",
+      status: "corrupt",
+    });
   });
 
   it("selects a monotonic head prefix, preserves legitimate gaps, and caps at 100", async () => {
@@ -1024,13 +1098,71 @@ describe.sequential("audit archive D1 repository", () => {
     ).toBe(1);
   });
 
+  it("rejects archive success evidence that disagrees with immutable object identity", async () => {
+    const fixture = await queuedFixture();
+    const lease = await acquire(fixture, at(11_000), at(311_000));
+    const completedAt = at(20_000);
+    const correct = evidence(fixture.manifest, completedAt);
+    for (const invalidEvidence of [
+      { ...correct, observedBytes: correct.observedBytes - 1 },
+      { ...correct, storedSha256: "f".repeat(64) },
+      { ...correct, readbackSha256: "f".repeat(64) },
+    ]) {
+      expect(
+        await finalizeAuditArchiveLease(env.PG72_ID_DB, {
+          completedAt,
+          evidence: invalidEvidence,
+          lease,
+        }),
+      ).toBe("conflict");
+    }
+    await expectRepositoryError(
+      Reflect.apply(finalizeAuditArchiveLease, undefined, [
+        env.PG72_ID_DB,
+        {
+          completedAt,
+          evidence: { ...correct, storedSha256: null },
+          lease,
+        },
+      ]),
+      "invalid_input",
+    );
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT status, lease_id,
+                encrypted_envelope IS NOT NULL AS has_envelope
+           FROM audit_archive_batch WHERE batch_key = ?`,
+      )
+        .bind(fixture.input.batchKey)
+        .first(),
+    ).toEqual({ has_envelope: 1, lease_id: lease.leaseId, status: "processing" });
+    expect(
+      await env.PG72_ID_DB.prepare(
+        "SELECT outcome FROM audit_archive_attempt WHERE id = ?",
+      )
+        .bind(lease.leaseId)
+        .first<string>("outcome"),
+    ).toBe("in_flight");
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT revision, last_sequence, last_batch_key, last_archived_at
+           FROM audit_archive_checkpoint WHERE id = 1`,
+      ).first(),
+    ).toEqual({
+      last_archived_at: null,
+      last_batch_key: null,
+      last_sequence: 0,
+      revision: 0,
+    });
+  });
+
   it("rolls back a mismatched readback digest and keeps the active lease and BLOB", async () => {
     const fixture = await queuedFixture();
     const lease = await acquire(fixture, at(11_000), at(311_000));
     const completedAt = at(20_000);
     const wrongDigest = "f".repeat(64);
-    await expectRepositoryError(
-      finalizeAuditArchiveLease(env.PG72_ID_DB, {
+    expect(
+      await finalizeAuditArchiveLease(env.PG72_ID_DB, {
         completedAt,
         evidence: {
           ...evidence(fixture.manifest, completedAt),
@@ -1038,9 +1170,7 @@ describe.sequential("audit archive D1 repository", () => {
         },
         lease,
       }),
-      "write_failed",
-      [fixture.input.batchKey, lease.leaseId, wrongDigest],
-    );
+    ).toBe("conflict");
     expect(
       await env.PG72_ID_DB.prepare(
         `SELECT status, encrypted_envelope IS NOT NULL AS has_envelope,
@@ -1149,7 +1279,8 @@ describe.sequential("audit archive D1 repository", () => {
       await env.PG72_ID_DB.prepare(
         `SELECT outcome, error_code, r2_version, r2_etag,
                 r2_observed_bytes, r2_stored_sha256,
-                r2_readback_sha256, r2_readback_at
+                r2_readback_sha256, r2_readback_at,
+                r2_conflict_evidence_format
            FROM audit_archive_attempt WHERE id = ?`,
       )
         .bind(lease.leaseId)
@@ -1157,6 +1288,7 @@ describe.sequential("audit archive D1 repository", () => {
     ).toEqual({
       error_code: "crypto_integrity",
       outcome: "corrupt",
+      r2_conflict_evidence_format: null,
       r2_etag: null,
       r2_observed_bytes: null,
       r2_readback_at: null,
@@ -1191,7 +1323,8 @@ describe.sequential("audit archive D1 repository", () => {
       await env.PG72_ID_DB.prepare(
         `SELECT outcome, error_code, r2_version, r2_etag,
                 r2_observed_bytes, r2_stored_sha256,
-                r2_readback_sha256, r2_readback_at
+                r2_readback_sha256, r2_readback_at,
+                r2_conflict_evidence_format
            FROM audit_archive_attempt WHERE id = ?`,
       )
         .bind(lease.leaseId)
@@ -1199,6 +1332,7 @@ describe.sequential("audit archive D1 repository", () => {
     ).toEqual({
       error_code: "r2_object_conflict",
       outcome: "corrupt",
+      r2_conflict_evidence_format: "observed_v1",
       r2_etag: conflictEvidence.etag,
       r2_observed_bytes: conflictEvidence.observedBytes,
       r2_readback_at: completedAt,

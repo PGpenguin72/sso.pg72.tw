@@ -108,13 +108,23 @@ and must match a SHA-256 constant owned by `scripts/security/artifact-gate.mjs`.
 The identity check runs before the existing structural and AST scans, so a
 replacement, decoy, duplicate, removal, concatenation, template rewrite, or any
 other entry-byte change fails even if a shallow structural pattern still looks
-reviewed. Do not derive or update this constant automatically. An intentional
-runtime, dependency, bundler, or build-chain change must receive human review;
-then run two independent clean builds and Wrangler dry-runs, confirm their
-`index.js` bytes are identical, and update the constant in the reviewed change.
-Those measurements currently establish local-toolchain determinism only. Linux
-entry-digest equality has not been measured; this is an open evidence gap, not
-evidence of a mismatch.
+reviewed. The artifact gate first requires each code-owned package's
+`node_modules` to be a local directory and recursively rejects any installed
+dependency symlink whose realpath leaves the checkout. This matters because
+Rolldown retains module-provenance comments; reusing another worktree's module
+tree changes those comments and the derived chunk hashes even when source is
+identical. The gate hashes raw, unminified deployed bytes and continues to reject
+source maps; it does not strip runtime or provenance sections. Do not derive or
+update the entry constant automatically. An intentional runtime, dependency,
+bundler, or build-chain change must receive human review; then run two
+independent frozen installs, clean builds, and Wrangler dry-runs, confirm the
+entry and every emitted Worker chunk are byte-identical, and update the constant
+in the reviewed change. The current local-candidate entry and all eleven Worker
+chunks were byte-identical across two different local checkout paths with
+independent local installs. That topology proof does not authorize updating the
+code-owned digest before all later runtime inputs freeze and the owner reviews
+the final candidate. Linux equality has not been measured; this is an open
+evidence gap, not evidence of a mismatch.
 
 `security/workflow-policy.json` default-denies environment keys at workflow,
 job, and step scope. Policy may select only the code-owned `DAST_*` expressions

@@ -80,11 +80,22 @@ missing-file, hidden-file, and retention behavior. Workflow environment
 keys/values are restricted by a code-owned allowlist; all
 `CLOUDFLARE_*`, legacy `CF_*`, and `WRANGLER_*` keys are independently denied.
 The production Wrangler `index.js` must match its code-owned whole-file SHA-256
-before file, secret-family, and AST checks run. A runtime, dependency, bundler,
-or build-chain change requires human review and two byte-identical clean
-build/dry-run results before deliberately updating that digest; no policy or
-generated artifact can update it automatically. Linux equality for the current
-entry digest has not yet been measured; it is neither claimed nor disproven.
+before file, secret-family, and AST checks run. Before building, the artifact
+gate requires every code-owned package's `node_modules` to be a local directory
+and every installed dependency symlink to resolve inside the same checkout.
+This prevents Rolldown's retained module-provenance comments and derived chunk
+hashes from depending on another worktree's module realpath. The identity still
+covers raw, unminified deployed bytes; no runtime section, provenance comment,
+or source-map reference is normalized or omitted, and source maps remain
+forbidden. A runtime, dependency, bundler, or build-chain change requires human
+review and two byte-identical clean build/dry-run results before deliberately
+updating that digest; no policy or generated artifact can update it
+automatically. The current local candidate was measured byte-identically across
+two different local checkout paths, each with its own frozen install, for the
+entry and every emitted Worker chunk. This topology fix does not update the
+code-owned digest while later runtime inputs remain unfinished; the final
+candidate still requires a separate freeze and owner review. Linux equality has
+not yet been measured; it is neither claimed nor disproven.
 Unsafe diagnostic paths are normalized and represented only by a short SHA-256
 identifier.
 

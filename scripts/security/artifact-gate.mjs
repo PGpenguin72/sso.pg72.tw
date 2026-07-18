@@ -4,6 +4,7 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   rmSync,
   writeFileSync,
@@ -27,6 +28,7 @@ const codeOwnedProductionWorkerEntrypoint = Object.freeze({
   path: "index.js",
   sha256: "6b6cdf4adbe409792615c5e8bebf08d0ab1c75691d0a8deb8dc4d670bc6c77b3",
 });
+const codeOwnedPackageRoots = Object.freeze([".", "apps/sso", "apps/test-rp", "wiki"]);
 
 const forbiddenContent = [
   { name: "private machine path", pattern: /(?:\/Users\/|\/private\/(?:tmp|var)\/|\/home\/(?:runner|[^/\s]+)\/|[A-Za-z]:\\Users\\)/ },
@@ -35,6 +37,97 @@ const forbiddenContent = [
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function isWithinDirectory(directory, candidate) {
+  const relative = path.relative(directory, candidate);
+  return (
+    relative === "" ||
+    (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+  );
+}
+
+function validateInstalledSymlinks(directory, resolvedRepoRoot, visitedDirectories = new Set()) {
+  let resolvedDirectory;
+  try {
+    resolvedDirectory = realpathSync(directory);
+  } catch {
+    throw new Error("production install topology is unreadable");
+  }
+  if (visitedDirectories.has(resolvedDirectory)) return;
+  visitedDirectories.add(resolvedDirectory);
+
+  let names;
+  try {
+    names = readdirSync(resolvedDirectory);
+  } catch {
+    throw new Error("production install topology is unreadable");
+  }
+  for (const name of names) {
+    const candidate = path.join(resolvedDirectory, name);
+    let stat;
+    try {
+      stat = lstatSync(candidate);
+    } catch {
+      throw new Error("production install topology is unreadable");
+    }
+    if (stat.isSymbolicLink()) {
+      let target;
+      try {
+        target = realpathSync(candidate);
+      } catch {
+        throw new Error("production install contains an unresolved dependency symlink");
+      }
+      assert.ok(
+        isWithinDirectory(resolvedRepoRoot, target),
+        "production install dependency symlink escapes the repository",
+      );
+      let targetStat;
+      try {
+        targetStat = lstatSync(target);
+      } catch {
+        throw new Error("production install topology is unreadable");
+      }
+      if (targetStat.isDirectory()) {
+        validateInstalledSymlinks(target, resolvedRepoRoot, visitedDirectories);
+      }
+    } else if (stat.isDirectory()) {
+      validateInstalledSymlinks(candidate, resolvedRepoRoot, visitedDirectories);
+    }
+  }
+}
+
+export function validateProductionInstallTopology(root = repoRoot) {
+  let resolvedRepoRoot;
+  try {
+    resolvedRepoRoot = realpathSync(root);
+  } catch {
+    throw new Error("production repository root is unreadable");
+  }
+  assert.equal(
+    path.resolve(root),
+    resolvedRepoRoot,
+    "production repository root must not be a symlink",
+  );
+  for (const packageRoot of codeOwnedPackageRoots) {
+    const nodeModules = path.join(resolvedRepoRoot, packageRoot, "node_modules");
+    let stat;
+    try {
+      stat = lstatSync(nodeModules);
+    } catch {
+      throw new Error("production install topology is incomplete");
+    }
+    assert.ok(
+      stat.isDirectory() && !stat.isSymbolicLink(),
+      "production package node_modules must be a local directory",
+    );
+    assert.equal(
+      realpathSync(nodeModules),
+      path.resolve(nodeModules),
+      "production package node_modules must resolve inside its checkout",
+    );
+    validateInstalledSymlinks(nodeModules, resolvedRepoRoot);
+  }
 }
 
 function scrubbedEnvironment() {
@@ -232,6 +325,7 @@ function main() {
   rmSync(workerDirectory, { force: true, recursive: true });
   mkdirSync(workerDirectory, { recursive: true });
   mkdirSync(releaseDirectory, { recursive: true });
+  validateProductionInstallTopology();
   runBuild();
   runDryRun(workerDirectory);
 

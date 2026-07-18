@@ -9,6 +9,7 @@ import {
 import {
   AlertStateRepositoryError,
   persistAlertLifecycleDecision,
+  readAlertLifecycleSnapshot,
   type AlertStateCasExpectation,
   type AlertStatePersistenceResult,
 } from "../worker/alert-state-repository";
@@ -192,6 +193,29 @@ function rollbackProbeDatabase(): D1Database {
   });
 }
 
+function snapshotProjectionDatabase(
+  transform: (results: D1Result[]) => D1Result[],
+): D1Database {
+  return new Proxy(env.PG72_ID_DB, {
+    get(target, property) {
+      if (property === "batch") {
+        return async (statements: D1PreparedStatement[]) =>
+          transform(await target.batch(statements));
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+function registrationSnapshot(database: D1Database = env.PG72_ID_DB) {
+  return readAlertLifecycleSnapshot(database, {
+    dimension: GLOBAL,
+    environment: "local",
+    ruleId: "pgid.registration.rate_limited.v1",
+  });
+}
+
 describe.sequential("alert state CAS repository", () => {
   beforeEach(async () => {
     await env.PG72_ID_DB.batch([
@@ -203,6 +227,10 @@ describe.sequential("alert state CAS repository", () => {
   });
 
   it("persists a first candidate, opens on the second breach, and deduplicates replay", async () => {
+    expect(await registrationSnapshot()).toEqual({
+      expected: null,
+      previous: inactiveAlertState(),
+    });
     const first = await persistStep(
       env.PG72_ID_DB,
       inactiveAlertState(),
@@ -211,6 +239,10 @@ describe.sequential("alert state CAS repository", () => {
     );
     expect(first.result).toBe("applied");
     expect(first.decision.state.phase).toBe("pending");
+    expect(await registrationSnapshot()).toEqual({
+      expected: await currentExpectation(),
+      previous: first.decision.state,
+    });
 
     const duplicate = await persistAlertLifecycleDecision(env.PG72_ID_DB, {
       decision: first.decision,
@@ -233,6 +265,10 @@ describe.sequential("alert state CAS repository", () => {
     expect(second.decision.intent?.kind).toBe("open");
     expect(await tableCount("security_alert")).toBe(1);
     expect(await tableCount("alert_outbox")).toBe(1);
+    expect(await registrationSnapshot()).toEqual({
+      expected: await currentExpectation(),
+      previous: second.decision.state,
+    });
 
     const secondReplay = await persistAlertLifecycleDecision(env.PG72_ID_DB, {
       decision: second.decision,
@@ -288,6 +324,68 @@ describe.sequential("alert state CAS repository", () => {
     const incidents = await tableCount("security_alert");
     expect([0, 1]).toContain(incidents);
     expect(await tableCount("alert_outbox")).toBe(incidents);
+  });
+
+  it("reads acknowledged state and rejects mismatched or ambiguous incidents", async () => {
+    const first = await persistStep(
+      env.PG72_ID_DB,
+      inactiveAlertState(),
+      registrationObservation(at(40), "warning"),
+      null,
+    );
+    const opened = await persistStep(
+      env.PG72_ID_DB,
+      first.decision.state,
+      registrationObservation(at(41), "warning"),
+      await currentExpectation(),
+    );
+    const operatorRef = "Q".repeat(42) + "A";
+    await env.PG72_ID_DB.prepare(
+      `UPDATE security_alert
+          SET status = 'acknowledged', acknowledged_at = ?,
+              acknowledged_by_ref = ?, acknowledged_by_hash_version = 1,
+              updated_at = ?
+        WHERE status = 'open'`,
+    ).bind(at(42), operatorRef, at(42)).run();
+    expect(await registrationSnapshot()).toEqual({
+      expected: await currentExpectation(),
+      previous: opened.decision.state,
+    });
+
+    const corruptIncident = (
+      mutate: (row: Record<string, unknown>) => Record<string, unknown>,
+    ) => snapshotProjectionDatabase((results) => {
+      const incident = results[1]?.results[0];
+      if (!incident) throw new Error("expected incident projection");
+      results[1].results[0] = mutate(incident as Record<string, unknown>);
+      return results;
+    });
+    await expect(registrationSnapshot(corruptIncident((row) => ({
+      ...row,
+      observed_value: Number(row.observed_value) + 1,
+    })))).rejects.toEqual(new AlertStateRepositoryError("source_invalid"));
+    await expect(registrationSnapshot(corruptIncident((row) => ({
+      ...row,
+      last_seen_at: at(43),
+    })))).rejects.toEqual(new AlertStateRepositoryError("source_invalid"));
+    await expect(registrationSnapshot(snapshotProjectionDatabase((results) => {
+      const state = results[0]?.results[0];
+      if (!state) throw new Error("expected state projection");
+      results[0].results[0] = {
+        ...(state as Record<string, unknown>),
+        dedupe_key: "B".repeat(43),
+      };
+      return results;
+    }))).rejects.toEqual(new AlertStateRepositoryError("source_invalid"));
+    await expect(registrationSnapshot(snapshotProjectionDatabase((results) => {
+      const incident = results[1]?.results[0];
+      if (!incident) throw new Error("expected incident projection");
+      results[1].results.push({
+        ...(incident as Record<string, unknown>),
+        id: crypto.randomUUID(),
+      });
+      return results;
+    }))).rejects.toEqual(new AlertStateRepositoryError("source_invalid"));
   });
 
   it("opens immediate critical atomically and verifies canonical payload identity", async () => {
@@ -400,6 +498,19 @@ describe.sequential("alert state CAS repository", () => {
       resolution_code: "healthy",
       status: "resolved",
     });
+    expect(await registrationSnapshot()).toEqual({
+      expected: await currentExpectation(),
+      previous: current.decision.state,
+    });
+    await expect(registrationSnapshot(snapshotProjectionDatabase((results) => {
+      const incident = results[1]?.results[0];
+      if (!incident) throw new Error("expected resolved incident projection");
+      results[1].results[0] = {
+        ...(incident as Record<string, unknown>),
+        last_seen_at: at(107),
+      };
+      return results;
+    }))).rejects.toEqual(new AlertStateRepositoryError("source_invalid"));
     expect(await tableCount("alert_outbox")).toBe(2);
 
     let blocked = await persistStep(
@@ -452,6 +563,10 @@ describe.sequential("alert state CAS repository", () => {
     expect(current.decision.intent).toBeNull();
     expect(current.decision.state.status).toBe("warning");
     expect(current.decision.state.breachSeverity).toBe("critical");
+    expect(await registrationSnapshot()).toEqual({
+      expected: await currentExpectation(),
+      previous: current.decision.state,
+    });
 
     current = await persistStep(
       env.PG72_ID_DB,

@@ -4,6 +4,15 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { deriveAlertReferenceV1 } from "../worker/alert-rules";
 import { ALERT_AUDIT_TIMESTAMP_INTEGRITY_QUERY } from "../worker/alert-audit-source-repository";
 import { ALERT_OAUTH_TIMESTAMP_INTEGRITY_QUERY } from "../worker/alert-oauth-source-repository";
+import {
+  acquireAlertEvaluatorRun,
+  bindAlertEvaluatorRunAsOf,
+  recordAlertEvaluatorRunFailure,
+  recordAlertEvaluatorRunSource,
+  recordAlertEvaluatorRunSuccess,
+  sealAlertEvaluatorRunPlan,
+} from "../worker/alert-run-repository";
+import { ALERT_EVALUATOR_SOURCE_IDS } from "../worker/alert-run-proof";
 
 const NOW = "2026-07-17T10:00:00.000Z";
 let evaluationTick = 0;
@@ -4424,16 +4433,44 @@ describe("alert observability migration", () => {
       ).meta.changes,
     ).toBe(0);
 
-    const leaseId = crypto.randomUUID();
-    await env.PG72_ID_DB.prepare(
-      `UPDATE alert_runtime_status
-          SET generation = 1, revision = 1, lease_id = ?,
-              lease_expires_at = '2026-07-17T10:05:01.000Z',
-              updated_at = '2026-07-17T10:00:01.000Z'
-        WHERE component = 'evaluator'`,
-    )
-      .bind(leaseId)
-      .run();
+    const startedAt = "2026-07-17T10:00:01.000Z";
+    const acquired = await acquireAlertEvaluatorRun(env.PG72_ID_DB, {
+      leaseDurationSeconds: 300,
+      scheduledAt: startedAt,
+      startedAt,
+      triggerCron: "* * * * *",
+    });
+    if (!acquired || acquired.kind !== "acquired") {
+      throw new Error("expected controlled evaluator run");
+    }
+    const leaseId = acquired.fence.leaseId;
+    expect(await bindAlertEvaluatorRunAsOf(
+      env.PG72_ID_DB,
+      acquired.fence,
+      { asOf: startedAt, boundAt: "2026-07-17T10:00:01.100Z" },
+    )).toMatchObject({ kind: "committed" });
+    for (const sourceId of ALERT_EVALUATOR_SOURCE_IDS) {
+      expect(await recordAlertEvaluatorRunSource(
+        env.PG72_ID_DB,
+        acquired.fence,
+        {
+          asOf: startedAt,
+          proof: {
+            incompleteCount: 0,
+            observationCount: 0,
+            proofSha256: "A".repeat(43),
+            sourceId,
+            status: "complete",
+          },
+          recordedAt: "2026-07-17T10:00:01.200Z",
+        },
+      )).toBe("recorded");
+    }
+    expect(await sealAlertEvaluatorRunPlan(
+      env.PG72_ID_DB,
+      acquired.fence,
+      { decisions: [], sealedAt: "2026-07-17T10:00:01.500Z" },
+    )).toMatchObject({ kind: "committed" });
     const successAt = "2026-07-17T10:00:02.000Z";
     const successUpdate = () =>
       env.PG72_ID_DB.prepare(
@@ -4498,20 +4535,11 @@ describe("alert observability migration", () => {
       status: "disabled",
     });
 
-    const firstSuccessBatch = await env.PG72_ID_DB.batch([
-      successUpdate(),
-      env.PG72_ID_DB.prepare(
-        `INSERT INTO alert_evaluator_bootstrap
-          (component, first_success_at, source_generation, source_revision)
-         SELECT component, last_success_at, generation, revision
-           FROM alert_runtime_status
-          WHERE component = 'evaluator'
-            AND status = 'healthy'
-            AND last_success_at IS NOT NULL
-            AND lease_id IS NULL`,
-      ),
-    ]);
-    expect(firstSuccessBatch.map(({ meta }) => meta.changes)).toEqual([1, 1]);
+    expect(await recordAlertEvaluatorRunSuccess(
+      env.PG72_ID_DB,
+      acquired.fence,
+      { completedAt: successAt },
+    )).toMatchObject({ bootstrapCreated: true, kind: "committed" });
     const anchoredProjection = await env.PG72_ID_DB.prepare(projectionSql).first();
     expect(Object.keys(anchoredProjection ?? {})).toEqual(projectionKeys);
     expect(anchoredProjection).toEqual({
@@ -4530,14 +4558,24 @@ describe("alert observability migration", () => {
       runtime_updated_at: successAt,
     });
 
-    await env.PG72_ID_DB.prepare(
-      `UPDATE alert_runtime_status
-          SET status = 'degraded', revision = 3,
-              last_error_at = '2026-07-17T10:00:03.000Z',
-              last_error_code = 'evaluator_failed',
-              updated_at = '2026-07-17T10:00:03.000Z'
-        WHERE component = 'evaluator'`,
-    ).run();
+    const failedRun = await acquireAlertEvaluatorRun(env.PG72_ID_DB, {
+      leaseDurationSeconds: 300,
+      scheduledAt: "2026-07-17T10:00:03.000Z",
+      startedAt: "2026-07-17T10:00:03.000Z",
+      triggerCron: "* * * * *",
+    });
+    if (!failedRun || failedRun.kind !== "acquired") {
+      throw new Error("expected post-bootstrap evaluator run");
+    }
+    expect(await recordAlertEvaluatorRunFailure(
+      env.PG72_ID_DB,
+      failedRun.fence,
+      {
+        completedAt: "2026-07-17T10:00:04.000Z",
+        errorCode: "evaluator_failed",
+        status: "failing",
+      },
+    )).toMatchObject({ kind: "committed", run: { status: "failed" } });
     const anchoredRow = await env.PG72_ID_DB.prepare(
       "SELECT * FROM alert_evaluator_bootstrap WHERE component = 'evaluator'",
     ).first();
@@ -4586,7 +4624,7 @@ describe("alert observability migration", () => {
       await env.PG72_ID_DB.prepare(
         "SELECT status FROM alert_runtime_status WHERE component = 'evaluator'",
       ).first<string>("status"),
-    ).toBe("degraded");
+    ).toBe("failing");
     expect(
       (await env.PG72_ID_DB.prepare("PRAGMA foreign_key_check").all()).results,
     ).toEqual([]);

@@ -632,12 +632,25 @@ export async function writeClaimedAuditArchive(
   ) {
     return invalidInput();
   }
-  let lastObservedAt = canonicalTimestamp(input.lease.updatedAt).time;
+  const leaseUpdatedAt = canonicalTimestamp(input.lease.updatedAt).time;
+  let lastLogical = leaseUpdatedAt;
+  let lastRaw = leaseUpdatedAt;
   const readNow = (): CanonicalTimestamp => {
     const observed = canonicalNow(input.now);
-    if (observed.time <= lastObservedAt) return invalidInput();
-    lastObservedAt = observed.time;
-    return observed;
+    const raw = observed.time;
+    if (raw < lastRaw) return invalidInput();
+    const time = raw > lastLogical ? raw : lastLogical + 1;
+    const date = new Date(time);
+    if (
+      !Number.isSafeInteger(time) ||
+      !Number.isFinite(date.getTime()) ||
+      date.getTime() !== time
+    ) {
+      return invalidInput();
+    }
+    lastRaw = raw;
+    lastLogical = time;
+    return { iso: date.toISOString(), time };
   };
   let activeInput: WriterExecutionInput = { ...input, readNow };
   const initialLease = await ensureLeaseForIo(

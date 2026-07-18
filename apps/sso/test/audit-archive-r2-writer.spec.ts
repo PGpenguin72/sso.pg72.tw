@@ -1186,23 +1186,64 @@ describe.sequential("unwired encrypted R2 archive writer", () => {
     expect(bucket.getCalls).toBe(0);
   });
 
-  it("rejects a non-advancing clock before any R2 I/O", async () => {
+  it("completes the full writer flow while every raw sample is frozen", async () => {
     const fixture = await writerFixture();
     const bucket = new FakeArchiveStore();
-    await expect(
-      writeClaimedAuditArchive({
-        bucket,
-        database: env.PG72_ID_DB,
-        lease: fixture.lease,
-        now: clockSequence(at(12_000), at(12_000)),
-        verifier: new TestVerifier(),
-      }),
-    ).rejects.toMatchObject({ code: "invalid_input" });
-    expect(bucket.putCalls).toBe(0);
-    expect(bucket.getCalls).toBe(0);
+    const result = await writeClaimedAuditArchive({
+      bucket,
+      database: env.PG72_ID_DB,
+      lease: fixture.lease,
+      now: () => at(12_000),
+      verifier: new TestVerifier(),
+    });
+    expect(result).toEqual({
+      errorCode: null,
+      mutation: "applied",
+      outcome: "archived",
+      putOutcome: "created",
+    });
+    expect(bucket.putCalls).toBe(1);
+    expect(bucket.getCalls).toBe(1);
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT archived_at, updated_at FROM audit_archive_batch
+          WHERE batch_key = ?`,
+      )
+        .bind(fixture.batchKey)
+        .first(),
+    ).toEqual({ archived_at: at(12_003), updated_at: at(12_003) });
   });
 
-  it("rejects a clock at or before the lease update before reading work", async () => {
+  it("accepts raw time equal to the lease update and advances logically", async () => {
+    const fixture = await writerFixture();
+    const bucket = new FakeArchiveStore();
+    const result = await writeClaimedAuditArchive({
+      bucket,
+      database: env.PG72_ID_DB,
+      lease: fixture.lease,
+      now: () => fixture.lease.updatedAt,
+      verifier: new TestVerifier(),
+    });
+    expect(result).toMatchObject({
+      errorCode: null,
+      outcome: "archived",
+      putOutcome: "created",
+    });
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT archived_at, status, updated_at FROM audit_archive_batch
+          WHERE batch_key = ?`,
+      )
+        .bind(fixture.batchKey)
+        .first(),
+    ).toEqual({
+      archived_at: at(11_004),
+      status: "archived",
+      updated_at: at(11_004),
+    });
+  });
+
+  it("rejects a true raw reversal before starting new R2 I/O", async () => {
     const fixture = await writerFixture();
     const bucket = new FakeArchiveStore();
     const verifier = new TestVerifier();
@@ -1211,7 +1252,25 @@ describe.sequential("unwired encrypted R2 archive writer", () => {
         bucket,
         database: env.PG72_ID_DB,
         lease: fixture.lease,
-        now: clockSequence(fixture.lease.updatedAt),
+        now: clockSequence(at(12_000), at(11_999)),
+        verifier,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    expect(verifier.calls).toHaveLength(1);
+    expect(bucket.putCalls).toBe(0);
+    expect(bucket.getCalls).toBe(0);
+  });
+
+  it("rejects a raw clock before the lease update without reading work", async () => {
+    const fixture = await writerFixture();
+    const bucket = new FakeArchiveStore();
+    const verifier = new TestVerifier();
+    await expect(
+      writeClaimedAuditArchive({
+        bucket,
+        database: env.PG72_ID_DB,
+        lease: fixture.lease,
+        now: clockSequence(at(10_999)),
         verifier,
       }),
     ).rejects.toMatchObject({ code: "invalid_input" });

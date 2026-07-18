@@ -90,8 +90,12 @@ partial `0023` evidence. Pre-R2 cryptographic failure records no R2 evidence.
 R2/provider transient failures use the D1-owned 30/120/480/900-second schedule,
 attempt five becomes dead, and work at or after lease expiry uses the repository
 expiry path. A lease with less than 60 seconds remaining is CAS-renewed before
-new R2 I/O. Caller-owned envelope, readback and checksum buffers are cleared in
-`finally` paths where the runtime permits it.
+new R2 I/O. The injected raw clock is normalized to a strictly increasing
+logical millisecond sequence: equal raw samples advance by one millisecond,
+while a true raw reversal fails before the next R2 operation. Lease renewal,
+completion and expiry comparisons use that logical time. Caller-owned envelope,
+readback and checksum buffers are cleared in `finally` paths where the runtime
+permits it.
 
 This source is deliberately not imported by `worker/index.ts`; there is no R2
 binding, KEK adapter, Queue consumer, Cron path, real bucket access or remote

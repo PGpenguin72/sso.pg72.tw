@@ -26,7 +26,7 @@ const policy = JSON.parse(
 );
 const codeOwnedProductionWorkerEntrypoint = Object.freeze({
   path: "index.js",
-  sha256: "6b6cdf4adbe409792615c5e8bebf08d0ab1c75691d0a8deb8dc4d670bc6c77b3",
+  sha256: "9ca39ba33219ee69e92b210fb37feecb2dda5ce85da7c505246437319aedb473",
 });
 const codeOwnedPackageRoots = Object.freeze([".", "apps/sso", "apps/test-rp", "wiki"]);
 

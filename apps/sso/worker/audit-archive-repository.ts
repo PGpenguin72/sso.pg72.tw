@@ -17,6 +17,7 @@ const MAX_CHECKPOINT_REVISION = MAX_SEQUENCE - 1;
 const MAX_DISPATCH_GENERATION = 1_000_000;
 const MAX_ATTEMPTS = 5;
 const MAX_LEASE_SECONDS = 300;
+const MAX_RUNTIME_WORK_ITEMS = 25;
 const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/;
 const KEY_VERSION_PATTERN = /^v[1-9][0-9]{0,5}$/;
 const SAFE_IDENTIFIER_PATTERN = /^[A-Za-z0-9._:-]{1,256}$/;
@@ -129,8 +130,56 @@ export interface AuditArchiveLease {
 export interface AcquireAuditArchiveLeaseInput {
   batchKey: string;
   claimedAt: string;
+  dispatchGeneration: number;
   leaseExpiresAt: string;
   leaseId: string;
+}
+
+export interface ReadClaimedAuditArchiveBatchInput {
+  lease: AuditArchiveLease;
+}
+
+export interface AuditArchiveClaimedBatch {
+  batchKey: string;
+  checkpointFromSequence: number;
+  checkpointRevision: number;
+  contentType: string;
+  encryptedEnvelope: Uint8Array<ArrayBuffer>;
+  keyVersion: string;
+  manifest: AuditArchiveManifestV1;
+  objectBytes: number;
+  objectKey: string;
+  objectSha256: string;
+}
+
+export type AuditArchiveRuntimeBatchStatus =
+  | "corrupt"
+  | "dead"
+  | "pending"
+  | "processing"
+  | "retry";
+
+export interface AuditArchiveRuntimeBatchReference {
+  batchKey: string;
+  dispatchGeneration: number;
+}
+
+export interface AuditArchiveRuntimeCheckpointBatch {
+  batchKey: string;
+  status: AuditArchiveRuntimeBatchStatus;
+}
+
+export interface SelectAuditArchiveRuntimeWorkInput {
+  asOf: string;
+  limit: number;
+}
+
+export interface AuditArchiveRuntimeWork {
+  checkpointBatch: AuditArchiveRuntimeCheckpointBatch | null;
+  due: readonly AuditArchiveRuntimeBatchReference[];
+  dueHasMore: boolean;
+  expired: readonly AuditArchiveLease[];
+  expiredHasMore: boolean;
 }
 
 export interface RenewAuditArchiveLeaseInput {
@@ -146,8 +195,19 @@ export interface AuditArchiveLeaseMutationResult {
 
 export interface AuditArchiveR2Evidence {
   etag: string;
+  observedBytes: number;
   readbackAt: string;
   readbackSha256: string;
+  storedSha256: string | null;
+  version: string;
+}
+
+export interface AuditArchiveR2ConflictEvidence {
+  etag: string;
+  observedBytes: number;
+  readbackAt: string;
+  readbackSha256: string | null;
+  storedSha256: string | null;
   version: string;
 }
 
@@ -168,13 +228,32 @@ export type AuditArchiveIntegrityErrorCode =
   | "r2_object_conflict"
   | "r2_readback_mismatch";
 
-export interface FailAuditArchiveLeaseInput {
+interface FailAuditArchiveLeaseBase {
   completedAt: string;
-  errorCode: AuditArchiveIntegrityErrorCode | AuditArchiveTransientErrorCode;
-  evidence: AuditArchiveR2Evidence | null;
   lease: AuditArchiveLease;
-  nextAttemptAt: string | null;
 }
+
+export type FailAuditArchiveLeaseInput =
+  | (FailAuditArchiveLeaseBase & {
+    errorCode: AuditArchiveTransientErrorCode;
+    evidence: null;
+    nextAttemptAt: string | null;
+  })
+  | (FailAuditArchiveLeaseBase & {
+    errorCode: "crypto_integrity";
+    evidence: AuditArchiveR2Evidence | null;
+    nextAttemptAt: null;
+  })
+  | (FailAuditArchiveLeaseBase & {
+    errorCode: "r2_object_conflict";
+    evidence: AuditArchiveR2ConflictEvidence;
+    nextAttemptAt: null;
+  })
+  | (FailAuditArchiveLeaseBase & {
+    errorCode: "r2_readback_mismatch";
+    evidence: AuditArchiveR2Evidence;
+    nextAttemptAt: null;
+  });
 
 export interface ExpireAuditArchiveLeaseInput {
   completedAt: string;
@@ -412,6 +491,40 @@ function bytesValue(value: unknown): Uint8Array<ArrayBuffer> {
     fail("invalid_input");
   }
   return new Uint8Array(value);
+}
+
+function persistedBytesValue(value: unknown): Uint8Array<ArrayBuffer> {
+  if (Array.isArray(value)) {
+    if (value.length === 0 || value.length > AUDIT_ARCHIVE_MAX_OBJECT_BYTES) {
+      fail("source_invalid");
+    }
+    for (let index = 0; index < value.length; index += 1) {
+      const byte: unknown = value[index];
+      if (
+        !Object.hasOwn(value, index) ||
+        typeof byte !== "number" ||
+        !Number.isInteger(byte) ||
+        byte < 0 ||
+        byte > 255
+      ) {
+        fail("source_invalid");
+      }
+    }
+    return new Uint8Array(value);
+  }
+  if (value instanceof ArrayBuffer) {
+    if (value.byteLength === 0 || value.byteLength > AUDIT_ARCHIVE_MAX_OBJECT_BYTES) {
+      fail("source_invalid");
+    }
+    return new Uint8Array(value.slice(0));
+  }
+  if (value instanceof Uint8Array) {
+    if (value.byteLength === 0 || value.byteLength > AUDIT_ARCHIVE_MAX_OBJECT_BYTES) {
+      fail("source_invalid");
+    }
+    return new Uint8Array(value);
+  }
+  fail("source_invalid");
 }
 
 function bytesToHex(bytes: Uint8Array<ArrayBuffer>): string {
@@ -1170,6 +1283,8 @@ function sameLease(left: AuditArchiveLease, right: AuditArchiveLease): boolean {
 
 function leaseProjectionStatement(
   database: D1Database,
+  batchKey: string,
+  dispatchGeneration: number,
   leaseId: string,
   changesGated: boolean,
 ): D1PreparedStatement {
@@ -1185,10 +1300,12 @@ function leaseProjectionStatement(
         AND attempt.attempt_number = batch.attempts
         AND attempt.lease_id = batch.lease_id
       WHERE batch.status = 'processing'
+        AND batch.batch_key = ?
+        AND batch.dispatch_generation = ?
         AND attempt.id = ?
         AND attempt.outcome = 'in_flight'
         ${changesGated ? "AND changes() = 1" : ""}`,
-  ).bind(leaseId);
+  ).bind(batchKey, dispatchGeneration, leaseId);
 }
 
 function leaseFromResult(
@@ -1219,10 +1336,16 @@ export async function acquireAuditArchiveLease(
     const input = exactRecord(value, [
       "batchKey",
       "claimedAt",
+      "dispatchGeneration",
       "leaseExpiresAt",
       "leaseId",
     ]);
     const batchKey = canonicalReference(input.batchKey);
+    const dispatchGeneration = boundedInteger(
+      input.dispatchGeneration,
+      1,
+      MAX_DISPATCH_GENERATION,
+    );
     const leaseId = canonicalReference(input.leaseId);
     const claimedAt = canonicalTimestamp(input.claimedAt);
     const leaseExpiresAt = canonicalTimestamp(input.leaseExpiresAt);
@@ -1234,6 +1357,7 @@ export async function acquireAuditArchiveLease(
                 next_attempt_at = NULL, lease_id = ?, lease_expires_at = ?,
                 last_error_code = NULL, updated_at = ?
           WHERE batch_key = ?
+            AND dispatch_generation = ?
             AND status IN ('pending', 'retry')
             AND attempts < 5
             AND next_attempt_at IS NOT NULL
@@ -1244,11 +1368,24 @@ export async function acquireAuditArchiveLease(
         leaseExpiresAt.iso,
         claimedAt.iso,
         batchKey,
+        dispatchGeneration,
         claimedAt.iso,
         claimedAt.iso,
       ),
-      leaseProjectionStatement(database, leaseId, true),
-      leaseProjectionStatement(database, leaseId, false),
+      leaseProjectionStatement(
+        database,
+        batchKey,
+        dispatchGeneration,
+        leaseId,
+        true,
+      ),
+      leaseProjectionStatement(
+        database,
+        batchKey,
+        dispatchGeneration,
+        leaseId,
+        false,
+      ),
     ]);
     const gated = leaseFromResult(results[1]);
     const persisted = leaseFromResult(results[2]);
@@ -1256,6 +1393,7 @@ export async function acquireAuditArchiveLease(
       if (persisted === null || !sameLease(gated, persisted)) fail("source_invalid");
       if (
         gated.batchKey !== batchKey ||
+        gated.dispatchGeneration !== dispatchGeneration ||
         gated.leaseId !== leaseId ||
         gated.startedAt !== claimedAt.iso ||
         gated.updatedAt !== claimedAt.iso ||
@@ -1268,6 +1406,7 @@ export async function acquireAuditArchiveLease(
     if (
       persisted !== null &&
       persisted.batchKey === batchKey &&
+      persisted.dispatchGeneration === dispatchGeneration &&
       persisted.leaseId === leaseId &&
       persisted.startedAt === claimedAt.iso &&
       persisted.updatedAt === claimedAt.iso &&
@@ -1278,6 +1417,317 @@ export async function acquireAuditArchiveLease(
     return { lease: null, status: "conflict" };
   } catch (error) {
     throw redactedRepositoryError(error, "write_failed");
+  }
+}
+
+const CLAIMED_BATCH_ROW_KEYS = [
+  "attempt_number",
+  "batch_generation",
+  "batch_key",
+  "checkpoint_from_sequence",
+  "checkpoint_revision",
+  "content_type",
+  "contract",
+  "created_at",
+  "dispatch_generation",
+  "encrypted_envelope",
+  "envelope_bytes",
+  "event_count",
+  "first_sequence",
+  "key_version",
+  "last_sequence",
+  "lease_expires_at",
+  "lease_id",
+  "manifest_json",
+  "object_bytes",
+  "object_key",
+  "object_sha256",
+  "outcome",
+  "plaintext_sha256",
+  "schema_version",
+  "started_at",
+  "updated_at",
+] as const;
+
+export async function readClaimedAuditArchiveBatch(
+  database: D1Database,
+  value: ReadClaimedAuditArchiveBatchInput,
+): Promise<AuditArchiveClaimedBatch | null> {
+  let envelope: Uint8Array<ArrayBuffer> | undefined;
+  try {
+    if (arguments.length !== 2) fail("invalid_input");
+    const input = exactRecord(value, ["lease"]);
+    const lease = parseLease(input.lease);
+    const result = await database.prepare(
+      `SELECT batch.batch_key, batch.batch_generation,
+              batch.checkpoint_revision, batch.checkpoint_from_sequence,
+              batch.schema_version, batch.contract, batch.manifest_json,
+              batch.first_sequence, batch.last_sequence, batch.event_count,
+              batch.plaintext_sha256, batch.key_version, batch.content_type,
+              batch.object_key, batch.object_bytes, batch.object_sha256,
+              batch.encrypted_envelope,
+              length(batch.encrypted_envelope) AS envelope_bytes,
+              batch.dispatch_generation, batch.attempts AS attempt_number,
+              batch.lease_id, batch.lease_expires_at, batch.created_at,
+              batch.updated_at, attempt.started_at, attempt.outcome
+         FROM audit_archive_batch AS batch
+         JOIN audit_archive_attempt AS attempt
+           ON attempt.batch_key = batch.batch_key
+          AND attempt.dispatch_generation = batch.dispatch_generation
+          AND attempt.attempt_number = batch.attempts
+          AND attempt.lease_id = batch.lease_id
+        WHERE batch.status = 'processing'
+          AND batch.batch_key = ?
+          AND batch.dispatch_generation = ?
+          AND batch.attempts = ?
+          AND batch.lease_id = ?
+          AND batch.lease_expires_at = ?
+          AND batch.updated_at = ?
+          AND attempt.started_at = ?
+          AND attempt.outcome = 'in_flight'
+        LIMIT 2`,
+    ).bind(
+      lease.batchKey,
+      lease.dispatchGeneration,
+      lease.attemptNumber,
+      lease.leaseId,
+      lease.leaseExpiresAt,
+      lease.updatedAt,
+      lease.startedAt,
+    ).all();
+    const rows = exactRows(result, 2);
+    if (rows.length === 0) return null;
+    if (rows.length !== 1) fail("source_invalid");
+    try {
+      const row = exactRecord(rows[0], CLAIMED_BATCH_ROW_KEYS);
+      if (row.outcome !== "in_flight") fail("source_invalid");
+      const projectedLease = parseLease({
+        attemptNumber: row.attempt_number,
+        batchKey: row.batch_key,
+        dispatchGeneration: row.dispatch_generation,
+        leaseExpiresAt: row.lease_expires_at,
+        leaseId: row.lease_id,
+        startedAt: row.started_at,
+        updatedAt: row.updated_at,
+      });
+      if (!sameLease(projectedLease, lease)) fail("source_invalid");
+
+      if (typeof row.manifest_json !== "string") fail("source_invalid");
+      const parsedManifest: unknown = JSON.parse(row.manifest_json);
+      const manifest = parseManifest(parsedManifest);
+      const checkpointRevision = boundedInteger(
+        row.checkpoint_revision,
+        0,
+        MAX_CHECKPOINT_REVISION,
+      );
+      const checkpointFromSequence = boundedInteger(
+        row.checkpoint_from_sequence,
+        0,
+        MAX_SEQUENCE,
+      );
+      const objectBytes = boundedInteger(
+        row.object_bytes,
+        1,
+        AUDIT_ARCHIVE_MAX_OBJECT_BYTES,
+      );
+      envelope = persistedBytesValue(row.encrypted_envelope);
+      if (
+        row.contract !== AUDIT_ARCHIVE_ENVELOPE_CONTRACT ||
+        row.schema_version !== 1 ||
+        row.content_type !== AUDIT_ARCHIVE_CONTENT_TYPE ||
+        JSON.stringify(manifest) !== row.manifest_json ||
+        manifest.batchGeneration !==
+          boundedInteger(row.batch_generation, 1, MAX_SEQUENCE) ||
+        manifest.batchGeneration !== checkpointRevision + 1 ||
+        manifest.checkpointFromSequence !== checkpointFromSequence ||
+        manifest.createdAt !== canonicalTimestamp(row.created_at).iso ||
+        manifest.eventCount !==
+          boundedInteger(row.event_count, 1, AUDIT_ARCHIVE_MAX_RECORDS) ||
+        manifest.firstSequence !==
+          boundedInteger(row.first_sequence, 1, MAX_SEQUENCE) ||
+        manifest.lastSequence !==
+          boundedInteger(row.last_sequence, manifest.firstSequence, MAX_SEQUENCE) ||
+        manifest.plaintextSha256 !== sha256HexValue(row.plaintext_sha256) ||
+        manifest.keyVersion !== keyVersion(row.key_version) ||
+        manifest.contentType !== row.content_type ||
+        manifest.objectKey !== row.object_key ||
+        manifest.objectKey !== expectedObjectKey(
+          manifest.firstSequence,
+          manifest.lastSequence,
+          manifest.objectSha256,
+        ) ||
+        manifest.objectBytes !== objectBytes ||
+        manifest.objectSha256 !== sha256HexValue(row.object_sha256) ||
+        boundedInteger(row.envelope_bytes, 1, AUDIT_ARCHIVE_MAX_OBJECT_BYTES) !==
+          objectBytes ||
+        envelope.byteLength !== objectBytes ||
+        await sha256Hex(envelope) !== manifest.objectSha256
+      ) {
+        fail("source_invalid");
+      }
+      const claimed = {
+        batchKey: lease.batchKey,
+        checkpointFromSequence,
+        checkpointRevision,
+        contentType: AUDIT_ARCHIVE_CONTENT_TYPE,
+        encryptedEnvelope: envelope,
+        keyVersion: manifest.keyVersion,
+        manifest,
+        objectBytes,
+        objectKey: manifest.objectKey,
+        objectSha256: manifest.objectSha256,
+      } satisfies AuditArchiveClaimedBatch;
+      envelope = undefined;
+      return claimed;
+    } catch {
+      return fail("source_invalid");
+    }
+  } catch (error) {
+    throw redactedRepositoryError(error, "source_unavailable");
+  } finally {
+    envelope?.fill(0);
+  }
+}
+
+const RUNTIME_DUE_ROW_KEYS = [
+  "batch_key",
+  "dispatch_generation",
+  "next_attempt_at",
+  "status",
+] as const;
+const RUNTIME_CHECKPOINT_ROW_KEYS = [
+  "batch_key",
+  "checkpoint_id",
+  "status",
+] as const;
+
+function runtimeBatchStatus(value: unknown): AuditArchiveRuntimeBatchStatus {
+  if (
+    value !== "corrupt" &&
+    value !== "dead" &&
+    value !== "pending" &&
+    value !== "processing" &&
+    value !== "retry"
+  ) {
+    fail("source_invalid");
+  }
+  return value;
+}
+
+function parseRuntimeReference(value: unknown): AuditArchiveRuntimeBatchReference {
+  const row = exactRecord(value, RUNTIME_DUE_ROW_KEYS);
+  if (row.status !== "pending" && row.status !== "retry") {
+    fail("source_invalid");
+  }
+  canonicalTimestamp(row.next_attempt_at);
+  return {
+    batchKey: canonicalReference(row.batch_key),
+    dispatchGeneration: boundedInteger(
+      row.dispatch_generation,
+      1,
+      MAX_DISPATCH_GENERATION,
+    ),
+  };
+}
+
+export async function selectAuditArchiveRuntimeWork(
+  database: D1Database,
+  value: SelectAuditArchiveRuntimeWorkInput,
+): Promise<AuditArchiveRuntimeWork> {
+  try {
+    if (arguments.length !== 2) fail("invalid_input");
+    const input = exactRecord(value, ["asOf", "limit"]);
+    const asOf = canonicalTimestamp(input.asOf);
+    const limit = boundedInteger(input.limit, 1, MAX_RUNTIME_WORK_ITEMS);
+    const results = await database.batch([
+      database.prepare(
+        `SELECT batch_key, dispatch_generation, status, next_attempt_at
+           FROM audit_archive_batch
+          WHERE status IN ('pending', 'retry')
+            AND next_attempt_at <= ?
+          ORDER BY status, next_attempt_at, batch_key
+          LIMIT ?`,
+      ).bind(asOf.iso, limit + 1),
+      database.prepare(
+        `SELECT batch.batch_key, batch.dispatch_generation,
+                batch.attempts AS attempt_number, batch.lease_id,
+                batch.lease_expires_at, attempt.started_at,
+                batch.updated_at, attempt.outcome
+           FROM audit_archive_batch AS batch
+           JOIN audit_archive_attempt AS attempt
+             ON attempt.batch_key = batch.batch_key
+            AND attempt.dispatch_generation = batch.dispatch_generation
+            AND attempt.attempt_number = batch.attempts
+            AND attempt.lease_id = batch.lease_id
+          WHERE batch.status = 'processing'
+            AND batch.lease_expires_at <= ?
+            AND attempt.outcome = 'in_flight'
+          ORDER BY batch.lease_expires_at, batch.batch_key
+          LIMIT ?`,
+      ).bind(asOf.iso, limit + 1),
+      database.prepare(
+        `SELECT checkpoint.id AS checkpoint_id,
+                batch.batch_key, batch.status
+           FROM audit_archive_checkpoint AS checkpoint
+           LEFT JOIN audit_archive_batch AS batch
+             ON batch.checkpoint_revision = checkpoint.revision
+          WHERE checkpoint.id = 1
+          LIMIT 2`,
+      ),
+    ]);
+    const dueRows = exactRows(results[0], limit + 1);
+    const expiredRows = exactRows(results[1], limit + 1);
+    const checkpointRows = exactRows(results[2], 2);
+    if (checkpointRows.length !== 1) fail("source_invalid");
+
+    const parsedDue = dueRows.map((row) => {
+      const parsed = parseRuntimeReference(row);
+      const raw = exactRecord(row, RUNTIME_DUE_ROW_KEYS);
+      if (canonicalTimestamp(raw.next_attempt_at).time > asOf.time) {
+        fail("source_invalid");
+      }
+      return parsed;
+    });
+    const parsedExpired = expiredRows.map((row) => {
+      const lease = parseLeaseRow(row);
+      if (canonicalTimestamp(lease.leaseExpiresAt).time > asOf.time) {
+        fail("source_invalid");
+      }
+      return lease;
+    });
+    if (
+      new Set(parsedDue.map(({ batchKey }) => batchKey)).size !== parsedDue.length ||
+      new Set(parsedExpired.map(({ batchKey }) => batchKey)).size !==
+        parsedExpired.length
+    ) {
+      fail("source_invalid");
+    }
+
+    const checkpointRow = exactRecord(
+      checkpointRows[0],
+      RUNTIME_CHECKPOINT_ROW_KEYS,
+    );
+    if (checkpointRow.checkpoint_id !== 1) fail("source_invalid");
+    let checkpointBatch: AuditArchiveRuntimeCheckpointBatch | null;
+    if (checkpointRow.batch_key === null && checkpointRow.status === null) {
+      checkpointBatch = null;
+    } else if (checkpointRow.batch_key !== null && checkpointRow.status !== null) {
+      checkpointBatch = {
+        batchKey: canonicalReference(checkpointRow.batch_key),
+        status: runtimeBatchStatus(checkpointRow.status),
+      };
+    } else {
+      fail("source_invalid");
+    }
+    return {
+      checkpointBatch,
+      due: parsedDue.slice(0, limit),
+      dueHasMore: parsedDue.length > limit,
+      expired: parsedExpired.slice(0, limit),
+      expiredHasMore: parsedExpired.length > limit,
+    };
+  } catch (error) {
+    throw redactedRepositoryError(error, "source_unavailable");
   }
 }
 
@@ -1332,8 +1782,20 @@ export async function renewAuditArchiveLease(
         current.leaseId,
         current.startedAt,
       ),
-      leaseProjectionStatement(database, current.leaseId, true),
-      leaseProjectionStatement(database, current.leaseId, false),
+      leaseProjectionStatement(
+        database,
+        current.batchKey,
+        current.dispatchGeneration,
+        current.leaseId,
+        true,
+      ),
+      leaseProjectionStatement(
+        database,
+        current.batchKey,
+        current.dispatchGeneration,
+        current.leaseId,
+        false,
+      ),
     ]);
     const target: AuditArchiveLease = {
       ...current,
@@ -1372,7 +1834,7 @@ interface TerminalIntent {
     | AuditArchiveTransientErrorCode
     | "lease_expired"
     | null;
-  evidence: AuditArchiveR2Evidence | null;
+  evidence: AuditArchiveR2ConflictEvidence | AuditArchiveR2Evidence | null;
   lease: AuditArchiveLease;
   nextAttemptAt: string | null;
   outcome: TerminalOutcome;
@@ -1403,19 +1865,38 @@ function safeR2Text(value: unknown): string {
   return value;
 }
 
-function parseR2Evidence(value: unknown): AuditArchiveR2Evidence {
+function parseR2Observation(
+  value: unknown,
+  requireFullReadback: boolean,
+): AuditArchiveR2ConflictEvidence | AuditArchiveR2Evidence {
   const row = exactRecord(value, [
     "etag",
+    "observedBytes",
     "readbackAt",
     "readbackSha256",
+    "storedSha256",
     "version",
   ]);
+  const readbackSha256 = nullableSha256(row.readbackSha256);
+  if (requireFullReadback && readbackSha256 === null) fail("invalid_input");
   return {
     etag: safeR2Text(row.etag),
+    observedBytes: boundedInteger(row.observedBytes, 0, MAX_SEQUENCE),
     readbackAt: canonicalTimestamp(row.readbackAt).iso,
-    readbackSha256: sha256HexValue(row.readbackSha256),
+    readbackSha256,
+    storedSha256: nullableSha256(row.storedSha256),
     version: safeR2Text(row.version),
   };
+}
+
+function parseR2Evidence(value: unknown): AuditArchiveR2Evidence {
+  const evidence = parseR2Observation(value, true);
+  if (evidence.readbackSha256 === null) fail("invalid_input");
+  return { ...evidence, readbackSha256: evidence.readbackSha256 };
+}
+
+function parseR2ConflictEvidence(value: unknown): AuditArchiveR2ConflictEvidence {
+  return parseR2Observation(value, false);
 }
 
 function validateNormalCompletion(
@@ -1440,8 +1921,10 @@ const TERMINAL_RECEIPT_KEYS = [
   "next_attempt_at",
   "outcome",
   "r2_etag",
+  "r2_observed_bytes",
   "r2_readback_at",
   "r2_readback_sha256",
+  "r2_stored_sha256",
   "r2_version",
   "resulting_status",
   "started_at",
@@ -1453,6 +1936,10 @@ function nullableR2Text(value: unknown): string | null {
 
 function nullableSha256(value: unknown): string | null {
   return value === null ? null : sha256HexValue(value);
+}
+
+function nullableObservedBytes(value: unknown): number | null {
+  return value === null ? null : boundedInteger(value, 0, MAX_SEQUENCE);
 }
 
 function terminalReceiptMatches(value: unknown, intent: TerminalIntent): boolean {
@@ -1471,8 +1958,12 @@ function terminalReceiptMatches(value: unknown, intent: TerminalIntent): boolean
       nullableCanonicalTimestamp(row.next_attempt_at) === intent.nextAttemptAt &&
       nullableR2Text(row.r2_version) === (intent.evidence?.version ?? null) &&
       nullableR2Text(row.r2_etag) === (intent.evidence?.etag ?? null) &&
+      nullableObservedBytes(row.r2_observed_bytes) ===
+        (intent.evidence?.observedBytes ?? null) &&
       nullableSha256(row.r2_readback_sha256) ===
         (intent.evidence?.readbackSha256 ?? null) &&
+      nullableSha256(row.r2_stored_sha256) ===
+        (intent.evidence?.storedSha256 ?? null) &&
       nullableCanonicalTimestamp(row.r2_readback_at) ===
         (intent.evidence?.readbackAt ?? null) &&
       row.error_code === intent.errorCode &&
@@ -1491,8 +1982,8 @@ function terminalReceiptStatement(
   return database.prepare(
     `SELECT batch_key, dispatch_generation, attempt_number, lease_id,
             outcome, resulting_status, next_attempt_at, r2_version, r2_etag,
-            r2_readback_sha256, r2_readback_at, error_code, started_at,
-            completed_at
+            r2_observed_bytes, r2_stored_sha256, r2_readback_sha256,
+            r2_readback_at, error_code, started_at, completed_at
        FROM audit_archive_attempt
       WHERE id = ?
         ${changesGated ? "AND changes() = 1" : ""}`,
@@ -1568,7 +2059,8 @@ async function terminalizeAuditArchiveAttempt(
       database.prepare(
         `UPDATE audit_archive_attempt
             SET outcome = ?, resulting_status = ?, next_attempt_at = ?,
-                r2_version = ?, r2_etag = ?, r2_readback_sha256 = ?,
+                r2_version = ?, r2_etag = ?, r2_observed_bytes = ?,
+                r2_stored_sha256 = ?, r2_readback_sha256 = ?,
                 r2_readback_at = ?, error_code = ?, completed_at = ?
           WHERE id = ? AND batch_key = ? AND dispatch_generation = ?
             AND attempt_number = ? AND lease_id = ? AND started_at = ?
@@ -1589,6 +2081,8 @@ async function terminalizeAuditArchiveAttempt(
         intent.nextAttemptAt,
         evidence?.version ?? null,
         evidence?.etag ?? null,
+        evidence?.observedBytes ?? null,
+        evidence?.storedSha256 ?? null,
         evidence?.readbackSha256 ?? null,
         evidence?.readbackAt ?? null,
         intent.errorCode,
@@ -1703,11 +2197,22 @@ export async function failAuditArchiveLease(
     const transient = TRANSIENT_ERROR_CODES.has(String(errorCode));
     if (!integrity && !transient) fail("invalid_input");
     if (integrity) {
-      if (input.nextAttemptAt !== null || input.evidence === null) {
+      if (input.nextAttemptAt !== null) fail("invalid_input");
+      let evidence: AuditArchiveR2ConflictEvidence | AuditArchiveR2Evidence | null;
+      if (errorCode === "crypto_integrity") {
+        evidence = input.evidence === null ? null : parseR2Evidence(input.evidence);
+      } else if (errorCode === "r2_object_conflict") {
+        if (input.evidence === null) fail("invalid_input");
+        evidence = parseR2ConflictEvidence(input.evidence);
+      } else if (errorCode === "r2_readback_mismatch") {
+        if (input.evidence === null) fail("invalid_input");
+        evidence = parseR2Evidence(input.evidence);
+      } else {
         fail("invalid_input");
       }
-      const evidence = parseR2Evidence(input.evidence);
-      if (evidence.readbackAt !== completedAt.iso) fail("invalid_input");
+      if (evidence !== null && evidence.readbackAt !== completedAt.iso) {
+        fail("invalid_input");
+      }
       return await terminalizeAuditArchiveAttempt(database, {
         completedAt: completedAt.iso,
         errorCode: errorCode as AuditArchiveIntegrityErrorCode,

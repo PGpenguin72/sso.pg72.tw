@@ -69,8 +69,11 @@ const MAX_BACKLOG_BYTES = 1_000_000_000_000;
 const MAX_OLDEST_MESSAGE_AGE_SECONDS = 1_000_000_000;
 const MAX_CONSECUTIVE_NONZERO_SAMPLES = 1_000_000;
 const MAX_REVISION = 1_000_000_000;
+const MAX_LEASE_DURATION_MILLISECONDS = 300_000;
 const SAMPLE_CADENCE_MILLISECONDS = 60_000;
 const QUEUE_NAME_SET = new Set<string>(ALERT_QUEUE_NAMES);
+const UUID_V4_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export const ALERT_QUEUE_METRIC_SAMPLE_UPSERT = `INSERT INTO alert_runtime_status (
   component, metric_sampled_at, backlog_count, backlog_bytes,
@@ -125,8 +128,8 @@ export const ALERT_QUEUE_METRIC_CHANGES_QUERY =
   "SELECT changes() AS changed";
 
 export const ALERT_QUEUE_METRIC_PROJECTION_QUERY = `SELECT
-  component, revision, metric_sampled_at, backlog_count, backlog_bytes,
-  oldest_message_age_seconds, nonzero_since_at,
+  component, revision, lease_id, lease_expires_at, metric_sampled_at,
+  backlog_count, backlog_bytes, oldest_message_age_seconds, nonzero_since_at,
   consecutive_nonzero_samples, updated_at
 FROM alert_runtime_status
 WHERE component = ?1`;
@@ -138,6 +141,8 @@ interface QueueMetricProjection {
   backlogCount: number;
   component: string;
   consecutiveNonzeroSamples: number;
+  leaseExpiresAt: string | null;
+  leaseId: string | null;
   metricSampledAt: string;
   nonzeroSinceAt: string | null;
   oldestMessageAgeSeconds: number;
@@ -403,6 +408,8 @@ function parseProjection(
   const row = exactRecord(value, [
     "component",
     "revision",
+    "lease_id",
+    "lease_expires_at",
     "metric_sampled_at",
     "backlog_count",
     "backlog_bytes",
@@ -418,6 +425,29 @@ function parseProjection(
     "source_invalid",
   );
   const updatedAt = canonicalTimestamp(row.updated_at, "source_invalid");
+  let leaseId: string | null = null;
+  let leaseExpiresAt: string | null = null;
+  if (row.lease_id !== null || row.lease_expires_at !== null) {
+    if (
+      typeof row.lease_id !== "string" ||
+      !UUID_V4_PATTERN.test(row.lease_id) ||
+      row.lease_expires_at === null
+    ) {
+      fail("source_invalid");
+    }
+    const expiresAt = canonicalTimestamp(
+      row.lease_expires_at,
+      "source_invalid",
+    );
+    if (
+      expiresAt.time <= updatedAt.time ||
+      expiresAt.time - updatedAt.time > MAX_LEASE_DURATION_MILLISECONDS
+    ) {
+      fail("source_invalid");
+    }
+    leaseId = row.lease_id;
+    leaseExpiresAt = expiresAt.iso;
+  }
   const metricValues = [
     row.metric_sampled_at,
     row.backlog_count,
@@ -475,6 +505,8 @@ function parseProjection(
       backlogCount,
       component: expectedComponent,
       consecutiveNonzeroSamples,
+      leaseExpiresAt,
+      leaseId,
       metricSampledAt: metricSampledAt.iso,
       nonzeroSinceAt: null,
       oldestMessageAgeSeconds,
@@ -499,6 +531,8 @@ function parseProjection(
     backlogCount,
     component: expectedComponent,
     consecutiveNonzeroSamples,
+    leaseExpiresAt,
+    leaseId,
     metricSampledAt: metricSampledAt.iso,
     nonzeroSinceAt: nonzeroSinceAt.iso,
     oldestMessageAgeSeconds,
@@ -526,11 +560,14 @@ function snapshotFromProjection(
   };
 }
 
-function projectionMatchesSample(
+function projectionOwnsSample(
   projection: QueueMetricProjection | null,
   sample: QueueMetricSample,
 ): projection is QueueMetricProjection {
   return projection !== null &&
+    projection.updatedAt === sample.sampledAt &&
+    projection.leaseId === null &&
+    projection.leaseExpiresAt === null &&
     projection.metricSampledAt === sample.sampledAt &&
     projection.backlogCount === sample.backlogCount &&
     projection.backlogBytes === sample.backlogBytes &&
@@ -619,15 +656,15 @@ export async function persistQueueMetricSample(
     );
     if (changed !== metaChanges) fail("source_invalid");
     const projection = parseProjection(oneRow(results, 2), component);
-    const matches = projectionMatchesSample(projection, sample);
+    const ownsSample = projectionOwnsSample(projection, sample);
     if (changed === 1) {
-      if (!matches) fail("source_invalid");
+      if (!ownsSample) fail("source_invalid");
       return {
         outcome: "committed",
         snapshot: snapshotFromProjection(projection),
       };
     }
-    return matches
+    return ownsSample
       ? { outcome: "replayed", snapshot: snapshotFromProjection(projection) }
       : { outcome: "rejected", snapshot: null };
   } catch (error) {

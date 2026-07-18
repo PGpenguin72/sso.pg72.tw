@@ -194,12 +194,14 @@ The four closed Queue dimensions map only to `security_dlq`, `logout_dlq`,
 D1 batch applies a revision-bounded, unleased compare-and-swap, reads
 `changes()`, and projects that exact row. A positive sample increments its
 streak only at exactly 60 seconds, a gap restarts at one, and zero resets the
-streak and start time. An exact duplicate is a response-loss replay;
-out-of-order samples, contradictory concurrent losers, active leases, stale or
-malformed provider/D1 results, and all read/write failures yield a fixed,
-redacted unknown observation instead of a clear. This module is not imported by
-the Worker or scheduler and adds no binding, configuration, Cron, Queue
-producer/consumer, or production behavior.
+streak and start time. A `changes() = 0` exact duplicate is a response-loss
+replay only while the strict projection proves `updated_at` still equals that
+sample time and both lease fields remain null. A later status/revision
+transition retaining the metrics, any retained lease, out-of-order samples,
+contradictory concurrent losers, stale or malformed provider/D1 results, and all
+read/write failures yield a fixed, redacted unknown observation instead of a
+clear. This module is not imported by the Worker or scheduler and adds no
+binding, configuration, Cron, Queue producer/consumer, or production behavior.
 
 OAuth reporter coverage is a whole-evaluation gate. Until every in-window row
 has either its legacy raw reporter ID or the persisted reporter reference, the

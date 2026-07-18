@@ -70,6 +70,8 @@ interface RuntimeMetricRow {
   component: string;
   consecutive_nonzero_samples: number | null;
   generation: number;
+  lease_expires_at: string | null;
+  lease_id: string | null;
   metric_sampled_at: string | null;
   nonzero_since_at: string | null;
   oldest_message_age_seconds: number | null;
@@ -80,7 +82,8 @@ interface RuntimeMetricRow {
 
 async function runtimeRow(queueName: AlertQueueName): Promise<RuntimeMetricRow | null> {
   return env.PG72_ID_DB.prepare(
-    `SELECT component, status, generation, revision, metric_sampled_at,
+    `SELECT component, status, generation, revision, lease_id,
+            lease_expires_at, metric_sampled_at,
             backlog_count, backlog_bytes, oldest_message_age_seconds,
             nonzero_since_at, consecutive_nonzero_samples, updated_at
        FROM alert_runtime_status
@@ -233,6 +236,28 @@ describe.sequential("Queue metrics alert source repository", () => {
     );
   });
 
+  it("mutates only the mapped Queue component and never the evaluator", async () => {
+    await env.PG72_ID_DB.prepare(
+      `INSERT INTO alert_runtime_status (component, updated_at)
+       VALUES ('evaluator', ?)`,
+    ).bind(at(BASE, -1)).run();
+    try {
+      const before = await env.PG72_ID_DB.prepare(
+        "SELECT * FROM alert_runtime_status WHERE component = 'evaluator'",
+      ).first<Record<string, unknown>>();
+      expect(await persistQueueMetricSample(env.PG72_ID_DB, sample(BASE)))
+        .toMatchObject({ outcome: "committed" });
+      const after = await env.PG72_ID_DB.prepare(
+        "SELECT * FROM alert_runtime_status WHERE component = 'evaluator'",
+      ).first<Record<string, unknown>>();
+      expect(after).toEqual(before);
+    } finally {
+      await env.PG72_ID_DB.prepare(
+        "DELETE FROM alert_runtime_status WHERE component = 'evaluator'",
+      ).run();
+    }
+  });
+
   it("records canonical zero metrics without manufacturing a nonzero streak", async () => {
     const result = await readQueueMetricsAlertSource(
       env.PG72_ID_DB,
@@ -376,6 +401,70 @@ describe.sequential("Queue metrics alert source repository", () => {
     });
   });
 
+  it("rejects an exact replay after a later unleased runtime transition", async () => {
+    const current = sample(BASE);
+    expect(await persistQueueMetricSample(env.PG72_ID_DB, current))
+      .toMatchObject({ outcome: "committed" });
+    await env.PG72_ID_DB.prepare(
+      `UPDATE alert_runtime_status
+          SET status = 'healthy', revision = revision + 1, updated_at = ?
+        WHERE component = 'security_dlq'`,
+    ).bind(at(BASE, 1)).run();
+
+    expect(await persistQueueMetricSample(env.PG72_ID_DB, current)).toEqual({
+      outcome: "rejected",
+      snapshot: null,
+    });
+    const observed = await readQueueMetricsAlertSource(
+      env.PG72_ID_DB,
+      provider(positiveMetrics(BASE)),
+      { queueName: "security_events_dlq" },
+      clock(BASE),
+    );
+    expectUnknown(observed);
+    expect(await runtimeRow("security_events_dlq")).toMatchObject({
+      lease_expires_at: null,
+      lease_id: null,
+      metric_sampled_at: BASE,
+      revision: 1,
+      status: "healthy",
+      updated_at: at(BASE, 1),
+    });
+  });
+
+  it("rejects an exact replay after a later lease retains the metrics", async () => {
+    const current = sample(BASE);
+    expect(await persistQueueMetricSample(env.PG72_ID_DB, current))
+      .toMatchObject({ outcome: "committed" });
+    const leaseId = crypto.randomUUID();
+    await env.PG72_ID_DB.prepare(
+      `UPDATE alert_runtime_status
+          SET generation = generation + 1,
+              revision = revision + 1,
+              lease_id = ?, lease_expires_at = ?, updated_at = ?
+        WHERE component = 'security_dlq'`,
+    ).bind(leaseId, at(BASE, 60_000), at(BASE, 1)).run();
+
+    expect(await persistQueueMetricSample(env.PG72_ID_DB, current)).toEqual({
+      outcome: "rejected",
+      snapshot: null,
+    });
+    const observed = await readQueueMetricsAlertSource(
+      env.PG72_ID_DB,
+      provider(positiveMetrics(BASE)),
+      { queueName: "security_events_dlq" },
+      clock(BASE),
+    );
+    expectUnknown(observed);
+    expect(await runtimeRow("security_events_dlq")).toMatchObject({
+      lease_expires_at: at(BASE, 60_000),
+      lease_id: leaseId,
+      metric_sampled_at: BASE,
+      revision: 1,
+      updated_at: at(BASE, 1),
+    });
+  });
+
   it("has one concurrent winner and classifies an exact loser as replay", async () => {
     const current = sample(BASE);
     const results = await Promise.all([
@@ -414,12 +503,22 @@ describe.sequential("Queue metrics alert source repository", () => {
       await expect(failed).rejects.not.toThrow(marker);
     }
     expect(await runtimeRow("security_events_dlq")).toMatchObject({
+      lease_expires_at: null,
+      lease_id: null,
       metric_sampled_at: BASE,
       revision: 0,
+      updated_at: BASE,
     });
-    expect(await persistQueueMetricSample(env.PG72_ID_DB, current)).toMatchObject({
+    expect(await persistQueueMetricSample(env.PG72_ID_DB, current)).toEqual({
       outcome: "replayed",
-      snapshot: { sampledAt: BASE },
+      snapshot: {
+        backlogBytes: 128,
+        backlogCount: 1,
+        consecutiveNonzeroSamples: 1,
+        nonzeroSinceAt: BASE,
+        oldestMessageTimestamp: at(BASE, -1_000),
+        sampledAt: BASE,
+      },
     });
   });
 
@@ -695,6 +794,26 @@ describe.sequential("Queue metrics alert source repository", () => {
       ),
       (results) => replaceResultRows(results, 2, []),
       (results) => replaceResultRows(results, 2, [{ private: privateMarker }]),
+      (results) => replaceResultRows(results, 2, [{
+        ...results[2]!.results[0],
+        lease_id: crypto.randomUUID(),
+        lease_expires_at: null,
+      }]),
+      (results) => replaceResultRows(results, 2, [{
+        ...results[2]!.results[0],
+        lease_id: null,
+        lease_expires_at: at(BASE, 60_000),
+      }]),
+      (results) => replaceResultRows(results, 2, [{
+        ...results[2]!.results[0],
+        lease_id: privateMarker,
+        lease_expires_at: at(BASE, 60_000),
+      }]),
+      (results) => replaceResultRows(results, 2, [{
+        ...results[2]!.results[0],
+        lease_id: crypto.randomUUID(),
+        lease_expires_at: results[2]!.results[0]!.updated_at,
+      }]),
       (results) => replaceResultRows(results, 2, [{
         ...results[2]!.results[0],
         backlog_count: 1.5,

@@ -10,12 +10,25 @@ import {
   type AlertSeverity,
   type AlertSourceKind,
 } from "./alert-rules";
-import type {
-  AlertActionIntent,
-  AlertLifecycleIdentity,
-  AlertLifecycleResult,
-  AlertLifecycleState,
+import {
+  inactiveAlertState,
+  type AlertActionIntent,
+  type AlertLifecycleIdentity,
+  type AlertLifecycleResult,
+  type AlertLifecycleState,
 } from "./alert-evaluator";
+import {
+  prepareAlertEvaluatorDecisionProofInsert,
+  readAlertEvaluatorDecisionProof,
+  recordNoStateChangeAlertEvaluatorDecision,
+  validateAlertEvaluatorRunFence,
+  type AlertEvaluatorDecisionProof,
+  type AlertEvaluatorRunFence,
+} from "./alert-run-repository";
+import {
+  parseAlertEvaluatorDecisionProofValue,
+  type AlertEvaluatorDecisionProofValue,
+} from "./alert-run-proof";
 
 const MAX_STATE_GENERATION = 1_000_000;
 const MAX_STATE_REVISION = 1_000_000_000;
@@ -43,6 +56,26 @@ export interface PersistAlertLifecycleDecisionInput {
   environment: AlertEnvironment;
   evaluation: AlertRuleEvaluation;
   expected: AlertStateCasExpectation | null;
+  runProof?: AlertStateRunProofInput;
+}
+
+export interface AlertStateRunProofInput {
+  fence: AlertEvaluatorRunFence;
+  proof: AlertEvaluatorDecisionProofValue & {
+    disposition: "applied" | "no_state_change";
+  };
+  recordedAt: string;
+}
+
+export interface ReadAlertLifecycleSnapshotInput {
+  dimension: AlertDimension;
+  environment: AlertEnvironment;
+  ruleId: AlertRuleId;
+}
+
+export interface AlertLifecycleSnapshot {
+  expected: AlertStateCasExpectation | null;
+  previous: AlertLifecycleState;
 }
 
 export type AlertStateRepositoryErrorCode =
@@ -640,6 +673,108 @@ function normalizeExpectation(value: unknown): AlertStateCasExpectation | null {
   };
 }
 
+interface NormalizedStateRunProof {
+  asOf: string;
+  fence: AlertEvaluatorRunFence;
+  proof: AlertEvaluatorDecisionProofValue;
+  recordedAt: string;
+}
+
+function normalizeStateRunProof(
+  value: unknown,
+  evaluation: AlertRuleEvaluation,
+  hasState: boolean,
+): NormalizedStateRunProof {
+  const record = exactRecord(value, ["fence", "proof", "recordedAt"]);
+  let fence: AlertEvaluatorRunFence;
+  let proof: AlertEvaluatorDecisionProofValue;
+  try {
+    fence = validateAlertEvaluatorRunFence(record.fence);
+    proof = parseAlertEvaluatorDecisionProofValue(record.proof);
+  } catch {
+    fail("invalid_input");
+  }
+  const recordedAt = canonicalTimestamp(record.recordedAt);
+  if (
+    (hasState && proof.disposition !== "applied") ||
+    (!hasState && proof.disposition !== "no_state_change") ||
+    recordedAt.time < new Date(evaluation.asOf).getTime() ||
+    recordedAt.time >= new Date(fence.leaseExpiresAt).getTime()
+  ) {
+    fail("invalid_input");
+  }
+  return { asOf: evaluation.asOf, fence, proof, recordedAt: recordedAt.iso };
+}
+
+function proofBaseMatches(
+  persisted: AlertEvaluatorDecisionProof,
+  runProof: NormalizedStateRunProof,
+  asOf: string,
+): boolean {
+  const proof = runProof.proof;
+  const fence = runProof.fence;
+  return persisted.runId === fence.runId &&
+    persisted.sourceId === proof.sourceId &&
+    persisted.ordinal === proof.ordinal &&
+    persisted.identitySha256 === proof.identitySha256 &&
+    persisted.evaluationSha256 === proof.evaluationSha256 &&
+    persisted.decisionSha256 === proof.decisionSha256 &&
+    persisted.disposition === proof.disposition && persisted.asOf === asOf &&
+    persisted.runtimeGeneration === fence.runtimeGeneration &&
+    persisted.runtimeRevision === fence.leaseRevision &&
+    persisted.recordedAt === runProof.recordedAt;
+}
+
+function runFenceSql(): string {
+  return `EXISTS (
+    SELECT 1
+      FROM alert_evaluator_run AS proof_run
+      JOIN alert_runtime_status AS proof_runtime
+        ON proof_runtime.component = proof_run.component
+     WHERE proof_run.id = ?
+       AND proof_run.status = 'sealed'
+       AND proof_run.runtime_generation = ?
+       AND proof_run.lease_revision = ?
+       AND proof_run.lease_id = ?
+       AND proof_run.started_at = ?
+       AND proof_run.lease_updated_at = ?
+       AND proof_run.lease_expires_at = ?
+       AND proof_run.as_of = ?
+       AND ? >= proof_run.updated_at
+       AND ? < proof_run.lease_expires_at
+       AND ? < proof_run.decision_count
+       AND EXISTS (
+         SELECT 1 FROM alert_evaluator_run_source AS proof_source
+          WHERE proof_source.run_id = proof_run.id
+            AND proof_source.source_id = ?
+       )
+       AND proof_runtime.generation = proof_run.runtime_generation
+       AND proof_runtime.revision = proof_run.lease_revision
+       AND proof_runtime.lease_id = proof_run.lease_id
+       AND proof_runtime.lease_expires_at = proof_run.lease_expires_at
+  )`;
+}
+
+function runFenceBindings(
+  runProof: NormalizedStateRunProof,
+): unknown[] {
+  const fence = runProof.fence;
+  return [
+    fence.runId,
+    fence.runtimeGeneration,
+    fence.leaseRevision,
+    fence.leaseId,
+    fence.startedAt,
+    fence.leaseUpdatedAt,
+    fence.leaseExpiresAt,
+    runProof.asOf,
+    runProof.recordedAt,
+    runProof.recordedAt,
+    runProof.proof.ordinal,
+    runProof.proof.sourceId,
+  ];
+}
+
 function evidenceColumns(evidence: AlertSelectedEvidence): EvidenceColumns {
   const secondary = evidence.secondary;
   return {
@@ -1059,6 +1194,7 @@ function prepareStateInsert(
     environment: AlertEnvironment;
     evidence: EvidenceColumns;
     ruleId: AlertRuleId;
+    runProof: NormalizedStateRunProof | null;
     sourceKind: AlertSourceKind;
     stateId: string;
   },
@@ -1084,7 +1220,8 @@ function prepareStateInsert(
         SELECT 1 FROM alert_state
          WHERE rule_id = ? AND environment = ? AND source_kind = ?
            AND subject_ref IS ? AND queue_name IS ?
-      )`,
+      )
+      ${options.runProof === null ? "" : `AND ${runFenceSql()}`}`,
   ).bind(
     options.stateId,
     options.ruleId,
@@ -1120,6 +1257,9 @@ function prepareStateInsert(
     options.sourceKind,
     options.dimensions.subjectRef,
     options.dimensions.queueName,
+    ...(options.runProof === null
+      ? []
+      : runFenceBindings(options.runProof)),
   );
 }
 
@@ -1154,6 +1294,7 @@ function prepareStateUpdate(
     evidence: EvidenceColumns | null;
     generation: number;
     ruleId: AlertRuleId;
+    runProof: NormalizedStateRunProof | null;
     sourceKind: AlertSourceKind;
   },
 ): D1PreparedStatement {
@@ -1201,7 +1342,8 @@ function prepareStateUpdate(
         AND queue_name IS ? AND revision = ? AND generation = ?
         AND last_evaluated_at = ? AND last_evaluated_at < ?
         AND revision < ? AND ${incidentPredicate}
-        ${unknownGuard}`,
+        ${unknownGuard}
+        ${options.runProof === null ? "" : `AND ${runFenceSql()}`}`,
   );
   const evidenceValues: readonly (number | string | null)[] = [
     evidence?.windowSeconds ?? null,
@@ -1262,6 +1404,9 @@ function prepareStateUpdate(
   }
   if (options.evaluation.evidence === "unknown") {
     bindings.push(state.status, options.expected.generation);
+  }
+  if (options.runProof !== null) {
+    bindings.push(...runFenceBindings(options.runProof));
   }
   return statement.bind(...bindings);
 }
@@ -1763,17 +1908,306 @@ function changesAt(results: D1Result[], index: number): number {
   return typeof changes === "number" ? changes : -1;
 }
 
+function projectedDimension(row: StateProjection): AlertDimension {
+  if (row.queueName !== null) {
+    return parseAlertDimension(
+      { kind: "queue", queue: row.queueName },
+      ALERT_RULE_DEFINITIONS[row.ruleId].dimensions,
+    );
+  }
+  if (row.subjectRef !== null) {
+    const kind = ALERT_RULE_DEFINITIONS[row.ruleId].dimensions.find(
+      (candidate) => candidate !== "global" && candidate !== "queue",
+    );
+    if (
+      kind !== "subject_hmac" && kind !== "actor_hmac" &&
+      kind !== "client_hmac" || row.hashVersion !== 1
+    ) {
+      fail("source_invalid");
+    }
+    return parseAlertDimension(
+      {
+        kind,
+        reference: { keyVersion: 1, value: row.subjectRef },
+      },
+      ALERT_RULE_DEFINITIONS[row.ruleId].dimensions,
+    );
+  }
+  if (row.hashVersion !== null) fail("source_invalid");
+  return parseAlertDimension(
+    { kind: "global" },
+    ALERT_RULE_DEFINITIONS[row.ruleId].dimensions,
+  );
+}
+
+function projectedEvidence(
+  row: StateProjection,
+  severity: ActiveSeverity,
+): AlertSelectedEvidence {
+  const threshold = severity === "warning"
+    ? row.warningThreshold
+    : row.criticalThreshold;
+  if (threshold === null) fail("source_invalid");
+  try {
+    return parseAlertSelectedEvidenceForRule({
+      kind: row.metricKind,
+      metricName: row.metricName,
+      minimumNumeratorCount: row.minimumNumeratorCount,
+      minimumSampleCount: row.minimumSampleCount,
+      observedDenominator: row.observedDenominator,
+      observedNumerator: row.observedNumerator,
+      observedValue: row.observedValue,
+      secondary: row.secondaryMetricName === null
+        ? null
+        : {
+            kind: row.secondaryMetricKind,
+            metricName: row.secondaryMetricName,
+            minimumNumeratorCount: null,
+            minimumSampleCount: 0,
+            observedDenominator: null,
+            observedNumerator: null,
+            observedValue: row.secondaryObservedValue,
+            threshold: row.secondaryThreshold,
+            unit: row.secondaryMetricUnit,
+          },
+      severity,
+      threshold,
+      unit: row.metricUnit,
+      windowSeconds: row.windowSeconds,
+    }, row.ruleId);
+  } catch {
+    fail("source_invalid");
+  }
+}
+
+function incidentEvidence(row: IncidentProjection): AlertSelectedEvidence {
+  try {
+    return parseAlertSelectedEvidenceForRule({
+      kind: row.metricKind,
+      metricName: row.metricName,
+      minimumNumeratorCount: row.minimumNumeratorCount,
+      minimumSampleCount: row.minimumSampleCount,
+      observedDenominator: row.observedDenominator,
+      observedNumerator: row.observedNumerator,
+      observedValue: row.observedValue,
+      secondary: row.secondaryMetricName === null
+        ? null
+        : {
+            kind: row.secondaryMetricKind,
+            metricName: row.secondaryMetricName,
+            minimumNumeratorCount: null,
+            minimumSampleCount: 0,
+            observedDenominator: null,
+            observedNumerator: null,
+            observedValue: row.secondaryObservedValue,
+            threshold: row.secondaryThreshold,
+            unit: row.secondaryMetricUnit,
+          },
+      severity: row.severity,
+      threshold: row.threshold,
+      unit: row.metricUnit,
+      windowSeconds: row.windowSeconds,
+    }, row.ruleId);
+  } catch {
+    fail("source_invalid");
+  }
+}
+
+export async function readAlertLifecycleSnapshot(
+  database: D1Database,
+  input: ReadAlertLifecycleSnapshotInput,
+): Promise<AlertLifecycleSnapshot> {
+  try {
+    if (arguments.length !== 2) fail("invalid_input");
+    const record = exactRecord(input, ["dimension", "environment", "ruleId"]);
+    const ruleId = parseAlertRuleId(record.ruleId);
+    const requestedDimension = parseAlertDimension(
+      record.dimension,
+      ALERT_RULE_DEFINITIONS[ruleId].dimensions,
+    );
+    const environmentValue = environment(record.environment);
+    const sourceKind = sourceKindFor(ruleId);
+    const dimensions = dimensionColumns(requestedDimension);
+    let results: D1Result[];
+    try {
+      results = await database.batch([
+        prepareStateProjection(database, {
+          dimensions,
+          environment: environmentValue,
+          ruleId,
+          sourceKind,
+        }),
+        database.prepare(
+          `SELECT ${INCIDENT_PROJECTION.split(",").map((column) =>
+            `a.${column.trim()}`
+          ).join(", ")}
+             FROM security_alert AS a
+             JOIN alert_state AS s ON s.id = a.state_id
+            WHERE s.rule_id = ? AND s.environment = ? AND s.source_kind = ?
+              AND s.subject_ref IS ? AND s.queue_name IS ?
+              AND a.generation = s.generation
+            ORDER BY a.created_at, a.id`,
+        ).bind(
+          ruleId,
+          environmentValue,
+          sourceKind,
+          dimensions.subjectRef,
+          dimensions.queueName,
+        ),
+      ]);
+    } catch (error) {
+      throw redactedRepositoryError(error, "source_unavailable");
+    }
+    const stateRows = results[0]?.results ?? [];
+    const incidentRows = results[1]?.results ?? [];
+    if (stateRows.length === 0) {
+      if (incidentRows.length !== 0) fail("source_invalid");
+      return { expected: null, previous: inactiveAlertState() };
+    }
+    if (stateRows.length !== 1) fail("source_invalid");
+    let state: StateProjection;
+    let incidents: IncidentProjection[];
+    try {
+      state = parseStateProjection(stateRows[0]);
+      incidents = incidentRows.map(parseIncidentProjection);
+    } catch (error) {
+      throw redactedRepositoryError(error, "source_invalid");
+    }
+    const projectedStateDimension = projectedDimension(state);
+    const expectedDedupeKey = await canonicalReference(
+      "pgid.alert.state.v1",
+      [
+        ruleId,
+        environmentValue,
+        sourceKind,
+        projectedStateDimension.kind,
+        dimensions.subjectRef ?? "",
+        dimensions.queueName ?? "",
+      ],
+    );
+    if (
+      state.ruleId !== ruleId || state.environment !== environmentValue ||
+      state.sourceKind !== sourceKind ||
+      state.dedupeKey !== expectedDedupeKey ||
+      !sameDimension(projectedStateDimension, requestedDimension) ||
+      incidents.some((incident) =>
+        incident.stateId !== state.id || incident.ruleId !== state.ruleId ||
+        incident.environment !== state.environment ||
+        incident.sourceKind !== state.sourceKind ||
+        incident.generation !== state.generation
+      )
+    ) {
+      fail("source_invalid");
+    }
+
+    const identity: AlertLifecycleIdentity = {
+      dimension: requestedDimension,
+      ruleId,
+    };
+    let expectedIncident: AlertExpectedIncident | null = null;
+    let previous: AlertLifecycleState;
+    if (state.currentSeverity === "warning" || state.currentSeverity === "critical") {
+      if (incidents.length !== 1 || incidents[0].status === "resolved" ||
+        incidents[0].severity !== state.currentSeverity) {
+        fail("source_invalid");
+      }
+      const incident = incidents[0];
+      if (incident.status === "resolved") fail("source_invalid");
+      const activeEvidence = incidentEvidence(incident);
+      if (
+        canonicalTimestamp(incident.firstSeenAt).time >
+          canonicalTimestamp(incident.lastSeenAt).time ||
+        canonicalTimestamp(incident.lastSeenAt).time >
+          canonicalTimestamp(state.lastEvaluatedAt).time ||
+        (state.breachSeverity === null &&
+          JSON.stringify(projectedEvidence(state, state.currentSeverity)) !==
+            JSON.stringify(activeEvidence))
+      ) {
+        fail("source_invalid");
+      }
+      expectedIncident = { id: incident.id, status: incident.status };
+      previous = {
+        activeEvidence,
+        breachEvidence: state.breachSeverity === null
+          ? null
+          : projectedEvidence(state, state.breachSeverity),
+        breachSeverity: state.breachSeverity,
+        consecutiveBreaches: state.consecutiveBreaches,
+        consecutiveClears: state.consecutiveClears,
+        cooldownUntil: null,
+        identity,
+        lastEvaluatedAt: state.lastEvaluatedAt,
+        lastNotificationAt: state.lastNotificationScheduledAt,
+        openedAt: incident.firstSeenAt,
+        phase: "active",
+        status: state.currentSeverity,
+      };
+    } else {
+      if (
+        incidents.some(({ status }) => status !== "resolved") ||
+        incidents.length > 1 ||
+        (state.generation === 0 && incidents.length !== 0) ||
+        (state.generation > 0 && incidents.length !== 1)
+      ) {
+        fail("source_invalid");
+      }
+      const resolvedIncident = incidents[0];
+      if (
+        resolvedIncident !== undefined &&
+        (canonicalTimestamp(resolvedIncident.firstSeenAt).time >
+            canonicalTimestamp(resolvedIncident.lastSeenAt).time ||
+          canonicalTimestamp(resolvedIncident.lastSeenAt).time >
+            canonicalTimestamp(state.lastEvaluatedAt).time)
+      ) {
+        fail("source_invalid");
+      }
+      const pending = state.breachSeverity !== null;
+      previous = {
+        activeEvidence: null,
+        breachEvidence: pending
+          ? projectedEvidence(state, state.breachSeverity as ActiveSeverity)
+          : null,
+        breachSeverity: state.breachSeverity,
+        consecutiveBreaches: state.consecutiveBreaches,
+        consecutiveClears: 0,
+        cooldownUntil: state.cooldownUntil,
+        identity,
+        lastEvaluatedAt: state.lastEvaluatedAt,
+        lastNotificationAt: null,
+        openedAt: null,
+        phase: pending ? "pending" : "inactive",
+        status: "none",
+      };
+    }
+    return {
+      expected: {
+        generation: state.generation,
+        incident: expectedIncident,
+        lastEvaluatedAt: state.lastEvaluatedAt,
+        revision: state.revision,
+        stateId: state.id,
+      },
+      previous,
+    };
+  } catch (error) {
+    throw redactedRepositoryError(error, "source_invalid");
+  }
+}
+
 export async function persistAlertLifecycleDecision(
   database: D1Database,
   input: PersistAlertLifecycleDecisionInput,
 ): Promise<AlertStatePersistenceResult> {
   try {
     if (arguments.length !== 2) fail("invalid_input");
+    const inputRecord = recordValue(input);
+    const hasRunProof = Object.hasOwn(inputRecord, "runProof");
     const record = exactRecord(input, [
       "decision",
       "environment",
       "evaluation",
       "expected",
+      ...(hasRunProof ? ["runProof"] : []),
     ]);
     const evaluation = normalizeEvaluation(record.evaluation);
     const decision = normalizeDecision(record.decision, evaluation);
@@ -1782,10 +2216,61 @@ export async function persistAlertLifecycleDecision(
     const sourceKind = sourceKindFor(evaluation.ruleId);
     const dimensions = dimensionColumns(evaluation.dimension);
     const at = canonicalTimestamp(evaluation.asOf);
+    const runProof = hasRunProof
+      ? normalizeStateRunProof(
+          record.runProof,
+          evaluation,
+          decision.state.identity !== null,
+        )
+      : null;
 
     if (decision.state.identity === null) {
       if (expected !== null || decision.intent !== null) fail("invalid_input");
+      if (runProof !== null) {
+        if (runProof.proof.disposition !== "no_state_change") {
+          fail("invalid_input");
+        }
+        const result = await recordNoStateChangeAlertEvaluatorDecision(
+          database,
+          runProof.fence,
+          {
+            absence: {
+              environment: environmentValue,
+              queueName: dimensions.queueName,
+              ruleId: evaluation.ruleId,
+              sourceKind,
+              subjectRef: dimensions.subjectRef,
+            },
+            asOf: at.iso,
+            proof: {
+              ...runProof.proof,
+              disposition: "no_state_change",
+            },
+            recordedAt: runProof.recordedAt,
+          },
+        );
+        return result === "recorded"
+          ? "applied"
+          : result === "replayed" ? "duplicate" : "conflict";
+      }
       return "applied";
+    }
+    let existingRunProof: AlertEvaluatorDecisionProof | null = null;
+    if (runProof !== null) {
+      existingRunProof = await readAlertEvaluatorDecisionProof(database, {
+        identitySha256: runProof.proof.identitySha256,
+        ordinal: runProof.proof.ordinal,
+        runId: runProof.fence.runId,
+      });
+      if (
+        existingRunProof !== null &&
+        (!proofBaseMatches(existingRunProof, runProof, at.iso) ||
+          existingRunProof.stateId === null ||
+          existingRunProof.stateGeneration === null ||
+          existingRunProof.stateRevision === null)
+      ) {
+        return "conflict";
+      }
     }
     if (
       decision.state.lastEvaluatedAt !== at.iso ||
@@ -1859,7 +2344,7 @@ export async function persistAlertLifecycleDecision(
     ) {
       fail("invalid_input");
     }
-    const stateId = expected?.stateId ?? crypto.randomUUID();
+    const stateId = expected?.stateId ?? existingRunProof?.stateId ?? crypto.randomUUID();
     const initialAt = immediateInitial
       ? new Date(at.time - 1).toISOString()
       : at.iso;
@@ -1883,6 +2368,14 @@ export async function persistAlertLifecycleDecision(
       : expected === null ? 0 : expected.revision + 1;
     boundedInteger(nextGeneration, 0, MAX_STATE_GENERATION);
     boundedInteger(nextRevision, 0, MAX_STATE_REVISION);
+    if (
+      existingRunProof !== null &&
+      (existingRunProof.stateId !== stateId ||
+        existingRunProof.stateGeneration !== nextGeneration ||
+        existingRunProof.stateRevision !== nextRevision)
+    ) {
+      return "conflict";
+    }
 
     const statements: D1PreparedStatement[] = [];
     const expectedChanges: number[] = [];
@@ -1895,6 +2388,7 @@ export async function persistAlertLifecycleDecision(
         environment: environmentValue,
         evidence,
         ruleId: evaluation.ruleId,
+        runProof,
         sourceKind,
         stateId,
       }));
@@ -1922,6 +2416,7 @@ export async function persistAlertLifecycleDecision(
         evidence,
         generation: nextGeneration,
         ruleId: evaluation.ruleId,
+        runProof,
         sourceKind,
       }));
       expectedChanges.push(1);
@@ -2030,6 +2525,23 @@ export async function persistAlertLifecycleDecision(
       expectedChanges.push(1);
     }
 
+    if (runProof !== null && existingRunProof === null) {
+      if (runProof.proof.disposition !== "applied") fail("invalid_input");
+      statements.push(prepareAlertEvaluatorDecisionProofInsert(
+        database,
+        runProof.fence,
+        {
+          asOf: at.iso,
+          proof: { ...runProof.proof, disposition: "applied" },
+          recordedAt: runProof.recordedAt,
+          stateGeneration: nextGeneration,
+          stateId,
+          stateRevision: nextRevision,
+        },
+      ));
+      expectedChanges.push(1);
+    }
+
     const stateProjectionIndex = statements.length;
     statements.push(prepareStateProjection(database, {
       dimensions,
@@ -2059,12 +2571,46 @@ export async function persistAlertLifecycleDecision(
         sourceKind,
       }, at.iso));
     }
+    const proofProjectionIndex = runProof === null ? null : statements.length;
+    if (runProof !== null) {
+      statements.push(database.prepare(
+        `SELECT run_id, source_id, ordinal, identity_sha256,
+                evaluation_sha256, decision_sha256, disposition, as_of,
+                state_id, state_generation, state_revision,
+                runtime_generation, runtime_revision, recorded_at
+           FROM alert_evaluator_run_decision
+          WHERE run_id = ? AND (ordinal = ? OR identity_sha256 = ?)
+          ORDER BY ordinal LIMIT 2`,
+      ).bind(
+        runProof.fence.runId,
+        runProof.proof.ordinal,
+        runProof.proof.identitySha256,
+      ));
+    }
 
     let results: D1Result[];
     try {
       results = await database.batch(statements);
     } catch (error) {
-      throw redactedRepositoryError(error, "write_failed");
+      if (runProof === null) {
+        throw redactedRepositoryError(error, "write_failed");
+      }
+      try {
+        const projectionResults = await database.batch(
+          statements.slice(stateProjectionIndex),
+        );
+        const recoveredChanges = expectedChanges.map(() =>
+          existingRunProof === null ? 1 : 0
+        );
+        results = [
+          ...recoveredChanges.map((changes) => ({
+            meta: { changes },
+          }) as unknown as D1Result),
+          ...projectionResults,
+        ];
+      } catch (recoveryError) {
+        throw redactedRepositoryError(recoveryError, "write_failed");
+      }
     }
     const writeChanges = expectedChanges.map((_, index) => changesAt(results, index));
     const allApplied = writeChanges.every(
@@ -2073,6 +2619,62 @@ export async function persistAlertLifecycleDecision(
     const allDuplicate = writeChanges.every((changes) => changes === 0);
     if (!allApplied && !allDuplicate) fail("write_failed");
 
+    let persistedProofStateCoordinates: {
+      generation: number;
+      id: string;
+      revision: number;
+    } | null = null;
+    if (runProof !== null && proofProjectionIndex !== null) {
+      const proofRows = results[proofProjectionIndex]?.results ?? [];
+      if (proofRows.length !== 1) return "conflict";
+      const persisted = exactRecord(proofRows[0], [
+        "as_of",
+        "decision_sha256",
+        "disposition",
+        "evaluation_sha256",
+        "identity_sha256",
+        "ordinal",
+        "recorded_at",
+        "run_id",
+        "runtime_generation",
+        "runtime_revision",
+        "source_id",
+        "state_generation",
+        "state_id",
+        "state_revision",
+      ]);
+      const persistedStateId = persisted.state_id;
+      const validPersistedStateId = typeof persistedStateId === "string" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+          persistedStateId,
+        );
+      const replayedInitialStateId = allDuplicate && expected === null &&
+        validPersistedStateId;
+      if (
+        persisted.run_id !== runProof.fence.runId ||
+        persisted.source_id !== runProof.proof.sourceId ||
+        persisted.ordinal !== runProof.proof.ordinal ||
+        persisted.identity_sha256 !== runProof.proof.identitySha256 ||
+        persisted.evaluation_sha256 !== runProof.proof.evaluationSha256 ||
+        persisted.decision_sha256 !== runProof.proof.decisionSha256 ||
+        persisted.disposition !== "applied" || persisted.as_of !== at.iso ||
+        (persistedStateId !== stateId && !replayedInitialStateId) ||
+        persisted.state_generation !== nextGeneration ||
+        persisted.state_revision !== nextRevision ||
+        persisted.runtime_generation !== runProof.fence.runtimeGeneration ||
+        persisted.runtime_revision !== runProof.fence.leaseRevision ||
+        persisted.recorded_at !== runProof.recordedAt
+      ) {
+        return "conflict";
+      }
+      if (typeof persistedStateId !== "string") return "conflict";
+      persistedProofStateCoordinates = {
+        generation: nextGeneration,
+        id: persistedStateId,
+        revision: nextRevision,
+      };
+    }
+
     const stateRaw = results[stateProjectionIndex]?.results[0];
     if (stateRaw === undefined) return "conflict";
     let stateRow: StateProjection;
@@ -2080,6 +2682,14 @@ export async function persistAlertLifecycleDecision(
       stateRow = parseStateProjection(stateRaw);
     } catch (error) {
       throw redactedRepositoryError(error, "source_invalid");
+    }
+    if (
+      persistedProofStateCoordinates !== null &&
+      (stateRow.id !== persistedProofStateCoordinates.id ||
+        stateRow.generation !== persistedProofStateCoordinates.generation ||
+        stateRow.revision !== persistedProofStateCoordinates.revision)
+    ) {
+      return "conflict";
     }
     if (!stateMatches(stateRow, {
       at: at.iso,

@@ -162,8 +162,8 @@ test("completed continuity evidence requires a populated migration-ledger summar
     export: { bytes: 1_024, sha256: "a".repeat(64) },
     failure: { class: "none", stage: "none" },
     migrationLedger: {
-      count: 21,
-      head: "0021_audit_archive.sql",
+      count: 22,
+      head: "0022_alert_evaluator_run_proof.sql",
       sha256: "b".repeat(64),
     },
     ready: true,
@@ -178,9 +178,9 @@ test("completed continuity evidence requires a populated migration-ledger summar
   for (const migrationLedger of [
     { count: 0, head: null, sha256: null },
     { count: 18, head: "0018_global_logout.sql", sha256: "b".repeat(64) },
-    { count: 21, head: "0021_lookalike.sql", sha256: "b".repeat(64) },
-    { count: 21, head: "not-a-migration", sha256: "b".repeat(64) },
-    { count: 21, head: "0021_audit_archive.sql", sha256: "0" },
+    { count: 22, head: "0022_lookalike.sql", sha256: "b".repeat(64) },
+    { count: 22, head: "not-a-migration", sha256: "b".repeat(64) },
+    { count: 22, head: "0022_alert_evaluator_run_proof.sql", sha256: "0" },
   ]) {
     assert.throws(() =>
       validateClosedReport({ ...completed, migrationLedger }),

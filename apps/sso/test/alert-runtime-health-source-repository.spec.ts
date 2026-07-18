@@ -12,9 +12,17 @@ import {
   type RuntimeHealthAlertSourceResult,
 } from "../worker/alert-runtime-health-source-repository";
 import {
-  acquireAlertEvaluatorLease,
+  acquireAlertEvaluatorRun,
+  bindAlertEvaluatorRunAsOf,
+  recordAlertEvaluatorRunSource,
+  recordAlertEvaluatorRunSuccess,
+  sealAlertEvaluatorRunPlan,
+} from "../worker/alert-run-repository";
+import {
+  ALERT_EVALUATOR_SOURCE_IDS,
+} from "../worker/alert-run-proof";
+import {
   initializeAlertEvaluatorRuntime,
-  recordAlertEvaluatorSuccess,
 } from "../worker/alert-runtime-repository";
 import {
   evaluateAlertRule,
@@ -27,6 +35,7 @@ import {
 } from "../worker/alert-state-repository";
 
 const AS_OF = "2032-07-18T02:00:00.000Z";
+const SOURCE_PROOF_DIGEST = "A".repeat(43);
 
 function at(base: string, offsetMilliseconds: number): string {
   return new Date(new Date(base).getTime() + offsetMilliseconds).toISOString();
@@ -48,18 +57,56 @@ async function bootstrapEvaluator(
       WHERE component = 'evaluator'`,
   ).first<string>("first_success_at");
   if (existing !== null) return existing;
-  const initializedAt = at(firstSuccessAt, -2_000);
-  const startedAt = at(firstSuccessAt, -1_000);
+  const initializedAt = at(firstSuccessAt, -6_000);
+  const startedAt = at(firstSuccessAt, -5_000);
+  const sourceAsOf = at(firstSuccessAt, -4_000);
+  const sourceRecordedAt = at(firstSuccessAt, -3_000);
+  const sealedAt = at(firstSuccessAt, -2_000);
   await initializeAlertEvaluatorRuntime(env.PG72_ID_DB, { initializedAt });
-  const lease = await acquireAlertEvaluatorLease(env.PG72_ID_DB, {
+  const acquired = await acquireAlertEvaluatorRun(env.PG72_ID_DB, {
     leaseDurationSeconds: 60,
+    scheduledAt: startedAt,
     startedAt,
+    triggerCron: "* * * * *",
   });
-  if (lease === null) throw new Error("expected evaluator lease");
-  await recordAlertEvaluatorSuccess(env.PG72_ID_DB, lease, {
-    completedAt: firstSuccessAt,
-    watermarkAt: firstSuccessAt,
+  if (acquired === null || acquired.kind !== "acquired") {
+    throw new Error("expected evaluator run");
+  }
+  const fence = acquired.fence;
+  const bound = await bindAlertEvaluatorRunAsOf(env.PG72_ID_DB, fence, {
+    asOf: sourceAsOf,
+    boundAt: sourceAsOf,
   });
+  if (bound.kind === "lost") throw new Error("expected bound evaluator run");
+  for (const sourceId of ALERT_EVALUATOR_SOURCE_IDS) {
+    const recorded = await recordAlertEvaluatorRunSource(
+      env.PG72_ID_DB,
+      fence,
+      {
+        asOf: sourceAsOf,
+        proof: {
+          incompleteCount: 0,
+          observationCount: 0,
+          proofSha256: SOURCE_PROOF_DIGEST,
+          sourceId,
+          status: "complete",
+        },
+        recordedAt: sourceRecordedAt,
+      },
+    );
+    if (recorded !== "recorded") throw new Error("expected source proof");
+  }
+  const sealed = await sealAlertEvaluatorRunPlan(env.PG72_ID_DB, fence, {
+    decisions: [],
+    sealedAt,
+  });
+  if (sealed.kind === "lost") throw new Error("expected sealed evaluator run");
+  const completed = await recordAlertEvaluatorRunSuccess(
+    env.PG72_ID_DB,
+    fence,
+    { completedAt: firstSuccessAt },
+  );
+  if (completed.kind === "lost") throw new Error("expected evaluator success");
   return firstSuccessAt;
 }
 

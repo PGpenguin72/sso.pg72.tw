@@ -38,8 +38,7 @@ function integrity(database) {
 }
 
 test("fresh archive migration creates exactly six disabled durable tables", () => {
-  assert.equal(migrationNames.length, 21);
-  assert.equal(migrationNames.at(-1), "0021_audit_archive.sql");
+  assert.equal(migrationNames[20], "0021_audit_archive.sql");
   const database = openDatabase();
   try {
     applyThrough(database, "0021_audit_archive.sql");

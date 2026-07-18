@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -708,6 +709,33 @@ test("allows generated high-entropy module metadata only at exact paths and dige
       { relativePath },
     ).includes("high-entropy-string"),
   );
+});
+
+test("allows alert run proof vectors only at the exact path and digests", () => {
+  const relativePath = "apps/sso/test/alert-run-proof.spec.ts";
+  const source = readFileSync(
+    new URL("../../apps/sso/test/alert-run-proof.spec.ts", import.meta.url),
+  );
+  assert.ok(
+    !scanBufferForSecrets(source, { relativePath }).includes("high-entropy-string"),
+  );
+
+  const text = source.toString("utf8");
+  const vectors = [...text.matchAll(/[A-Za-z0-9_-]{43}/g)].map(([value]) => value);
+  assert.equal(vectors.length, 3);
+  assert.ok(
+    scanBufferForSecrets(source, { relativePath: `other/${relativePath}` }).includes(
+      "high-entropy-string",
+    ),
+  );
+  for (const vector of vectors) {
+    const changed = text.replace(vector, `${vector}A`);
+    assert.ok(
+      scanBufferForSecrets(Buffer.from(changed), { relativePath }).includes(
+        "high-entropy-string",
+      ),
+    );
+  }
 });
 
 test("treats only the exact Fetch credentials enums as non-secret metadata", () => {

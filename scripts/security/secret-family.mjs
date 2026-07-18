@@ -222,6 +222,19 @@ const auditedStaticLiteralAllowances = new Map([
       ],
     ]),
   ],
+  [
+    "apps/sso/test/alert-run-proof.spec.ts",
+    new Map([
+      [
+        "high-entropy-string",
+        new Set([
+          "2e73734d4c83cc7f906ccba2ddbcb2c369ccedbf98952b6281f305dd9d63b0fa",
+          "242053d62a7377108dfd569bdbbc2d1792f2a3cc63e18c5a3deecff58cc988ee",
+          "24b03a6f171aec9497fb7906a5dc844a90c1b88974c77ad9c6df9a913e66a1f7",
+        ]),
+      ],
+    ]),
+  ],
 ]);
 
 function normalizeAssignmentKey(value) {

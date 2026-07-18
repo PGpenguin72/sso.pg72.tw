@@ -226,8 +226,11 @@ export function validateClosedReport(report) {
     if (report.failure.stage === "none") {
       assert.equal(report.failure.class, "none");
       assert.ok(report.export.bytes > 0);
-      assert.equal(report.migrationLedger.count, 21);
-      assert.equal(report.migrationLedger.head, "0021_audit_archive.sql");
+      assert.equal(report.migrationLedger.count, 22);
+      assert.equal(
+        report.migrationLedger.head,
+        "0022_alert_evaluator_run_proof.sql",
+      );
       assert.match(report.migrationLedger.sha256, /^[a-f0-9]{64}$/);
       assert.equal(report.schema.integrity, "ok");
       assert.equal(report.schema.foreignKeys, "ok");

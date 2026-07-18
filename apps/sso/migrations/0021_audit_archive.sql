@@ -1129,6 +1129,35 @@ OR NOT (
     AND NEW."envelope_gc_at" IS OLD."envelope_gc_at"
     AND NEW."last_error_code" IS NULL
     AND NEW."manual_replay_audit_id" IS OLD."manual_replay_audit_id")
+  OR (OLD."status" = 'processing' AND NEW."status" = 'processing'
+    AND NEW."dispatch_generation" = OLD."dispatch_generation"
+    AND NEW."attempts" = OLD."attempts"
+    AND NEW."next_attempt_at" IS NULL
+    AND NEW."lease_id" IS NOT NULL
+    AND NEW."lease_id" = OLD."lease_id"
+    AND NEW."updated_at" > OLD."updated_at"
+    AND NEW."updated_at" < OLD."lease_expires_at"
+    AND NEW."lease_expires_at" > OLD."lease_expires_at"
+    AND NEW."lease_expires_at" > NEW."updated_at"
+    AND NEW."lease_expires_at" <= strftime(
+      '%Y-%m-%dT%H:%M:%fZ', NEW."updated_at", '+300 seconds'
+    )
+    AND NEW."r2_version" IS OLD."r2_version"
+    AND NEW."r2_etag" IS OLD."r2_etag"
+    AND NEW."r2_readback_sha256" IS OLD."r2_readback_sha256"
+    AND NEW."r2_readback_at" IS OLD."r2_readback_at"
+    AND NEW."archived_at" IS OLD."archived_at"
+    AND NEW."envelope_gc_at" IS OLD."envelope_gc_at"
+    AND NEW."last_error_code" IS OLD."last_error_code"
+    AND NEW."manual_replay_audit_id" IS OLD."manual_replay_audit_id"
+    AND EXISTS (
+      SELECT 1 FROM "audit_archive_attempt" AS attempt
+       WHERE attempt."batch_key" = OLD."batch_key"
+         AND attempt."dispatch_generation" = OLD."dispatch_generation"
+         AND attempt."attempt_number" = OLD."attempts"
+         AND attempt."lease_id" = OLD."lease_id"
+         AND attempt."outcome" = 'in_flight'
+    ))
   OR (OLD."status" = 'processing'
     AND NEW."status" IN ('archived', 'retry', 'dead', 'corrupt')
     AND NEW."dispatch_generation" = OLD."dispatch_generation"

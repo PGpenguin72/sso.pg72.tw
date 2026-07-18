@@ -908,6 +908,130 @@ describe("audit archive 0021 schema", () => {
     await assertIntegrity();
   });
 
+  it("renews only the same live lease before expiry without creating another attempt", async () => {
+    await installSentinel(at(500));
+    await insertAuditEvent(650);
+    const build = await buildBatch(at(799_100));
+    await persistBatch(build);
+    const lease = await claimBatch(
+      build.batchKey,
+      1,
+      at(799_200),
+      at(799_500),
+    );
+
+    const renewed = await env.PG72_ID_DB.prepare(
+      `UPDATE audit_archive_batch
+          SET lease_expires_at = ?, updated_at = ?
+        WHERE batch_key = ? AND lease_id = ?`,
+    )
+      .bind(at(799_700), at(799_300), build.batchKey, lease)
+      .run();
+    expect(renewed.meta.changes).toBe(1);
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT status, attempts, lease_id, lease_expires_at, updated_at
+           FROM audit_archive_batch WHERE batch_key = ?`,
+      )
+        .bind(build.batchKey)
+        .first(),
+    ).toEqual({
+      attempts: 1,
+      lease_expires_at: at(799_700),
+      lease_id: lease,
+      status: "processing",
+      updated_at: at(799_300),
+    });
+    expect(
+      await env.PG72_ID_DB.prepare(
+        "SELECT count(*) AS count FROM audit_archive_attempt WHERE batch_key = ?",
+      )
+        .bind(build.batchKey)
+        .first<number>("count"),
+    ).toBe(1);
+
+    const invalidRenewals = [
+      env.PG72_ID_DB.prepare(
+        `UPDATE audit_archive_batch SET lease_expires_at = ?, updated_at = ?
+          WHERE batch_key = ?`,
+      ).bind(at(799_700), at(799_400), build.batchKey),
+      env.PG72_ID_DB.prepare(
+        `UPDATE audit_archive_batch SET lease_expires_at = ?, updated_at = ?
+          WHERE batch_key = ?`,
+      ).bind(at(799_800), at(799_700), build.batchKey),
+      env.PG72_ID_DB.prepare(
+        `UPDATE audit_archive_batch SET lease_expires_at = ?, updated_at = ?
+          WHERE batch_key = ?`,
+      ).bind(at(1_099_401), at(799_400), build.batchKey),
+      env.PG72_ID_DB.prepare(
+        `UPDATE audit_archive_batch
+            SET lease_id = ?, lease_expires_at = ?, updated_at = ?
+          WHERE batch_key = ?`,
+      ).bind(reference(), at(799_800), at(799_400), build.batchKey),
+      env.PG72_ID_DB.prepare(
+        `UPDATE audit_archive_batch
+            SET attempts = 2, lease_expires_at = ?, updated_at = ?
+          WHERE batch_key = ?`,
+      ).bind(at(799_800), at(799_400), build.batchKey),
+      env.PG72_ID_DB.prepare(
+        `UPDATE audit_archive_batch
+            SET status = 'retry', next_attempt_at = ?, lease_id = NULL,
+                lease_expires_at = NULL, last_error_code = 'r2_transient',
+                updated_at = ?
+          WHERE batch_key = ?`,
+      ).bind(at(799_400), at(799_400), build.batchKey),
+    ];
+    for (const statement of invalidRenewals) {
+      await expect(statement.run()).rejects.toThrow();
+    }
+
+    const checkpoint = await env.PG72_ID_DB.prepare(
+      "SELECT revision, last_sequence FROM audit_archive_checkpoint WHERE id = 1",
+    ).first<{ last_sequence: number; revision: number }>();
+    if (!checkpoint) throw new Error("missing checkpoint");
+    await expect(
+      env.PG72_ID_DB.batch([
+        env.PG72_ID_DB.prepare(
+          `UPDATE audit_archive_batch SET lease_expires_at = ?, updated_at = ?
+            WHERE batch_key = ?`,
+        ).bind(at(799_800), at(799_400), build.batchKey),
+        env.PG72_ID_DB.prepare(
+          `UPDATE audit_archive_checkpoint
+              SET revision = revision + 1, last_sequence = last_sequence + 1,
+                  last_batch_key = ?, last_archived_at = ?
+            WHERE id = 1`,
+        ).bind(reference(), at(799_400)),
+      ]),
+    ).rejects.toThrow();
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT lease_expires_at, updated_at FROM audit_archive_batch
+          WHERE batch_key = ?`,
+      )
+        .bind(build.batchKey)
+        .first(),
+    ).toEqual({
+      lease_expires_at: at(799_700),
+      updated_at: at(799_300),
+    });
+    expect(
+      await env.PG72_ID_DB.prepare(
+        "SELECT revision, last_sequence FROM audit_archive_checkpoint WHERE id = 1",
+      ).first(),
+    ).toEqual(checkpoint);
+    const completedAt = at(799_600);
+    await env.PG72_ID_DB.prepare(
+      `UPDATE audit_archive_attempt
+          SET outcome = 'archived', resulting_status = 'archived',
+              r2_version = 'version-renewed', r2_etag = 'etag-renewed',
+              r2_readback_sha256 = ?, r2_readback_at = ?, completed_at = ?
+        WHERE id = ?`,
+    )
+      .bind(build.manifest.objectSha256, completedAt, completedAt, lease)
+      .run();
+    await assertIntegrity();
+  });
+
   it("rejects delimiter-bearing R2 evidence on corrupt attempts", async () => {
     await installSentinel(at(500));
     await insertAuditEvent(700);

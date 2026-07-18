@@ -325,7 +325,7 @@ const releaseTestCounts = new Map([
   ["dast.test.mjs", 6],
   ["dependency-inventory.test.mjs", 2],
   ["release-identity.test.mjs", 13],
-  ["secret-family.test.mjs", 20],
+  ["secret-family.test.mjs", 21],
   ["secret-scan.test.mjs", 2],
   ["workflow-config.test.mjs", 25],
   ["wrangler-config.test.mjs", 5],

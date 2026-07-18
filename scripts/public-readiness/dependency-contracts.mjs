@@ -58,7 +58,7 @@ const RELEASE_SECURITY_TESTS = Object.freeze([
   Object.freeze({ filename: "dast.test.mjs", count: 6 }),
   Object.freeze({ filename: "dependency-inventory.test.mjs", count: 2 }),
   Object.freeze({ filename: "release-identity.test.mjs", count: 13 }),
-  Object.freeze({ filename: "secret-family.test.mjs", count: 20 }),
+  Object.freeze({ filename: "secret-family.test.mjs", count: 21 }),
   Object.freeze({ filename: "secret-scan.test.mjs", count: 2 }),
   Object.freeze({ filename: "workflow-config.test.mjs", count: 25 }),
   Object.freeze({ filename: "wrangler-config.test.mjs", count: 5 }),

@@ -77,7 +77,7 @@ manifest, lockfile, workspace policy, and package patches, before execution,
 after execution, and again at proof promotion. Recovery uses the exact recovery
 Vitest file and requires 4 suites and 20 passed assertions across the three
 fixed recovery groups. Release automation uses an exact Node test event stream
-and requires all 89 tests from the nine fixed security test files to pass with
+and requires all 90 tests from the nine fixed security test files to pass with
 zero failed, cancelled, skipped, or todo results. Observability migration `0020`
 is now source-present, but without an evaluator/delivery same-run proof it must
 remain `source_present_unverified`; encrypted R2 archive integration remains

@@ -1,15 +1,19 @@
-# Audit archive D1 repository and unwired writer boundary
+# Audit archive D1 repository, writer and restore-verifier boundary
 
-> Status: local, request-scoped, unwired D1 repository and pure R2 writer.
+> Status: local, request-scoped, unwired D1 repository, pure R2 writer and pure
+> one-object restore verifier.
 > Migration
 > `0021_audit_archive.sql`, `0023_audit_archive_r2_evidence.sql`, and
 > `worker/audit-archive-repository.ts` still do not read a KEK or access R2.
 > `worker/audit-archive-r2-writer.ts` accepts injected D1, R2 and envelope
-> verification dependencies, but no entry point, Wrangler binding, Queue,
-> scheduler or production mode imports it. Neither module restores R2, publishes
-> or consumes Queue messages, schedules Cron work, deletes retained objects, or
-> provides an operator endpoint. Production records remain through migration
-> `0012`.
+> verification dependencies. `worker/audit-archive-r2-restore.ts` accepts one
+> externally supplied expected manifest plus injected R2-read and custody-opener
+> dependencies; it never receives a raw KEK. No entry point, Wrangler binding,
+> Queue, scheduler or production mode imports either service. There is no real
+> custody adapter, restore sink, operator endpoint, external backup or restore
+> exercise. Neither service publishes or consumes Queue messages, schedules
+> Cron work, or deletes retained objects. Production records remain through
+> migration `0012`.
 
 ## What `0021` and `0023` provide
 
@@ -101,6 +105,37 @@ This source is deliberately not imported by `worker/index.ts`; there is no R2
 binding, KEK adapter, Queue consumer, Cron path, real bucket access or remote
 proof. Source presence is not encrypted archive continuity.
 
+## What the pure restore verifier provides
+
+`worker/audit-archive-r2-restore.ts` is a bounded, non-HTTP verifier for one
+exact encrypted object. Its expected v1 manifest is trusted caller/operator
+input from evidence outside the object. The verifier validates that manifest
+and its deterministically derived object key before the first injected bucket
+read; it never derives authority solely from the object's custom metadata.
+
+The verifier requires the exact object key, content type, `no-store` cache
+policy, single canonical manifest metadata value, declared byte count and R2
+stored SHA-256. It reads at most the manifest's reviewed 512 KiB bound, cancels
+overflowing or erroring readers where possible, computes the full body SHA-256,
+and requires expected, stored and computed digests to agree. Missing objects,
+malformed or extra metadata, absent checksums, zero/short/oversized bodies and
+stream failures all fail closed with fixed redacted errors.
+
+Only after object verification does it call an injected custody opener with a
+copied manifest and copied object bytes. The public interface contains no KEK.
+An opened record set is canonicalized again and checked against plaintext
+SHA-256, event count and first/last sequence. The result consists of detached,
+frozen plain record values, so later provider mutation cannot change it. Object,
+checksum and canonical-plaintext module-owned copies are cleared in success and
+failure paths where the runtime permits it; caller, provider and R2-platform
+buffers are never mutated.
+
+This is source-level verification, not operational restore continuity. A real
+custody/escrow adapter, runtime binding, isolated restore sink, external backup,
+retention/Bucket Lock proof, R2 version/etag or object-history custody, measured
+restore exercise and remote evidence remain absent. The verifier's result does
+not claim any of those properties.
+
 ## Source and snapshot invariants
 
 Source rows cannot be updated or directly deleted. Deletion is allowed only as
@@ -174,7 +209,8 @@ pnpm --filter @pg72/id exec vitest run \
   test/audit-archive-schema.spec.ts \
   test/audit-archive-crypto.spec.ts \
   test/audit-archive-repository.spec.ts \
-  test/audit-archive-r2-writer.spec.ts
+  test/audit-archive-r2-writer.spec.ts \
+  test/audit-archive-r2-restore.spec.ts
 node --test scripts/public-readiness/alert-source-time-integrity-migration.test.mjs \
   scripts/public-readiness/audit-archive-migration.test.mjs \
   scripts/public-readiness/d1-manifest.test.mjs \
@@ -204,18 +240,28 @@ overflowing bodies with cancellation, full body and post-readback crypto
 mismatches, pre-R2 crypto failure without R2 evidence, terminal response-loss
 duplicate classification, D1 retry timing through attempt five,
 unavailable/throwing verifier redaction, stale/expired/renewal-conflict leases,
-expiry after a committed PUT, and clearing caller-owned temporary buffers.
+expiry after a committed PUT, and clearing writer-owned temporary buffers.
+
+The restore suite covers trusted-manifest validation before any object read,
+hostile object-key selection, exact metadata and stored checksum contracts,
+missing/unavailable objects, zero/short/oversized/overflowing/erroring streams,
+full computed SHA-256, reader cancellation, custody unavailable/integrity/error
+classification, noncanonical or manifest-divergent records, provider mutation,
+detached immutable results and temporary-buffer clearing.
+Provider-owned checksum/body buffers are also asserted unchanged; thrown
+objects, accessors and provider text are reconstructed as fixed restore errors.
 
 ## Remaining gates
 
-Schema, repository and pure writer presence do not satisfy encrypted archive
-continuity. The dependency must remain `dependency_missing` until a separately
-reviewed slice adds all of the following and executes their proof in the same
-run:
+Schema, repository, pure writer and pure restore-verifier presence do not
+satisfy encrypted archive continuity. The dependency must remain
+`dependency_missing` until separately reviewed slices add all of the following
+and execute their proof in the same run:
 
 - archive-domain fingerprint derivation, KEK custody and key escrow;
-- add the closed KEK adapter, writer runtime integration and remote proof, and
-  implement the bounded non-HTTP restore;
+- add the closed KEK/custody adapter, writer and restore runtime integration,
+  remote proof, and an isolated restore sink/exercise around the bounded
+  non-HTTP verifier;
 - dedicated Queue, DLQ consumer and D1-authoritative Cron redrive;
 - key escrow, external non-Cloudflare backup and restore exercise;
 - owner-approved retention/Bucket Lock policy, Preview failure drills and

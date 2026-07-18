@@ -187,11 +187,11 @@ test("derives the complete migration ledger from the integrated source sequence"
   );
 });
 
-test("integrated migration proof requires exact 0023 count and head", () => {
+test("integrated migration proof requires exact 0024 count and head", () => {
   assert.doesNotThrow(() =>
     assertIntegratedMigrationLedger({
-      count: 23,
-      head: "0023_audit_archive_r2_evidence.sql",
+      count: 24,
+      head: "0024_audit_archive_r2_evidence_guard.sql",
     }),
   );
   assert.throws(() =>
@@ -202,8 +202,8 @@ test("integrated migration proof requires exact 0023 count and head", () => {
   );
   assert.throws(() =>
     assertIntegratedMigrationLedger({
-      count: 23,
-      head: "0023_lookalike.sql",
+      count: 24,
+      head: "0024_lookalike.sql",
     }),
   );
 });

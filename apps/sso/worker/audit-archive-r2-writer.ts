@@ -4,6 +4,7 @@ import {
   type AuditArchiveManifestV1,
 } from "./audit-archive-crypto";
 import {
+  adoptAuditArchiveLease,
   AuditArchiveRepositoryError,
   expireAuditArchiveLease,
   failAuditArchiveLease,
@@ -44,6 +45,11 @@ export interface AuditArchiveEnvelopeVerifier {
   ): Promise<AuditArchiveEnvelopeVerification>;
 }
 
+export interface AuditArchiveDigestStream {
+  readonly digest: Promise<ArrayBuffer>;
+  getWriter(): WritableStreamDefaultWriter<ArrayBuffer | ArrayBufferView>;
+}
+
 // A real R2Bucket structurally satisfies this deliberately narrow binding surface.
 export interface AuditArchiveR2Store {
   get(key: string): Promise<R2ObjectBody | null>;
@@ -57,6 +63,7 @@ export interface AuditArchiveR2Store {
 export interface WriteClaimedAuditArchiveInput {
   bucket: AuditArchiveR2Store;
   database: D1Database;
+  digestStreamFactory?: () => AuditArchiveDigestStream;
   lease: AuditArchiveLease;
   now: () => string;
   verifier: AuditArchiveEnvelopeVerifier;
@@ -105,6 +112,7 @@ interface CanonicalTimestamp {
 
 interface WriterExecutionInput extends WriteClaimedAuditArchiveInput {
   readNow: () => CanonicalTimestamp;
+  synchronizeClock: (lease: AuditArchiveLease) => void;
 }
 
 type R2EvidenceWithoutTime = Omit<AuditArchiveR2Evidence, "readbackAt">;
@@ -206,11 +214,10 @@ function storedSha256(checksums: R2Checksums): {
 }
 
 function exactMetadata(
-  object: R2Object,
+  httpMetadata: R2HTTPMetadata | undefined,
+  customMetadata: Record<string, string> | undefined,
   manifestJson: string,
 ): boolean {
-  const httpMetadata = object.httpMetadata;
-  const customMetadata = object.customMetadata;
   if (httpMetadata === undefined || customMetadata === undefined) return false;
   const allowedHttpKeys = new Set([
     "cacheControl",
@@ -248,6 +255,24 @@ async function cancelReader(
   }
 }
 
+async function cancelStream(
+  stream: ReadableStream<Uint8Array<ArrayBufferLike>>,
+): Promise<void> {
+  try {
+    await stream.cancel();
+  } catch {
+    // Cancellation is best-effort when a body is already locked or disturbed.
+  }
+}
+
+async function cancelObjectBody(object: R2ObjectBody): Promise<void> {
+  try {
+    await cancelStream(object.body);
+  } catch {
+    // Accessing a malformed body is also best-effort on a rejected observation.
+  }
+}
+
 async function abortDigestWriter(
   writer: WritableStreamDefaultWriter<ArrayBuffer | ArrayBufferView>,
 ): Promise<void> {
@@ -258,39 +283,72 @@ async function abortDigestWriter(
   }
 }
 
-function createDigestStream(): DigestStream {
-  // Wrangler emits Crypto.DigestStream, but lib.webworker's global Crypto type
-  // does not merge that runtime member into the `crypto` value.
-  const constructor: unknown = Reflect.get(crypto, "DigestStream");
-  if (typeof constructor !== "function") throw new Error("digest_unavailable");
-  return new (constructor as typeof DigestStream)("SHA-256");
+class AuditArchiveReadbackSetupError extends Error {
+  constructor() {
+    super("audit archive readback setup failed");
+    this.name = "AuditArchiveReadbackSetupError";
+  }
+}
+
+function createDigestStream(
+  factory: (() => AuditArchiveDigestStream) | undefined,
+): AuditArchiveDigestStream {
+  try {
+    if (factory !== undefined) return factory();
+    // Wrangler emits Crypto.DigestStream, but lib.webworker's global Crypto type
+    // does not merge that runtime member into the `crypto` value.
+    const constructor: unknown = Reflect.get(crypto, "DigestStream");
+    if (typeof constructor !== "function") {
+      throw new AuditArchiveReadbackSetupError();
+    }
+    return new (constructor as typeof DigestStream)("SHA-256");
+  } catch {
+    throw new AuditArchiveReadbackSetupError();
+  }
 }
 
 async function boundedRead(
   object: R2ObjectBody,
+  size: number,
+  bodyUsed: boolean,
+  digestStreamFactory: (() => AuditArchiveDigestStream) | undefined,
 ): Promise<
   | { bytes: Uint8Array<ArrayBuffer>; sha256: string }
   | "partial"
   | "transient"
 > {
   if (
-    !Number.isSafeInteger(object.size) ||
-    object.size < 1 ||
-    object.size > AUDIT_ARCHIVE_MAX_OBJECT_BYTES ||
-    object.bodyUsed
+    !Number.isSafeInteger(size) ||
+    size < 1 ||
+    size > AUDIT_ARCHIVE_MAX_OBJECT_BYTES ||
+    bodyUsed
   ) {
+    await cancelObjectBody(object);
     return "partial";
   }
-  const output = new Uint8Array(new ArrayBuffer(object.size));
-  const stream: ReadableStream<Uint8Array<ArrayBufferLike>> = object.body;
-  const reader = stream.getReader();
-  const digestStream = createDigestStream();
-  const digestWriter = digestStream.getWriter();
-  const digestPromise = digestStream.digest;
+  let output: Uint8Array<ArrayBuffer> | undefined;
+  let stream: ReadableStream<Uint8Array<ArrayBufferLike>> | undefined;
+  let reader: ReadableStreamDefaultReader<
+    Uint8Array<ArrayBufferLike>
+  > | undefined;
+  let digestWriter: WritableStreamDefaultWriter<
+    ArrayBuffer | ArrayBufferView
+  > | undefined;
+  let digestPromise: Promise<ArrayBuffer> | undefined;
   let offset = 0;
   let completed = false;
   let digestClosed = false;
   try {
+    const digestStream = createDigestStream(digestStreamFactory);
+    try {
+      digestWriter = digestStream.getWriter();
+      digestPromise = digestStream.digest;
+      output = new Uint8Array(new ArrayBuffer(size));
+    } catch {
+      throw new AuditArchiveReadbackSetupError();
+    }
+    stream = object.body;
+    reader = stream.getReader();
     while (true) {
       const result = await reader.read();
       if (result.done) {
@@ -299,58 +357,78 @@ async function boundedRead(
       }
       const chunk = result.value;
       if (!(chunk instanceof Uint8Array) || chunk.byteLength === 0) {
-        await cancelReader(reader);
-        await abortDigestWriter(digestWriter);
         return "transient";
       }
       if (
-        offset + chunk.byteLength > object.size ||
+        offset + chunk.byteLength > size ||
         offset + chunk.byteLength > AUDIT_ARCHIVE_MAX_OBJECT_BYTES
       ) {
-        await cancelReader(reader);
-        await abortDigestWriter(digestWriter);
         return "partial";
       }
-      await digestWriter.write(chunk);
-      output.set(chunk, offset);
+      try {
+        await digestWriter.write(chunk);
+        output.set(chunk, offset);
+      } catch {
+        throw new AuditArchiveReadbackSetupError();
+      }
       offset += chunk.byteLength;
     }
-    if (offset !== object.size) {
-      await abortDigestWriter(digestWriter);
+    if (offset !== size) {
       return "transient";
     }
-    await digestWriter.close();
+    try {
+      await digestWriter.close();
+    } catch {
+      throw new AuditArchiveReadbackSetupError();
+    }
     digestClosed = true;
     const completeBody = output.slice(0, offset);
     let digest: Uint8Array<ArrayBuffer> | undefined;
     try {
       digest = new Uint8Array(await digestPromise);
+      if (digest.byteLength !== 32) {
+        throw new AuditArchiveReadbackSetupError();
+      }
       return {
         bytes: completeBody,
         sha256: bytesToHex(digest),
       };
     } catch {
       completeBody.fill(0);
-      return "transient";
+      throw new AuditArchiveReadbackSetupError();
     } finally {
       digest?.fill(0);
     }
-  } catch {
-    await cancelReader(reader);
-    await abortDigestWriter(digestWriter);
+  } catch (error) {
+    if (error instanceof AuditArchiveReadbackSetupError) {
+      if (reader === undefined && stream === undefined) {
+        await cancelObjectBody(object);
+      }
+      throw error;
+    }
     return "transient";
   } finally {
-    output.fill(0);
-    if (!completed) await cancelReader(reader);
-    if (!digestClosed) {
+    output?.fill(0);
+    if (reader !== undefined) {
+      if (!completed) await cancelReader(reader);
+      try {
+        reader.releaseLock();
+      } catch {
+        // The reader is already unusable after the bounded observation.
+      }
+    } else if (stream !== undefined) {
+      await cancelStream(stream);
+    }
+    if (!digestClosed && digestWriter !== undefined) {
       await abortDigestWriter(digestWriter);
+    }
+    if (!digestClosed && digestPromise !== undefined) {
       try {
         await digestPromise;
       } catch {
         // The digest promise rejects when its writer is deliberately aborted.
       }
     }
-    reader.releaseLock();
   }
 }
 
@@ -358,35 +436,58 @@ async function observeR2Object(
   object: R2ObjectBody,
   manifest: AuditArchiveManifestV1,
   manifestJson: string,
+  digestStreamFactory: (() => AuditArchiveDigestStream) | undefined,
 ): Promise<R2Observation> {
-  const etag = safeR2Text(object.etag);
-  const version = safeR2Text(object.version);
+  let etag: string | null;
+  let version: string | null;
+  let size: number;
+  let bodyUsed: boolean;
+  let checksum: ReturnType<typeof storedSha256>;
+  let metadataMatches: boolean;
+  try {
+    etag = safeR2Text(object.etag);
+    version = safeR2Text(object.version);
+    size = object.size;
+    bodyUsed = object.bodyUsed;
+    checksum = storedSha256(object.checksums);
+    const key = object.key;
+    const httpMetadata = object.httpMetadata;
+    const customMetadata = object.customMetadata;
+    metadataMatches =
+      key === manifest.objectKey &&
+      size === manifest.objectBytes &&
+      exactMetadata(httpMetadata, customMetadata, manifestJson);
+  } catch {
+    await cancelObjectBody(object);
+    return { kind: "transient" };
+  }
   if (
     etag === null ||
     version === null ||
-    !Number.isSafeInteger(object.size) ||
-    object.size < 0
+    !Number.isSafeInteger(size) ||
+    size < 0
   ) {
+    await cancelObjectBody(object);
     return { kind: "transient" };
   }
-  const checksum = storedSha256(object.checksums);
   const base = {
     etag,
-    observedBytes: object.size,
+    observedBytes: size,
     storedSha256: checksum.value,
     version,
   };
   if (
-    object.size < 1 ||
-    object.size > AUDIT_ARCHIVE_MAX_OBJECT_BYTES ||
+    size < 1 ||
+    size > AUDIT_ARCHIVE_MAX_OBJECT_BYTES ||
     !checksum.valid
   ) {
+    await cancelObjectBody(object);
     return {
       kind: "partial",
       value: { evidence: { ...base, readbackSha256: null } },
     };
   }
-  const read = await boundedRead(object);
+  const read = await boundedRead(object, size, bodyUsed, digestStreamFactory);
   if (read === "transient") return { kind: "transient" };
   if (read === "partial") {
     return {
@@ -394,17 +495,19 @@ async function observeR2Object(
       value: { evidence: { ...base, readbackSha256: null } },
     };
   }
-  return {
-    kind: "full",
-    value: {
-      body: read.bytes,
-      evidence: { ...base, readbackSha256: read.sha256 },
-      metadataMatches:
-        object.key === manifest.objectKey &&
-        object.size === manifest.objectBytes &&
-        exactMetadata(object, manifestJson),
-    },
-  };
+  try {
+    return {
+      kind: "full",
+      value: {
+        body: read.bytes,
+        evidence: { ...base, readbackSha256: read.sha256 },
+        metadataMatches,
+      },
+    };
+  } catch {
+    read.bytes.fill(0);
+    return { kind: "transient" };
+  }
 }
 
 async function verifyEnvelope(
@@ -449,16 +552,40 @@ function resultForMutation(
     : { ...result, mutation };
 }
 
+async function retryAmbiguousMutation<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch {
+    return await operation();
+  }
+}
+
+function leaseLost(
+  putOutcome: AuditArchiveR2PutOutcome | null,
+): AuditArchiveR2WriterResult {
+  return {
+    errorCode: null,
+    mutation: null,
+    outcome: "lease_lost",
+    putOutcome,
+  };
+}
+
 async function expireLease(
   input: WriterExecutionInput,
   completedAt: CanonicalTimestamp,
   putOutcome: AuditArchiveR2PutOutcome | null,
 ): Promise<AuditArchiveR2WriterResult> {
-  const mutation = await expireAuditArchiveLease(input.database, {
+  const intent = {
     completedAt: completedAt.iso,
     lease: input.lease,
     nextAttemptAt: retryAt(input.lease, completedAt),
-  });
+  };
+  const mutation = await retryAmbiguousMutation(() =>
+    expireAuditArchiveLease(input.database, intent)
+  );
   return resultForMutation(mutation, {
     errorCode: "lease_expired",
     outcome: input.lease.attemptNumber >= 5 ? "dead" : "lease_expired",
@@ -470,6 +597,7 @@ async function ensureLeaseForIo(
   input: WriterExecutionInput,
   asOf: CanonicalTimestamp,
   putOutcome: AuditArchiveR2PutOutcome | null,
+  adoptionsRemaining = 1,
 ): Promise<LeaseReadiness> {
   const expiresAt = canonicalTimestamp(input.lease.leaseExpiresAt);
   if (asOf.time >= expiresAt.time) {
@@ -484,23 +612,56 @@ async function ensureLeaseForIo(
   if (asOf.time <= canonicalTimestamp(input.lease.updatedAt).time) {
     return invalidInput();
   }
-  const renewed = await renewAuditArchiveLease(input.database, {
+  const intent = {
     lease: input.lease,
     leaseExpiresAt: new Date(asOf.time + MAX_LEASE_MS).toISOString(),
     renewedAt: asOf.iso,
-  });
-  if (renewed.lease === null || renewed.status === "conflict") {
+  };
+  let renewed: Awaited<ReturnType<typeof renewAuditArchiveLease>> | undefined;
+  let renewalFailed = false;
+  try {
+    renewed = await retryAmbiguousMutation(() =>
+      renewAuditArchiveLease(input.database, intent)
+    );
+  } catch {
+    renewalFailed = true;
+  }
+  if (renewed?.lease !== null && renewed?.lease !== undefined &&
+      renewed.status !== "conflict") {
+    return { input: { ...input, lease: renewed.lease }, kind: "ready" };
+  }
+  let persisted: Awaited<ReturnType<typeof adoptAuditArchiveLease>>;
+  try {
+    persisted = await adoptAuditArchiveLease(input.database, {
+      asOf: asOf.iso,
+      lease: input.lease,
+    });
+  } catch {
     return {
       kind: "terminal",
-      result: {
-        errorCode: null,
-        mutation: null,
-        outcome: "lease_lost",
-        putOutcome,
-      },
+      result: await failTransient(input, "internal_error", putOutcome),
     };
   }
-  return { input: { ...input, lease: renewed.lease }, kind: "ready" };
+  if (persisted.status === "adopted" && persisted.lease !== null) {
+    if (adoptionsRemaining < 1) {
+      return { kind: "terminal", result: leaseLost(putOutcome) };
+    }
+    input.synchronizeClock(persisted.lease);
+    const adoptedInput = { ...input, lease: persisted.lease };
+    return await ensureLeaseForIo(
+      adoptedInput,
+      adoptedInput.readNow(),
+      putOutcome,
+      adoptionsRemaining - 1,
+    );
+  }
+  if (renewalFailed) {
+    return {
+      kind: "terminal",
+      result: await failTransient(input, "internal_error", putOutcome),
+    };
+  }
+  return { kind: "terminal", result: leaseLost(putOutcome) };
 }
 
 async function completedTimestamp(
@@ -525,13 +686,16 @@ async function failTransient(
 ): Promise<AuditArchiveR2WriterResult> {
   const completion = await completedTimestamp(input, putOutcome);
   if (!("iso" in completion)) return completion;
-  const mutation = await failAuditArchiveLease(input.database, {
+  const intent = {
     completedAt: completion.iso,
     errorCode,
     evidence: null,
     lease: input.lease,
     nextAttemptAt: retryAt(input.lease, completion),
-  });
+  };
+  const mutation = await retryAmbiguousMutation(() =>
+    failAuditArchiveLease(input.database, intent)
+  );
   return resultForMutation(mutation, {
     errorCode,
     outcome: input.lease.attemptNumber >= 5 ? "dead" : "retry",
@@ -553,29 +717,41 @@ async function failIntegrity(
   const timedEvidence = evidence === null
     ? null
     : { ...evidence, readbackAt: completion.iso };
-  const mutation = errorCode === "crypto_integrity"
-    ? await failAuditArchiveLease(input.database, {
+  let mutation: AuditArchiveTerminalMutationResult;
+  if (errorCode === "crypto_integrity") {
+    const intent = {
       completedAt: completion.iso,
       errorCode,
       evidence: timedEvidence as AuditArchiveR2Evidence | null,
       lease: input.lease,
       nextAttemptAt: null,
-    })
-    : errorCode === "r2_object_conflict"
-      ? await failAuditArchiveLease(input.database, {
-        completedAt: completion.iso,
-        errorCode,
-        evidence: timedEvidence as AuditArchiveR2ConflictEvidence,
-        lease: input.lease,
-        nextAttemptAt: null,
-      })
-      : await failAuditArchiveLease(input.database, {
-        completedAt: completion.iso,
-        errorCode,
-        evidence: timedEvidence as AuditArchiveR2Evidence,
-        lease: input.lease,
-        nextAttemptAt: null,
-      });
+    };
+    mutation = await retryAmbiguousMutation(() =>
+      failAuditArchiveLease(input.database, intent)
+    );
+  } else if (errorCode === "r2_object_conflict") {
+    const intent = {
+      completedAt: completion.iso,
+      errorCode,
+      evidence: timedEvidence as AuditArchiveR2ConflictEvidence,
+      lease: input.lease,
+      nextAttemptAt: null,
+    };
+    mutation = await retryAmbiguousMutation(() =>
+      failAuditArchiveLease(input.database, intent)
+    );
+  } else {
+    const intent = {
+      completedAt: completion.iso,
+      errorCode,
+      evidence: timedEvidence as AuditArchiveR2Evidence,
+      lease: input.lease,
+      nextAttemptAt: null,
+    };
+    mutation = await retryAmbiguousMutation(() =>
+      failAuditArchiveLease(input.database, intent)
+    );
+  }
   return resultForMutation(mutation, {
     errorCode,
     outcome: "corrupt",
@@ -590,11 +766,14 @@ async function finalize(
 ): Promise<AuditArchiveR2WriterResult> {
   const completion = await completedTimestamp(input, putOutcome);
   if (!("iso" in completion)) return completion;
-  const mutation = await finalizeAuditArchiveLease(input.database, {
+  const intent = {
     completedAt: completion.iso,
     evidence: { ...evidence, readbackAt: completion.iso },
     lease: input.lease,
-  });
+  };
+  const mutation = await retryAmbiguousMutation(() =>
+    finalizeAuditArchiveLease(input.database, intent)
+  );
   return resultForMutation(mutation, {
     errorCode: null,
     outcome: "archived",
@@ -626,6 +805,8 @@ export async function writeClaimedAuditArchive(
     typeof input.bucket?.put !== "function" ||
     typeof input.database !== "object" ||
     input.database === null ||
+    (input.digestStreamFactory !== undefined &&
+      typeof input.digestStreamFactory !== "function") ||
     typeof input.lease !== "object" ||
     input.lease === null ||
     typeof input.verifier?.verify !== "function"
@@ -635,6 +816,10 @@ export async function writeClaimedAuditArchive(
   const leaseUpdatedAt = canonicalTimestamp(input.lease.updatedAt).time;
   let lastLogical = leaseUpdatedAt;
   let lastRaw = leaseUpdatedAt;
+  const synchronizeClock = (lease: AuditArchiveLease): void => {
+    const persisted = canonicalTimestamp(lease.updatedAt).time;
+    if (persisted > lastLogical) lastLogical = persisted;
+  };
   const readNow = (): CanonicalTimestamp => {
     const observed = canonicalNow(input.now);
     const raw = observed.time;
@@ -652,10 +837,32 @@ export async function writeClaimedAuditArchive(
     lastLogical = time;
     return { iso: date.toISOString(), time };
   };
-  let activeInput: WriterExecutionInput = { ...input, readNow };
+  let activeInput: WriterExecutionInput = {
+    ...input,
+    readNow,
+    synchronizeClock,
+  };
+  let initialAsOf = activeInput.readNow();
+  let persisted: Awaited<ReturnType<typeof adoptAuditArchiveLease>>;
+  try {
+    persisted = await adoptAuditArchiveLease(activeInput.database, {
+      asOf: initialAsOf.iso,
+      lease: activeInput.lease,
+    });
+  } catch {
+    return await failTransient(activeInput, "internal_error", null);
+  }
+  if (persisted.lease === null || persisted.status === "conflict") {
+    return leaseLost(null);
+  }
+  if (persisted.status === "adopted") {
+    activeInput.synchronizeClock(persisted.lease);
+    initialAsOf = activeInput.readNow();
+  }
+  activeInput = { ...activeInput, lease: persisted.lease };
   const initialLease = await ensureLeaseForIo(
     activeInput,
-    activeInput.readNow(),
+    initialAsOf,
     null,
   );
   if (initialLease.kind === "terminal") return initialLease.result;
@@ -758,9 +965,16 @@ export async function writeClaimedAuditArchive(
         object,
         claimed.manifest,
         manifestJson,
+        activeInput.digestStreamFactory,
       );
-    } catch {
-      return await failTransient(activeInput, "r2_transient", putOutcome);
+    } catch (error) {
+      return await failTransient(
+        activeInput,
+        error instanceof AuditArchiveReadbackSetupError
+          ? "internal_error"
+          : "r2_transient",
+        putOutcome,
+      );
     }
     if (observation.kind === "transient") {
       return await failTransient(activeInput, "r2_transient", putOutcome);

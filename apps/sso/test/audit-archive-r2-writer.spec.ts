@@ -5,6 +5,7 @@ import {
   type AuditArchiveEnvelopeVerification,
   type AuditArchiveEnvelopeVerificationInput,
   type AuditArchiveEnvelopeVerifier,
+  type AuditArchiveDigestStream,
   type AuditArchiveR2Store,
   writeClaimedAuditArchive,
 } from "../worker/audit-archive-r2-writer";
@@ -13,6 +14,7 @@ import {
   failAuditArchiveLease,
   initializeOrVerifyAuditArchiveKey,
   queueAuditArchiveBatch,
+  renewAuditArchiveLease,
   selectAuditArchiveSource,
   type AuditArchiveLease,
 } from "../worker/audit-archive-repository";
@@ -45,7 +47,17 @@ interface StoredObject {
   reportedSize: number;
   sha256: ArrayBuffer | undefined;
   version: string;
+  bodyUsed?: boolean;
 }
+
+type ObservationFault =
+  | "body_used_getter"
+  | "checksums_getter"
+  | "custom_metadata_keys"
+  | "http_metadata_keys"
+  | "key_getter"
+  | "size_getter"
+  | "size_second_access";
 
 async function dropArchiveLedger(): Promise<void> {
   const triggers = await env.PG72_ID_DB.prepare(
@@ -81,6 +93,7 @@ async function resetArchiveLedger(): Promise<void> {
   await dropArchiveLedger();
   await applyArchiveMigration("0021_audit_archive.sql");
   await applyArchiveMigration("0023_audit_archive_r2_evidence.sql");
+  await applyArchiveMigration("0024_audit_archive_r2_evidence_guard.sql");
 }
 
 function at(milliseconds: number): string {
@@ -219,6 +232,7 @@ function r2ObjectBody(
   onBodyAccess: () => void,
   onChunk: () => void,
   onCancel: () => void,
+  onStream: (stream: ReadableStream<Uint8Array<ArrayBuffer>>) => void,
 ): R2ObjectBody {
   const bodyBytes = stored.bytes.slice();
   const firstChunkBytes = Math.max(1, Math.floor(bodyBytes.byteLength / 2));
@@ -229,30 +243,34 @@ function r2ObjectBody(
     ...object,
     get body() {
       onBodyAccess();
-      body ??= new ReadableStream<Uint8Array<ArrayBuffer>>({
-        pull(controller) {
-          if (offset >= bodyBytes.byteLength) {
-            controller.close();
-            return;
-          }
-          const end = Math.min(
-            bodyBytes.byteLength,
-            offset === 0 ? firstChunkBytes : bodyBytes.byteLength,
-          );
-          const chunk = bodyBytes.slice(offset, end);
-          bodyBytes.fill(0, offset, end);
-          offset = end;
-          onChunk();
-          controller.enqueue(chunk);
+      body ??= new ReadableStream<Uint8Array<ArrayBuffer>>(
+        {
+          pull(controller) {
+            if (offset >= bodyBytes.byteLength) {
+              controller.close();
+              return;
+            }
+            const end = Math.min(
+              bodyBytes.byteLength,
+              offset === 0 ? firstChunkBytes : bodyBytes.byteLength,
+            );
+            const chunk = bodyBytes.slice(offset, end);
+            bodyBytes.fill(0, offset, end);
+            offset = end;
+            onChunk();
+            controller.enqueue(chunk);
+          },
+          cancel() {
+            onCancel();
+            bodyBytes.fill(0);
+          },
         },
-        cancel() {
-          onCancel();
-          bodyBytes.fill(0);
-        },
-      });
+        { highWaterMark: 0 },
+      );
+      onStream(body);
       return body;
     },
-    bodyUsed: false,
+    bodyUsed: stored.bodyUsed ?? false,
     arrayBuffer: async () => arrayBuffer(stored.bytes),
     blob: async () => new Blob([stored.bytes]),
     bytes: async () => stored.bytes.slice(),
@@ -271,8 +289,11 @@ class FakeArchiveStore implements AuditArchiveR2Store {
   lastPutChecksum: Uint8Array<ArrayBufferLike> | null = null;
   lastPutEnvelope: Uint8Array<ArrayBuffer> | null = null;
   lastPutOptions: (R2PutOptions & { onlyIf: Headers }) | null = null;
+  lastBody: ReadableStream<Uint8Array<ArrayBuffer>> | null = null;
   mutateBeforeGet: ((object: StoredObject) => void) | null = null;
   object: StoredObject | null = null;
+  observationAccesses = 0;
+  observationFault: ObservationFault | null = null;
   putCalls = 0;
   putMode: "create" | "precondition" | "response_loss" = "create";
 
@@ -340,7 +361,7 @@ class FakeArchiveStore implements AuditArchiveR2Store {
     }
     this.mutateBeforeGet?.(this.object);
     this.mutateBeforeGet = null;
-    return r2ObjectBody(
+    const object = r2ObjectBody(
       this.object,
       () => {
         this.bodyAccesses += 1;
@@ -351,7 +372,58 @@ class FakeArchiveStore implements AuditArchiveR2Store {
       () => {
         this.cancellations += 1;
       },
+      (body) => {
+        this.lastBody = body;
+      },
     );
+    const fault = this.observationFault;
+    if (fault === null) return object;
+    return new Proxy(object, {
+      get: (target, property, receiver) => {
+        if (property === "size") {
+          this.observationAccesses += 1;
+          if (
+            fault === "size_getter" ||
+            (fault === "size_second_access" && this.observationAccesses > 1)
+          ) {
+            throw new Error("sensitive-size-getter-detail");
+          }
+        }
+        if (property === "bodyUsed" && fault === "body_used_getter") {
+          throw new Error("sensitive-body-used-getter-detail");
+        }
+        if (property === "checksums" && fault === "checksums_getter") {
+          throw new Error("sensitive-checksums-getter-detail");
+        }
+        if (property === "key" && fault === "key_getter") {
+          throw new Error("sensitive-key-getter-detail");
+        }
+        const value = Reflect.get(target, property, receiver);
+        if (
+          property === "httpMetadata" &&
+          fault === "http_metadata_keys" &&
+          value !== undefined
+        ) {
+          return new Proxy(value as R2HTTPMetadata, {
+            ownKeys() {
+              throw new Error("sensitive-http-metadata-keys-detail");
+            },
+          });
+        }
+        if (
+          property === "customMetadata" &&
+          fault === "custom_metadata_keys" &&
+          value !== undefined
+        ) {
+          return new Proxy(value as Record<string, string>, {
+            ownKeys() {
+              throw new Error("sensitive-custom-metadata-keys-detail");
+            },
+          });
+        }
+        return value;
+      },
+    });
   }
 }
 
@@ -466,6 +538,104 @@ function classifyNextTerminalBatchAsDuplicate(database: D1Database): D1Database 
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
+}
+
+function commitThenRejectNextBatch(
+  database: D1Database,
+  statementCount: number,
+): D1Database {
+  let intercepted = false;
+  return new Proxy(database, {
+    get(target, property) {
+      if (property === "batch") {
+        return async (statements: D1PreparedStatement[]) => {
+          const results = await target.batch(statements);
+          if (!intercepted && statements.length === statementCount) {
+            intercepted = true;
+            throw new Error("sensitive-committed-response-loss-detail");
+          }
+          return results;
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+type DigestFault =
+  | "close"
+  | "constructor"
+  | "digest_getter"
+  | "digest_length"
+  | "digest_reject"
+  | "get_writer"
+  | "write";
+
+interface DigestFaultState {
+  aborts: number;
+  closes: number;
+  writes: number;
+}
+
+function faultDigestStreamFactory(
+  fault: DigestFault,
+  state: DigestFaultState,
+): () => AuditArchiveDigestStream {
+  return () => {
+    if (fault === "constructor") {
+      throw new Error("sensitive-digest-constructor-detail");
+    }
+    let resolveDigest: (value: ArrayBuffer) => void = () => undefined;
+    let rejectDigest: (reason: Error) => void = () => undefined;
+    const digest = new Promise<ArrayBuffer>((resolve, reject) => {
+      resolveDigest = resolve;
+      rejectDigest = reject;
+    });
+    const writable = new WritableStream<ArrayBuffer | ArrayBufferView>({
+      abort() {
+        state.aborts += 1;
+        if (fault === "digest_getter") {
+          resolveDigest(new ArrayBuffer(32));
+        } else {
+          rejectDigest(new Error("digest aborted"));
+        }
+      },
+      close() {
+        state.closes += 1;
+        if (fault === "close") {
+          rejectDigest(new Error("sensitive-digest-close-detail"));
+          throw new Error("sensitive-digest-close-detail");
+        }
+        if (fault === "digest_reject") {
+          rejectDigest(new Error("sensitive-digest-result-detail"));
+        } else {
+          resolveDigest(new ArrayBuffer(fault === "digest_length" ? 31 : 32));
+        }
+      },
+      write() {
+        state.writes += 1;
+        if (fault === "write") {
+          rejectDigest(new Error("sensitive-digest-write-detail"));
+          throw new Error("sensitive-digest-write-detail");
+        }
+      },
+    });
+    return {
+      get digest() {
+        if (fault === "digest_getter") {
+          throw new Error("sensitive-digest-getter-detail");
+        }
+        return digest;
+      },
+      getWriter() {
+        if (fault === "get_writer") {
+          throw new Error("sensitive-digest-writer-detail");
+        }
+        return writable.getWriter();
+      },
+    } satisfies AuditArchiveDigestStream;
+  };
 }
 
 async function advanceToFifthAttempt(fixture: WriterFixture): Promise<AuditArchiveLease> {
@@ -633,6 +803,25 @@ describe.sequential("unwired encrypted R2 archive writer", () => {
     });
   });
 
+  it("recovers an exact finalize that commits before its D1 response is lost", async () => {
+    const fixture = await writerFixture();
+    const bucket = new FakeArchiveStore();
+    const result = await writeClaimedAuditArchive({
+      bucket,
+      database: commitThenRejectNextBatch(env.PG72_ID_DB, 5),
+      lease: fixture.lease,
+      now: clock(),
+      verifier: new TestVerifier(),
+    });
+    expect(result).toEqual({
+      errorCode: null,
+      mutation: "duplicate",
+      outcome: "archived",
+      putOutcome: "created",
+    });
+    expect((await batchState(fixture.batchKey))?.status).toBe("archived");
+  });
+
   it("accepts optional R2 HTTP metadata fields when they round-trip as undefined", async () => {
     const fixture = await writerFixture();
     const bucket = new FakeArchiveStore();
@@ -754,13 +943,15 @@ describe.sequential("unwired encrypted R2 archive writer", () => {
       putOutcome: "created",
     });
     const attempt = await env.PG72_ID_DB.prepare(
-      `SELECT error_code, r2_stored_sha256, r2_readback_sha256
+      `SELECT error_code, r2_observed_bytes, r2_stored_sha256,
+              r2_readback_sha256
          FROM audit_archive_attempt WHERE id = ?`,
     )
       .bind(fixture.lease.leaseId)
       .first();
     expect(attempt).toMatchObject({
       error_code: "r2_readback_mismatch",
+      r2_observed_bytes: fixture.manifest.objectBytes,
       r2_stored_sha256: fixture.manifest.objectSha256,
     });
     expect(attempt?.r2_readback_sha256).not.toBe(fixture.manifest.objectSha256);
@@ -835,7 +1026,10 @@ describe.sequential("unwired encrypted R2 archive writer", () => {
       errorCode: "r2_object_conflict",
       outcome: "corrupt",
     });
-    expect(bucket.bodyAccesses).toBe(0);
+    expect(bucket.bodyAccesses).toBe(1);
+    expect(bucket.chunksProvided).toBe(0);
+    expect(bucket.cancellations).toBe(1);
+    expect(bucket.lastBody?.locked).toBe(false);
     const attempt = await env.PG72_ID_DB.prepare(
       `SELECT r2_observed_bytes, r2_readback_sha256
          FROM audit_archive_attempt WHERE id = ?`,
@@ -848,7 +1042,7 @@ describe.sequential("unwired encrypted R2 archive writer", () => {
     });
   });
 
-  it("records zero-byte partial evidence without opening the body", async () => {
+  it("records zero-byte partial evidence without consuming the body", async () => {
     const fixture = await writerFixture();
     const bucket = new FakeArchiveStore();
     bucket.seedExact(fixture);
@@ -867,7 +1061,10 @@ describe.sequential("unwired encrypted R2 archive writer", () => {
       outcome: "corrupt",
       putOutcome: "precondition_failed",
     });
-    expect(bucket.bodyAccesses).toBe(0);
+    expect(bucket.bodyAccesses).toBe(1);
+    expect(bucket.chunksProvided).toBe(0);
+    expect(bucket.cancellations).toBe(1);
+    expect(bucket.lastBody?.locked).toBe(false);
     expect(
       await env.PG72_ID_DB.prepare(
         `SELECT r2_observed_bytes, r2_readback_sha256
@@ -903,6 +1100,7 @@ describe.sequential("unwired encrypted R2 archive writer", () => {
     expect(bucket.bodyAccesses).toBe(1);
     expect(bucket.chunksProvided).toBeGreaterThanOrEqual(1);
     expect(bucket.cancellations).toBe(1);
+    expect(bucket.lastBody?.locked).toBe(false);
     expect(
       await env.PG72_ID_DB.prepare(
         `SELECT r2_observed_bytes, r2_readback_sha256
@@ -914,6 +1112,116 @@ describe.sequential("unwired encrypted R2 archive writer", () => {
       r2_observed_bytes: 1,
       r2_readback_sha256: null,
     });
+  });
+
+  it.each([
+    {
+      errorCode: "r2_transient",
+      kind: "unsafe etag",
+      mutate: (object: StoredObject) => {
+        object.etag = "unsafe\netag";
+      },
+      outcome: "retry",
+    },
+    {
+      errorCode: "r2_transient",
+      kind: "unsafe version",
+      mutate: (object: StoredObject) => {
+        object.version = "unsafe\rversion";
+      },
+      outcome: "retry",
+    },
+    {
+      errorCode: "r2_object_conflict",
+      kind: "invalid checksum shape",
+      mutate: (object: StoredObject) => {
+        object.sha256 = new ArrayBuffer(1);
+      },
+      outcome: "corrupt",
+    },
+    {
+      errorCode: "r2_object_conflict",
+      kind: "already-used body",
+      mutate: (object: StoredObject) => {
+        object.bodyUsed = true;
+      },
+      outcome: "corrupt",
+    },
+  ] as const)(
+    "cancels an early $kind observation without pulling a chunk",
+    async ({ errorCode, mutate, outcome }) => {
+      const fixture = await writerFixture();
+      const bucket = new FakeArchiveStore();
+      bucket.seedExact(fixture);
+      bucket.putMode = "precondition";
+      if (bucket.object === null) throw new Error("missing seeded object");
+      mutate(bucket.object);
+      const result = await writeClaimedAuditArchive({
+        bucket,
+        database: env.PG72_ID_DB,
+        lease: fixture.lease,
+        now: clock(),
+        verifier: new TestVerifier(),
+      });
+      expect(result).toMatchObject({ errorCode, outcome });
+      expect(bucket.bodyAccesses).toBe(1);
+      expect(bucket.chunksProvided).toBe(0);
+      expect(bucket.cancellations).toBe(1);
+      expect(bucket.lastBody?.locked).toBe(false);
+    },
+  );
+
+  it.each([
+    "body_used_getter",
+    "checksums_getter",
+    "custom_metadata_keys",
+    "http_metadata_keys",
+    "key_getter",
+    "size_getter",
+  ] as const)(
+    "cancels a throwing R2 $fault observation before reading a chunk",
+    async (observationFault) => {
+      const fixture = await writerFixture();
+      const bucket = new FakeArchiveStore();
+      bucket.observationFault = observationFault;
+      const result = await writeClaimedAuditArchive({
+        bucket,
+        database: env.PG72_ID_DB,
+        lease: fixture.lease,
+        now: clock(),
+        verifier: new TestVerifier(),
+      });
+      expect(result).toMatchObject({
+        errorCode: "r2_transient",
+        outcome: "retry",
+        putOutcome: "created",
+      });
+      expect(JSON.stringify(result)).not.toContain("sensitive-");
+      expect(bucket.bodyAccesses).toBe(1);
+      expect(bucket.chunksProvided).toBe(0);
+      expect(bucket.cancellations).toBe(1);
+      expect(bucket.lastBody?.locked).toBe(false);
+    },
+  );
+
+  it("snapshots the reported R2 size exactly once before consuming the body", async () => {
+    const fixture = await writerFixture();
+    const bucket = new FakeArchiveStore();
+    bucket.observationFault = "size_second_access";
+    const result = await writeClaimedAuditArchive({
+      bucket,
+      database: env.PG72_ID_DB,
+      lease: fixture.lease,
+      now: clock(),
+      verifier: new TestVerifier(),
+    });
+    expect(result).toMatchObject({
+      errorCode: null,
+      outcome: "archived",
+      putOutcome: "created",
+    });
+    expect(bucket.observationAccesses).toBe(1);
+    expect(bucket.chunksProvided).toBeGreaterThan(0);
   });
 
   it("terminalizes pre-R2 cryptographic corruption without false R2 evidence", async () => {
@@ -997,6 +1305,79 @@ describe.sequential("unwired encrypted R2 archive writer", () => {
     expect(bucket.getCalls).toBe(0);
   });
 
+  it.each([
+    { fault: "constructor", pullsBody: false },
+    { fault: "get_writer", pullsBody: false },
+    { fault: "digest_getter", pullsBody: false },
+    { fault: "digest_length", pullsBody: true },
+    { fault: "write", pullsBody: true },
+    { fault: "close", pullsBody: true },
+    { fault: "digest_reject", pullsBody: true },
+  ] as const)(
+    "classifies a local DigestStream $fault failure as internal_error",
+    async ({ fault, pullsBody }) => {
+      const fixture = await writerFixture();
+      const bucket = new FakeArchiveStore();
+      const state: DigestFaultState = { aborts: 0, closes: 0, writes: 0 };
+      const result = await writeClaimedAuditArchive({
+        bucket,
+        database: env.PG72_ID_DB,
+        digestStreamFactory: faultDigestStreamFactory(fault, state),
+        lease: fixture.lease,
+        now: clock(),
+        verifier: new TestVerifier(),
+      });
+      expect(result).toMatchObject({
+        errorCode: "internal_error",
+        outcome: "retry",
+        putOutcome: "created",
+      });
+      expect(JSON.stringify(result)).not.toContain("sensitive-");
+      expect(bucket.bodyAccesses).toBe(1);
+      expect(bucket.cancellations).toBe(pullsBody && fault !== "write" ? 0 : 1);
+      if (!pullsBody) expect(bucket.chunksProvided).toBe(0);
+      expect(bucket.lastBody?.locked).toBe(false);
+      if (fault === "digest_getter") expect(state.aborts).toBe(1);
+    },
+  );
+
+  it("recovers a transient terminal mutation that commits before response loss", async () => {
+    const fixture = await writerFixture();
+    const bucket = new FakeArchiveStore();
+    bucket.putMode = "response_loss";
+    bucket.getMode = "throw";
+    const result = await writeClaimedAuditArchive({
+      bucket,
+      database: commitThenRejectNextBatch(env.PG72_ID_DB, 5),
+      lease: fixture.lease,
+      now: clock(),
+      verifier: new TestVerifier(),
+    });
+    expect(result).toEqual({
+      errorCode: "r2_transient",
+      mutation: "duplicate",
+      outcome: "retry",
+      putOutcome: "response_uncertain",
+    });
+  });
+
+  it("recovers an integrity terminal mutation that commits before response loss", async () => {
+    const fixture = await writerFixture();
+    const result = await writeClaimedAuditArchive({
+      bucket: new FakeArchiveStore(),
+      database: commitThenRejectNextBatch(env.PG72_ID_DB, 5),
+      lease: fixture.lease,
+      now: clock(),
+      verifier: new TestVerifier("crypto_integrity"),
+    });
+    expect(result).toEqual({
+      errorCode: "crypto_integrity",
+      mutation: "duplicate",
+      outcome: "corrupt",
+      putOutcome: null,
+    });
+  });
+
   it("maps an unavailable KEK provider to a retry without touching R2", async () => {
     const fixture = await writerFixture();
     const bucket = new FakeArchiveStore();
@@ -1064,6 +1445,55 @@ describe.sequential("unwired encrypted R2 archive writer", () => {
       database: env.PG72_ID_DB,
       lease: fixture.lease,
       now: clockSequence(at(12_000), at(13_000), at(80_000), at(90_000)),
+      verifier: new TestVerifier(),
+    });
+    expect(result).toMatchObject({
+      errorCode: null,
+      outcome: "archived",
+      putOutcome: "created",
+    });
+    expect((await batchState(fixture.batchKey))?.status).toBe("archived");
+  });
+
+  it("retries one immutable renewal intent after commit-then-reject", async () => {
+    const fixture = await writerFixture(1, at(70_000));
+    const bucket = new FakeArchiveStore();
+    const result = await writeClaimedAuditArchive({
+      bucket,
+      database: commitThenRejectNextBatch(env.PG72_ID_DB, 3),
+      lease: fixture.lease,
+      now: clockSequence(at(12_000), at(13_000), at(80_000), at(90_000)),
+      verifier: new TestVerifier(),
+    });
+    expect(result).toMatchObject({
+      errorCode: null,
+      outcome: "archived",
+      putOutcome: "created",
+    });
+    expect(bucket.putCalls).toBe(1);
+    expect(bucket.getCalls).toBe(1);
+  });
+
+  it("adopts a live committed renewal from a later invocation", async () => {
+    const fixture = await writerFixture(1, at(70_000));
+    const intent = {
+      lease: fixture.lease,
+      leaseExpiresAt: at(312_000),
+      renewedAt: at(12_000),
+    };
+    await expect(
+      renewAuditArchiveLease(
+        commitThenRejectNextBatch(env.PG72_ID_DB, 3),
+        intent,
+      ),
+    ).rejects.toMatchObject({ code: "write_failed" });
+
+    const bucket = new FakeArchiveStore();
+    const result = await writeClaimedAuditArchive({
+      bucket,
+      database: env.PG72_ID_DB,
+      lease: fixture.lease,
+      now: clock(at(13_000), at(14_000)),
       verifier: new TestVerifier(),
     });
     expect(result).toMatchObject({
@@ -1155,6 +1585,86 @@ describe.sequential("unwired encrypted R2 archive writer", () => {
       next_attempt_at: null,
       status: "dead",
     });
+  });
+
+  it("recovers a fifth-attempt dead mutation that commits before response loss", async () => {
+    const fixture = await writerFixture();
+    const lease = await advanceToFifthAttempt(fixture);
+    const bucket = new FakeArchiveStore();
+    bucket.putMode = "response_loss";
+    bucket.getMode = "throw";
+    const result = await writeClaimedAuditArchive({
+      bucket,
+      database: commitThenRejectNextBatch(env.PG72_ID_DB, 5),
+      lease,
+      now: clock(at(17_000), at(18_000)),
+      verifier: new TestVerifier(),
+    });
+    expect(result).toEqual({
+      errorCode: "r2_transient",
+      mutation: "duplicate",
+      outcome: "dead",
+      putOutcome: "response_uncertain",
+    });
+  });
+
+  it("pins every writer-owned retry delay before the fifth attempt is dead", async () => {
+    const fixture = await writerFixture();
+    const delays = [30_000, 120_000, 480_000, 900_000] as const;
+    let lease = fixture.lease;
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      const startedAt = Date.parse(lease.updatedAt) - START + 1;
+      const bucket = new FakeArchiveStore();
+      bucket.putMode = "response_loss";
+      bucket.getMode = "throw";
+      const result = await writeClaimedAuditArchive({
+        bucket,
+        database: env.PG72_ID_DB,
+        lease,
+        now: clockSequence(
+          at(startedAt),
+          at(startedAt + 1),
+          at(startedAt + 2),
+          at(startedAt + 3),
+        ),
+        verifier: new TestVerifier(),
+      });
+      expect(result.outcome).toBe(attempt === 5 ? "dead" : "retry");
+      const attemptRow = await env.PG72_ID_DB.prepare(
+        `SELECT completed_at FROM audit_archive_attempt WHERE id = ?`,
+      )
+        .bind(lease.leaseId)
+        .first<{ completed_at: string }>();
+      if (!attemptRow) throw new Error("missing writer attempt evidence");
+      const batch = await env.PG72_ID_DB.prepare(
+        `SELECT next_attempt_at, status FROM audit_archive_batch
+          WHERE batch_key = ?`,
+      )
+        .bind(fixture.batchKey)
+        .first<{ next_attempt_at: string | null; status: string }>();
+      if (!batch) throw new Error("missing writer batch state");
+      if (attempt === 5) {
+        expect(batch).toEqual({ next_attempt_at: null, status: "dead" });
+        continue;
+      }
+      const delay = delays[attempt - 1];
+      if (delay === undefined || batch.next_attempt_at === null) {
+        throw new Error("missing bounded retry delay");
+      }
+      expect(
+        Date.parse(batch.next_attempt_at) - Date.parse(attemptRow.completed_at),
+      ).toBe(delay);
+      const claimedAt = batch.next_attempt_at;
+      const acquired = await acquireAuditArchiveLease(env.PG72_ID_DB, {
+        batchKey: fixture.batchKey,
+        claimedAt,
+        dispatchGeneration: 1,
+        leaseExpiresAt: new Date(Date.parse(claimedAt) + 300_000).toISOString(),
+        leaseId: reference(),
+      });
+      if (acquired.lease === null) throw new Error("missing next writer lease");
+      lease = acquired.lease;
+    }
   });
 
   it("returns lease_lost without touching R2 for a stale terminal lease", async () => {
@@ -1299,5 +1809,22 @@ describe.sequential("unwired encrypted R2 archive writer", () => {
     expect(verifier.calls).toHaveLength(0);
     expect(bucket.putCalls).toBe(0);
     expect(bucket.getCalls).toBe(0);
+  });
+
+  it("recovers an expiry mutation that commits before its response is lost", async () => {
+    const fixture = await writerFixture();
+    const result = await writeClaimedAuditArchive({
+      bucket: new FakeArchiveStore(),
+      database: commitThenRejectNextBatch(env.PG72_ID_DB, 5),
+      lease: fixture.lease,
+      now: clock(at(311_000), at(312_000)),
+      verifier: new TestVerifier(),
+    });
+    expect(result).toEqual({
+      errorCode: "lease_expired",
+      mutation: "duplicate",
+      outcome: "lease_expired",
+      putOutcome: null,
+    });
   });
 });

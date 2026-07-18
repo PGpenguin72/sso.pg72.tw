@@ -14,6 +14,69 @@ const START = Date.parse("2026-07-18T02:00:00.000Z");
 const KEK_VERSION = "v1";
 const ZERO_KEK = "A".repeat(43);
 
+const ARCHIVE_TABLES = [
+  "audit_archive_attempt",
+  "audit_archive_batch",
+  "audit_archive_batch_item",
+  "audit_archive_checkpoint",
+  "audit_archive_key_sentinel",
+  "audit_archive_source",
+] as const;
+
+const ARCHIVE_TRIGGERS = [
+  "audit_archive_attempt_apply_terminal",
+  "audit_archive_attempt_current_r2_evidence_guard",
+  "audit_archive_attempt_delete_guard",
+  "audit_archive_attempt_insert_guard",
+  "audit_archive_attempt_transition_guard",
+  "audit_archive_batch_advance_checkpoint",
+  "audit_archive_batch_claim_attempt",
+  "audit_archive_batch_delete_guard",
+  "audit_archive_batch_identity_update_guard",
+  "audit_archive_batch_insert_guard",
+  "audit_archive_batch_item_delete_guard",
+  "audit_archive_batch_item_insert_guard",
+  "audit_archive_batch_item_update_guard",
+  "audit_archive_batch_transition_guard",
+  "audit_archive_checkpoint_delete_guard",
+  "audit_archive_checkpoint_insert_guard",
+  "audit_archive_checkpoint_transition_guard",
+  "audit_archive_key_sentinel_delete_guard",
+  "audit_archive_key_sentinel_insert_guard",
+  "audit_archive_key_sentinel_update_guard",
+  "audit_archive_source_delete_guard",
+  "audit_archive_source_insert_guard",
+  "audit_archive_source_parent_time_guard",
+  "audit_archive_source_update_guard",
+  "audit_event_archive_identity_insert_guard",
+  "audit_event_archive_source_insert",
+] as const;
+
+const ARCHIVE_INDEXES = [
+  "audit_archive_attempt_error_idx",
+  "audit_archive_attempt_outcome_idx",
+  "audit_archive_attempt_time_idx",
+  "audit_archive_batch_due_idx",
+  "audit_archive_batch_expired_lease_idx",
+  "audit_archive_batch_operator_idx",
+  "sqlite_autoindex_audit_archive_attempt_1",
+  "sqlite_autoindex_audit_archive_attempt_2",
+  "sqlite_autoindex_audit_archive_attempt_3",
+  "sqlite_autoindex_audit_archive_batch_1",
+  "sqlite_autoindex_audit_archive_batch_2",
+  "sqlite_autoindex_audit_archive_batch_3",
+  "sqlite_autoindex_audit_archive_batch_4",
+  "sqlite_autoindex_audit_archive_batch_5",
+  "sqlite_autoindex_audit_archive_batch_6",
+  "sqlite_autoindex_audit_archive_batch_item_1",
+  "sqlite_autoindex_audit_archive_batch_item_2",
+  "sqlite_autoindex_audit_archive_batch_item_3",
+  "sqlite_autoindex_audit_archive_checkpoint_1",
+  "sqlite_autoindex_audit_archive_key_sentinel_1",
+  "sqlite_autoindex_audit_archive_key_sentinel_2",
+  "sqlite_autoindex_audit_archive_source_1",
+] as const;
+
 interface SourceRow {
   actor_ref: string | null;
   actor_ref_hash_version: 1 | null;
@@ -403,14 +466,28 @@ describe("audit archive schema", () => {
         WHERE type = 'table' AND name GLOB 'audit_archive_*'
         ORDER BY name`,
     ).all<{ name: string }>();
-    expect(tables.results.map(({ name }) => name)).toEqual([
-      "audit_archive_attempt",
-      "audit_archive_batch",
-      "audit_archive_batch_item",
-      "audit_archive_checkpoint",
-      "audit_archive_key_sentinel",
-      "audit_archive_source",
-    ]);
+    expect(tables.results.map(({ name }) => name)).toEqual(ARCHIVE_TABLES);
+    const triggers = await env.PG72_ID_DB.prepare(
+      `SELECT name FROM sqlite_schema
+        WHERE type = 'trigger'
+          AND (name GLOB 'audit_archive_*' OR name GLOB 'audit_event_archive_*')
+        ORDER BY name`,
+    ).all<{ name: string }>();
+    expect(triggers.results.map(({ name }) => name)).toEqual(ARCHIVE_TRIGGERS);
+    const indexes = await env.PG72_ID_DB.prepare(
+      `SELECT name, sql IS NULL AS implicit FROM sqlite_schema
+        WHERE type = 'index' AND tbl_name GLOB 'audit_archive_*'
+        ORDER BY name`,
+    ).all<{ implicit: number; name: string }>();
+    expect(indexes.results.map(({ name }) => name)).toEqual(ARCHIVE_INDEXES);
+    expect(indexes.results.filter(({ implicit }) => implicit === 0)).toHaveLength(6);
+    expect(indexes.results.filter(({ implicit }) => implicit === 1)).toHaveLength(16);
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT count(*) AS count FROM sqlite_temp_schema
+          WHERE type = 'table' AND name GLOB 'audit_archive_*'`,
+      ).first<number>("count"),
+    ).toBe(0);
     expect(
       await env.PG72_ID_DB.prepare(
         "SELECT * FROM audit_archive_checkpoint WHERE id = 1",
@@ -442,6 +519,19 @@ describe("audit archive schema", () => {
           WHERE type = 'table' AND name = 'audit_archive_attempt_0021'`,
       ).first<number>("count"),
     ).toBe(0);
+
+    const evidenceGuard = await env.PG72_ID_DB.prepare(
+      `SELECT sql FROM sqlite_schema
+        WHERE type = 'trigger'
+          AND name = 'audit_archive_attempt_current_r2_evidence_guard'`,
+    ).first<string>("sql");
+    expect(evidenceGuard).toContain("OLD.\"outcome\" = 'in_flight'");
+    expect(evidenceGuard).toContain(
+      "NEW.\"error_code\" IN ('crypto_integrity', 'r2_readback_mismatch')",
+    );
+    expect(evidenceGuard).toContain(
+      "RAISE(ABORT, 'current R2 evidence requires observed bytes')",
+    );
 
     const parentGuard = await env.PG72_ID_DB.prepare(
       `SELECT sql FROM sqlite_schema
@@ -1224,7 +1314,8 @@ describe("audit archive schema", () => {
           `UPDATE audit_archive_attempt
               SET outcome = 'corrupt', resulting_status = 'corrupt',
                   r2_version = ?, r2_etag = ?, r2_readback_sha256 = ?,
-                  r2_readback_at = ?, error_code = 'r2_readback_mismatch',
+                  r2_observed_bytes = ?, r2_readback_at = ?,
+                  error_code = 'r2_readback_mismatch',
                   completed_at = ?
             WHERE id = ?`,
         )
@@ -1232,6 +1323,7 @@ describe("audit archive schema", () => {
             version,
             etag,
             build.manifest.objectSha256,
+            build.manifest.objectBytes,
             completedAt,
             completedAt,
             lease,

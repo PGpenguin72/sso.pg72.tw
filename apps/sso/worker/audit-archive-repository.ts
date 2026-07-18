@@ -189,6 +189,16 @@ export interface RenewAuditArchiveLeaseInput {
   renewedAt: string;
 }
 
+export interface AdoptAuditArchiveLeaseInput {
+  asOf: string;
+  lease: AuditArchiveLease;
+}
+
+export interface AuditArchiveLeaseAdoptionResult {
+  lease: AuditArchiveLease | null;
+  status: "adopted" | "conflict" | "current";
+}
+
 export interface AuditArchiveLeaseMutationResult {
   lease: AuditArchiveLease | null;
   status: "acquired" | "conflict" | "duplicate" | "renewed";
@@ -1282,6 +1292,16 @@ function sameLease(left: AuditArchiveLease, right: AuditArchiveLease): boolean {
   );
 }
 
+function sameLeaseFence(left: AuditArchiveLease, right: AuditArchiveLease): boolean {
+  return (
+    left.attemptNumber === right.attemptNumber &&
+    left.batchKey === right.batchKey &&
+    left.dispatchGeneration === right.dispatchGeneration &&
+    left.leaseId === right.leaseId &&
+    left.startedAt === right.startedAt
+  );
+}
+
 function leaseProjectionStatement(
   database: D1Database,
   batchKey: string,
@@ -1817,6 +1837,46 @@ export async function renewAuditArchiveLease(
     return { lease: null, status: "conflict" };
   } catch (error) {
     throw redactedRepositoryError(error, "write_failed");
+  }
+}
+
+export async function adoptAuditArchiveLease(
+  database: D1Database,
+  value: AdoptAuditArchiveLeaseInput,
+): Promise<AuditArchiveLeaseAdoptionResult> {
+  try {
+    if (arguments.length !== 2) fail("invalid_input");
+    const input = exactRecord(value, ["asOf", "lease"]);
+    const asOf = canonicalTimestamp(input.asOf);
+    const supplied = parseLease(input.lease);
+    const persisted = leaseFromResult(
+      await leaseProjectionStatement(
+        database,
+        supplied.batchKey,
+        supplied.dispatchGeneration,
+        supplied.leaseId,
+        false,
+      ).all(),
+    );
+    if (persisted === null || !sameLeaseFence(persisted, supplied)) {
+      return { lease: null, status: "conflict" };
+    }
+    if (sameLease(persisted, supplied)) {
+      return { lease: persisted, status: "current" };
+    }
+    if (
+      canonicalTimestamp(persisted.updatedAt).time <=
+        canonicalTimestamp(supplied.updatedAt).time ||
+      canonicalTimestamp(persisted.leaseExpiresAt).time <=
+        canonicalTimestamp(supplied.leaseExpiresAt).time ||
+      canonicalTimestamp(persisted.updatedAt).time > asOf.time ||
+      canonicalTimestamp(persisted.leaseExpiresAt).time <= asOf.time
+    ) {
+      return { lease: null, status: "conflict" };
+    }
+    return { lease: persisted, status: "adopted" };
+  } catch (error) {
+    throw redactedRepositoryError(error, "source_unavailable");
   }
 }
 

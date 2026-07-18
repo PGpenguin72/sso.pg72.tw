@@ -234,6 +234,40 @@ const SQL_CONTRACTS = Object.freeze({
 });
 
 const ARCHIVE_SCHEMA_CONTRACT = Object.freeze({
+  companions: [
+    {
+      filename: path.join(
+        "migrations",
+        "0023_audit_archive_r2_evidence.sql",
+      ),
+      markers: [
+        /alter table\s+"audit_archive_attempt"\s+rename to\s+"audit_archive_attempt_0021"/i,
+        /"r2_observed_bytes"\s+integer\s+check/i,
+        /"r2_stored_sha256"\s+text\s+check/i,
+        /"r2_conflict_evidence_format"\s+text\s+check/i,
+        /insert into\s+"audit_archive_attempt"\s*\([\s\S]*?from\s+"audit_archive_attempt_0021"/i,
+        /drop table\s+"audit_archive_attempt_0021"/i,
+        /create trigger\s+"audit_archive_attempt_transition_guard"[\s\S]*?new\."r2_observed_bytes"\s*=\s*batch\."object_bytes"[\s\S]*?new\."r2_stored_sha256"\s*=\s*batch\."object_sha256"/i,
+        /create trigger\s+"audit_archive_batch_transition_guard"[\s\S]*?attempt\."r2_observed_bytes"\s*=\s*new\."object_bytes"[\s\S]*?attempt\."r2_stored_sha256"\s*=\s*new\."object_sha256"/i,
+      ],
+    },
+    {
+      filename: path.join(
+        "migrations",
+        "0024_audit_archive_r2_evidence_guard.sql",
+      ),
+      markers: [
+        /create trigger\s+"audit_archive_attempt_current_r2_evidence_guard"/i,
+        /before update on\s+"audit_archive_attempt"/i,
+        /old\."outcome"\s*=/i,
+        /new\."outcome"\s*=/i,
+        /new\."error_code"\s+in\s*\(/i,
+        /new\."r2_version"\s+is not null/i,
+        /new\."r2_observed_bytes"\s+is null/i,
+        /select\s+raise\s*\(\s*abort\s*,/i,
+      ],
+    },
+  ],
   filename: path.join("migrations", "0021_audit_archive.sql"),
   markers: [
     /create table\s+"audit_archive_source"/i,

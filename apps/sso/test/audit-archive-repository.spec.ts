@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   AuditArchiveRepositoryError,
   acquireAuditArchiveLease,
+  adoptAuditArchiveLease,
   expireAuditArchiveLease,
   failAuditArchiveLease,
   finalizeAuditArchiveLease,
@@ -62,6 +63,18 @@ async function resetArchiveLedger(): Promise<void> {
   await dropArchiveLedger();
   await applyArchiveMigration("0021_audit_archive.sql");
   await applyArchiveMigration("0023_audit_archive_r2_evidence.sql");
+  await applyArchiveMigration("0024_audit_archive_r2_evidence_guard.sql");
+}
+
+async function expectArchiveIntegrity(): Promise<void> {
+  expect(
+    (await env.PG72_ID_DB.prepare("PRAGMA foreign_key_check").all()).results,
+  ).toEqual([]);
+  expect(
+    await env.PG72_ID_DB.prepare("PRAGMA quick_check").first<string>(
+      "quick_check",
+    ),
+  ).toBe("ok");
 }
 
 function mutateBatchResult(
@@ -386,6 +399,7 @@ describe.sequential("audit archive D1 repository", () => {
     ).not.toContain("r2_observed_bytes");
 
     await applyArchiveMigration("0023_audit_archive_r2_evidence.sql");
+    await applyArchiveMigration("0024_audit_archive_r2_evidence_guard.sql");
     expect(
       (await env.PG72_ID_DB.prepare(
         "PRAGMA table_info(audit_archive_attempt)",
@@ -451,6 +465,7 @@ describe.sequential("audit archive D1 repository", () => {
       .run();
 
     await applyArchiveMigration("0023_audit_archive_r2_evidence.sql");
+    await applyArchiveMigration("0024_audit_archive_r2_evidence_guard.sql");
     expect(
       await env.PG72_ID_DB.prepare(
         `SELECT outcome, error_code, r2_version, r2_etag,
@@ -484,6 +499,101 @@ describe.sequential("audit archive D1 repository", () => {
       last_error_code: "r2_object_conflict",
       status: "corrupt",
     });
+    await expectArchiveIntegrity();
+  });
+
+  it.each(["crypto_integrity", "r2_readback_mismatch"] as const)(
+    "preserves already-committed 0023 null-observed %s evidence exactly",
+    async (errorCode) => {
+      await dropArchiveLedger();
+      await applyArchiveMigration("0021_audit_archive.sql");
+      await applyArchiveMigration("0023_audit_archive_r2_evidence.sql");
+      const fixture = await queuedFixture();
+      const lease = await acquire(fixture, at(11_000), at(311_000));
+      const completedAt = at(20_000);
+      await env.PG72_ID_DB.prepare(
+        `UPDATE audit_archive_attempt
+            SET outcome = 'corrupt', resulting_status = 'corrupt',
+                r2_version = 'version-current', r2_etag = 'etag-current',
+                r2_stored_sha256 = ?, r2_readback_sha256 = ?,
+                r2_readback_at = ?, error_code = ?, completed_at = ?
+          WHERE id = ?`,
+      )
+        .bind(
+          fixture.manifest.objectSha256,
+          "f".repeat(64),
+          completedAt,
+          errorCode,
+          completedAt,
+          lease.leaseId,
+        )
+        .run();
+      const before = await env.PG72_ID_DB.prepare(
+        `SELECT * FROM audit_archive_attempt WHERE id = ?`,
+      )
+        .bind(lease.leaseId)
+        .first();
+      if (before === null) throw new Error("missing pre-0024 evidence row");
+
+      await applyArchiveMigration("0024_audit_archive_r2_evidence_guard.sql");
+      expect(
+        await env.PG72_ID_DB.prepare(
+          `SELECT * FROM audit_archive_attempt WHERE id = ?`,
+        )
+          .bind(lease.leaseId)
+          .first(),
+      ).toEqual(before);
+      expect(before).toMatchObject({
+        error_code: errorCode,
+        outcome: "corrupt",
+        r2_observed_bytes: null,
+      });
+      await expectArchiveIntegrity();
+    },
+  );
+
+  it("blocks new current corrupt evidence without observed bytes after 0024", async () => {
+    const fixture = await queuedFixture();
+    const lease = await acquire(fixture, at(11_000), at(311_000));
+    const completedAt = at(20_000);
+    for (const errorCode of [
+      "crypto_integrity",
+      "r2_readback_mismatch",
+    ] as const) {
+      await expect(
+        env.PG72_ID_DB.prepare(
+          `UPDATE audit_archive_attempt
+              SET outcome = 'corrupt', resulting_status = 'corrupt',
+                  r2_version = 'version-current', r2_etag = 'etag-current',
+                  r2_stored_sha256 = ?, r2_readback_sha256 = ?,
+                  r2_readback_at = ?, error_code = ?, completed_at = ?
+            WHERE id = ?`,
+        )
+          .bind(
+            fixture.manifest.objectSha256,
+            "f".repeat(64),
+            completedAt,
+            errorCode,
+            completedAt,
+            lease.leaseId,
+          )
+          .run(),
+      ).rejects.toThrow(/current R2 evidence requires observed bytes/);
+    }
+    expect(
+      await env.PG72_ID_DB.prepare(
+        `SELECT outcome, r2_version, r2_observed_bytes, completed_at
+           FROM audit_archive_attempt WHERE id = ?`,
+      )
+        .bind(lease.leaseId)
+        .first(),
+    ).toEqual({
+      completed_at: null,
+      outcome: "in_flight",
+      r2_observed_bytes: null,
+      r2_version: null,
+    });
+    await expectArchiveIntegrity();
   });
 
   it("selects a monotonic head prefix, preserves legitimate gaps, and caps at 100", async () => {
@@ -992,6 +1102,92 @@ describe.sequential("audit archive D1 repository", () => {
         .bind(lease.leaseId)
         .first<string>("started_at"),
     ).toBe(lease.startedAt);
+  });
+
+  it("adopts only a live strict descendant of the same in-flight lease fence", async () => {
+    const fixture = await queuedFixture();
+    const lease = await acquire(fixture, at(11_000), at(211_000));
+    expect(
+      await adoptAuditArchiveLease(env.PG72_ID_DB, {
+        asOf: at(12_000),
+        lease,
+      }),
+    ).toEqual({ lease, status: "current" });
+
+    const renewal = await renewAuditArchiveLease(env.PG72_ID_DB, {
+      lease,
+      leaseExpiresAt: at(310_000),
+      renewedAt: at(20_000),
+    });
+    if (renewal.lease === null) throw new Error("missing renewed test lease");
+    expect(
+      await adoptAuditArchiveLease(env.PG72_ID_DB, {
+        asOf: at(21_000),
+        lease,
+      }),
+    ).toEqual({ lease: renewal.lease, status: "adopted" });
+
+    for (const [asOf, candidate] of [
+      [at(19_000), lease],
+      [at(310_000), lease],
+      [at(21_000), { ...lease, leaseId: reference() }],
+      [
+        at(21_000),
+        { ...lease, leaseExpiresAt: at(311_000), updatedAt: at(21_000) },
+      ],
+    ] as const) {
+      expect(
+        await adoptAuditArchiveLease(env.PG72_ID_DB, {
+          asOf,
+          lease: candidate,
+        }),
+      ).toEqual({ lease: null, status: "conflict" });
+    }
+
+    expect(
+      await failAuditArchiveLease(env.PG72_ID_DB, {
+        completedAt: at(22_000),
+        errorCode: "r2_transient",
+        evidence: null,
+        lease: renewal.lease,
+        nextAttemptAt: at(52_000),
+      }),
+    ).toBe("applied");
+    expect(
+      await adoptAuditArchiveLease(env.PG72_ID_DB, {
+        asOf: at(23_000),
+        lease,
+      }),
+    ).toEqual({ lease: null, status: "conflict" });
+  });
+
+  it("adopts the single winner of concurrent same-fence renewals", async () => {
+    const fixture = await queuedFixture();
+    const lease = await acquire(fixture, at(11_000), at(211_000));
+    const concurrent = await Promise.all([
+      renewAuditArchiveLease(env.PG72_ID_DB, {
+        lease,
+        leaseExpiresAt: at(310_000),
+        renewedAt: at(20_000),
+      }),
+      renewAuditArchiveLease(env.PG72_ID_DB, {
+        lease,
+        leaseExpiresAt: at(311_000),
+        renewedAt: at(21_000),
+      }),
+    ]);
+    expect(concurrent.filter(({ status }) => status === "renewed")).toHaveLength(1);
+    expect(concurrent.filter(({ status }) => status === "conflict")).toHaveLength(1);
+    const winner = concurrent.find(({ status }) => status === "renewed")?.lease;
+    if (winner === null || winner === undefined) {
+      throw new Error("missing concurrent renewal winner");
+    }
+    expect(
+      await adoptAuditArchiveLease(env.PG72_ID_DB, {
+        asOf: at(22_000),
+        lease,
+      }),
+    ).toEqual({ lease: winner, status: "adopted" });
   });
 
   it("fails renewal closed for stale, wrong, non-increasing, expired, and oversized leases", async () => {

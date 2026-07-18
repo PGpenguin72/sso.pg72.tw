@@ -164,6 +164,49 @@ function createDependencyFixture() {
        AFTER UPDATE ON "audit_archive_batch" BEGIN SELECT 1; END;`,
   );
   writeFixture(
+    path.join(identityRoot, "migrations", "0023_audit_archive_r2_evidence.sql"),
+    `ALTER TABLE "audit_archive_attempt"
+       RENAME TO "audit_archive_attempt_0021";
+     CREATE TABLE "audit_archive_attempt" (
+       "r2_observed_bytes" integer CHECK ("r2_observed_bytes" IS NULL),
+       "r2_stored_sha256" text CHECK ("r2_stored_sha256" IS NULL),
+       "r2_conflict_evidence_format" text CHECK (
+         "r2_conflict_evidence_format" IS NULL
+       )
+     );
+     INSERT INTO "audit_archive_attempt" (
+       "r2_observed_bytes", "r2_stored_sha256", "r2_conflict_evidence_format"
+     ) SELECT NULL, NULL, NULL FROM "audit_archive_attempt_0021";
+     DROP TABLE "audit_archive_attempt_0021";
+     CREATE TRIGGER "audit_archive_attempt_transition_guard"
+       BEFORE UPDATE ON "audit_archive_attempt"
+       WHEN NEW."r2_observed_bytes" = batch."object_bytes"
+        AND NEW."r2_stored_sha256" = batch."object_sha256"
+       BEGIN SELECT 1; END;
+     CREATE TRIGGER "audit_archive_batch_transition_guard"
+       BEFORE UPDATE ON "audit_archive_batch"
+       WHEN attempt."r2_observed_bytes" = NEW."object_bytes"
+        AND attempt."r2_stored_sha256" = NEW."object_sha256"
+       BEGIN SELECT 1; END;`,
+  );
+  writeFixture(
+    path.join(
+      identityRoot,
+      "migrations",
+      "0024_audit_archive_r2_evidence_guard.sql",
+    ),
+    `CREATE TRIGGER "audit_archive_attempt_current_r2_evidence_guard"
+       BEFORE UPDATE ON "audit_archive_attempt"
+       WHEN OLD."outcome" = 'in_flight'
+        AND NEW."outcome" = 'corrupt'
+        AND NEW."error_code" IN ('crypto_integrity', 'r2_readback_mismatch')
+        AND NEW."r2_version" IS NOT NULL
+        AND NEW."r2_observed_bytes" IS NULL
+       BEGIN
+         SELECT RAISE(ABORT, 'current R2 evidence requires observed bytes');
+       END;`,
+  );
+  writeFixture(
     path.join(
       identityRoot,
       "migrations",
@@ -856,6 +899,60 @@ test("encrypted archive requires the exact 0021 ledger before runtime source", (
       );
     } finally {
       rmSync(fixture.repositoryRoot, { force: true, recursive: true });
+    }
+  }
+});
+
+test("encrypted archive requires exact reviewed 0023 and 0024 companions", () => {
+  for (const filename of [
+    "0023_audit_archive_r2_evidence.sql",
+    "0024_audit_archive_r2_evidence_guard.sql",
+  ]) {
+    for (const mutation of [
+      "missing",
+      "empty",
+      "truncated",
+      "renamed",
+      "lookalike",
+      "comment_only",
+    ]) {
+      const fixture = createDependencyFixture();
+      try {
+        const baseline = dependencyStatus(fixture);
+        assert.ok(
+          baseline.every(({ status }) => status === "source_present_unverified"),
+        );
+        const target = path.join(fixture.identityRoot, "migrations", filename);
+        const original = readFileSync(target, "utf8");
+        if (mutation === "missing") rmSync(target);
+        if (mutation === "empty") writeFileSync(target, "");
+        if (mutation === "truncated") {
+          writeFileSync(
+            target,
+            'CREATE TRIGGER "incomplete_archive_contract" BEFORE UPDATE ON "audit_archive_attempt" BEGIN SELECT 1; END;',
+          );
+        }
+        if (mutation === "renamed") renameSync(target, `${target}.renamed`);
+        if (mutation === "lookalike") {
+          writeFileSync(`${target}.lookalike`, original);
+          rmSync(target);
+        }
+        if (mutation === "comment_only") {
+          writeFileSync(target, `-- ${original.replaceAll("\n", "\n-- ")}\n`);
+        }
+        const expected = baseline.map((entry) =>
+          entry.name === "encrypted_r2_archive"
+            ? { ...entry, status: "source_invalid" }
+            : entry
+        );
+        assert.deepEqual(
+          dependencyStatus(fixture),
+          expected,
+          `${filename}:${mutation}`,
+        );
+      } finally {
+        rmSync(fixture.repositoryRoot, { force: true, recursive: true });
+      }
     }
   }
 });

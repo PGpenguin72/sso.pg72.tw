@@ -394,9 +394,12 @@ authenticates `checkpointFromSequence` across the header, manifest, and AES-GCM
 AAD. Migration `0021` now owns the monotonic source ledger, deterministic
 backfill, immutable batch snapshots, archive-key sentinel schema, and terminal
 checkpoint/BLOB-cleanup transaction described in
-[`audit-archive.md`](./audit-archive.md). The crypto and ledger remain source
-contracts, not an archive service: there is no `audit-archive.ts` runtime
-module, `AUDIT_ARCHIVE` R2 binding/writer, Queue/DLQ, Cron, bounded restore,
+[`audit-archive.md`](./audit-archive.md). The unwired request-scoped archive D1
+repository owns fingerprint-only sentinel continuity, bounded source selection,
+canonical batch persistence, exact lease/terminal receipts, and audited dead
+replay. These remain local source contracts, not an archive service: there is no
+`audit-archive.ts` runtime module, archive-domain fingerprint derivation or KEK
+custody, `AUDIT_ARCHIVE` R2 binding/writer, Queue/DLQ, Cron, bounded restore,
 retention exercise, or external backup. `encrypted_r2_archive` therefore
 remains `dependency_missing`.
 
@@ -429,7 +432,8 @@ pnpm --filter @pg72/id exec vitest run \
   test/alert-oauth-source-repository.spec.ts \
   test/alert-queue-source-repository.spec.ts \
   test/alert-evaluator.spec.ts test/alert-rules.spec.ts \
-  test/audit-archive-crypto.spec.ts
+  test/audit-archive-crypto.spec.ts \
+  test/audit-archive-repository.spec.ts
 node --test scripts/public-readiness/alert-source-time-integrity-migration.test.mjs \
   scripts/public-readiness/audit-archive-migration.test.mjs \
   scripts/public-readiness/d1-manifest.test.mjs \
@@ -484,8 +488,10 @@ out-of-order and concurrent losers, strict provider/D1 parsing, fixed redacted
 errors, and primary-key query plans without adding a binding, Cron, or evaluator
 wiring. The archive schema and migration suites verify that one invalid parent
 aborts backfill and that a repaired canonical parent succeeds, plus the `0021`
-ledger transaction contract, while the archive-crypto suite verifies the
-record/envelope and checkpoint binding without R2 or Queue I/O.
+ledger transaction contract. The archive-crypto and repository suites verify the
+record/envelope/checkpoint binding, bounded source and persistence behavior,
+exact lease/terminal/replay receipts, response-loss retries, and concurrent
+losers without R2 or Queue I/O.
 
 ## Remaining gates
 
@@ -498,10 +504,11 @@ repositories into Cron with
 repository-controlled successful-run and same-run proof; and add dedicated
 alert Queue/DLQ, an Email Service adapter, admin acknowledge/resolve/replay
 operations, and redaction/race/failure tests. Archive crypto plus the `0021`
-ledger does not satisfy the separate encrypted archive dependency;
-`encrypted_r2_archive` remains `dependency_missing` until the disabled
-repository, R2 writer/bounded restore, Queue/DLQ, Cron redrive, retention proof,
-and external-backup exercise exist.
+ledger and unwired D1 repository do not satisfy the separate encrypted archive
+dependency; `encrypted_r2_archive` remains `dependency_missing` until
+archive-domain fingerprint derivation and KEK custody, the R2 writer/bounded
+restore, Queue/DLQ, Cron redrive, retention proof, and external-backup exercise
+exist.
 
 Isolated Preview must then apply the ordered migration ledger, tune thresholds,
 exercise exact D1 and approximate Queue evidence, prove real Email receipt and

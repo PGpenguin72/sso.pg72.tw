@@ -24,7 +24,14 @@ import {
   openAuditArchiveV1,
   sealAuditArchiveV1,
   type AuditArchiveManifestV1,
+  type AuditArchiveRecordV1,
 } from "../worker/audit-archive-crypto";
+import {
+  type AuditArchiveCustodyOpenInput,
+  type AuditArchiveCustodyOpener,
+  type AuditArchiveCustodyOpenResult,
+  verifyAndOpenAuditArchiveObjectV1,
+} from "../worker/audit-archive-r2-restore";
 
 const START = Date.parse("2026-07-18T14:00:00.000Z");
 const KEY_VERSION = "v1";
@@ -36,6 +43,7 @@ interface WriterFixture {
   encryptedEnvelope: Uint8Array<ArrayBuffer>;
   lease: AuditArchiveLease;
   manifest: AuditArchiveManifestV1;
+  records: readonly AuditArchiveRecordV1[];
 }
 
 interface StoredObject {
@@ -187,7 +195,8 @@ async function writerFixture(
     batchKey,
     encryptedEnvelope: sealed.objectBytes,
     lease: acquired.lease,
-    manifest: sealed.manifest,
+    manifest: structuredClone(sealed.manifest),
+    records: structuredClone(selection.records),
   };
 }
 
@@ -457,6 +466,32 @@ class TestVerifier implements AuditArchiveEnvelopeVerifier {
   }
 }
 
+class TestRestoreOpener implements AuditArchiveCustodyOpener {
+  calls: AuditArchiveCustodyOpenInput[] = [];
+  objectByteSnapshots: Uint8Array<ArrayBuffer>[] = [];
+  openedRecords: readonly AuditArchiveRecordV1[] | null = null;
+
+  async open(
+    input: AuditArchiveCustodyOpenInput,
+  ): Promise<AuditArchiveCustodyOpenResult> {
+    this.calls.push(input);
+    this.objectByteSnapshots.push(input.objectBytes.slice());
+    const kek = input.keyVersion === KEY_VERSION ? ZERO_KEK : undefined;
+    if (kek === undefined) return { outcome: "key_unavailable" };
+    try {
+      const records = await openAuditArchiveV1({
+        expected: input.manifest,
+        kek,
+        objectBytes: input.objectBytes,
+      });
+      this.openedRecords = records;
+      return { outcome: "opened", records };
+    } catch {
+      return { outcome: "crypto_integrity" };
+    }
+  }
+}
+
 function clock(start = at(12_000), completed = at(13_000)): () => string {
   let calls = 0;
   return () => {
@@ -719,6 +754,41 @@ describe.sequential("unwired encrypted R2 archive writer", () => {
     expect(verifier.calls.every((bytes) => bytes.every((byte) => byte === 0))).toBe(true);
     expect(bucket.lastPutChecksum?.every((byte) => byte === 0)).toBe(true);
     expect(bucket.lastPutEnvelope?.every((byte) => byte === 0)).toBe(true);
+
+    const persistedObject = bucket.object;
+    if (persistedObject === null) throw new Error("missing persisted test object");
+    const persistedBytes = persistedObject.bytes.slice();
+    const getCallsBeforeRestore = bucket.getCalls;
+    const bodyAccessesBeforeRestore = bucket.bodyAccesses;
+    const chunksBeforeRestore = bucket.chunksProvided;
+    const opener = new TestRestoreOpener();
+    const restored = await verifyAndOpenAuditArchiveObjectV1({
+      bucket,
+      expected: fixture.manifest,
+      opener,
+    });
+
+    expect(restored).toEqual(fixture.records);
+    expect(restored).not.toBe(fixture.records);
+    expect(restored[0]).not.toBe(fixture.records[0]);
+    expect(restored).not.toBe(opener.openedRecords);
+    expect(restored[0]).not.toBe(opener.openedRecords?.[0]);
+    expect(Object.isFrozen(restored)).toBe(true);
+    expect(restored.every((record) => Object.isFrozen(record))).toBe(true);
+    expect(bucket.getCalls).toBe(getCallsBeforeRestore + 1);
+    expect(bucket.bodyAccesses).toBe(bodyAccessesBeforeRestore + 1);
+    expect(bucket.chunksProvided).toBe(chunksBeforeRestore + 2);
+    expect(persistedObject.bytes).toEqual(persistedBytes);
+    expect(persistedObject.customMetadata).toEqual({
+      "pgid-manifest-v1": JSON.stringify(fixture.manifest),
+    });
+    expect(opener.objectByteSnapshots).toEqual([persistedBytes]);
+    expect(opener.calls).toHaveLength(1);
+    expect(opener.calls[0]?.keyVersion).toBe(KEY_VERSION);
+    expect(opener.calls[0]?.manifest).toEqual(fixture.manifest);
+    expect(
+      opener.calls[0]?.objectBytes.every((byte) => byte === 0),
+    ).toBe(true);
   });
 
   it("recovers an uncertain PUT response through exact readback", async () => {

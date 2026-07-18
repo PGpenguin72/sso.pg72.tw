@@ -111,7 +111,9 @@ proof. Source presence is not encrypted archive continuity.
 exact encrypted object. Its expected v1 manifest is trusted caller/operator
 input from evidence outside the object. The verifier validates that manifest
 and its deterministically derived object key before the first injected bucket
-read; it never derives authority solely from the object's custom metadata.
+or opener interface resolution; it never derives authority solely from the
+object's custom metadata. No authenticated, independently retained manifest
+provenance adapter or evidence store supplies that input in this source slice.
 
 The verifier requires the exact object key, content type, `no-store` cache
 policy, single canonical manifest metadata value, declared byte count and R2
@@ -119,7 +121,9 @@ stored SHA-256. It reads at most the manifest's reviewed 512 KiB bound, cancels
 overflowing or erroring readers where possible, computes the full body SHA-256,
 and requires expected, stored and computed digests to agree. Missing objects,
 malformed or extra metadata, absent checksums, zero/short/oversized bodies and
-stream failures all fail closed with fixed redacted errors.
+stream failures all fail closed with fixed redacted errors. Rejected unused
+bodies are cancelled without reading chunks where the native stream permits it;
+cleanup failure cannot replace the primary classification.
 
 Only after object verification does it call an injected custody opener with a
 copied manifest and copied object bytes. The public interface contains no KEK.
@@ -128,9 +132,13 @@ SHA-256, event count and first/last sequence. The result consists of detached,
 frozen plain record values, so later provider mutation cannot change it. Object,
 checksum and canonical-plaintext module-owned copies are cleared in success and
 failure paths where the runtime permits it; caller, provider and R2-platform
-buffers are never mutated.
+buffers are never mutated. Module-private failure provenance, captured
+invocation/stream/typed-array intrinsics and exact own-data descriptor snapshots
+prevent injected prototypes, accessors, hidden/symbol keys or method overrides
+from selecting an error code or replacing cleanup.
 
-This is source-level verification, not operational restore continuity. A real
+This is source-level verification, not operational restore continuity. An
+authenticated independently retained trusted-manifest provenance adapter, real
 custody/escrow adapter, runtime binding, isolated restore sink, external backup,
 retention/Bucket Lock proof, R2 version/etag or object-history custody, measured
 restore exercise and remote evidence remain absent. The verifier's result does
@@ -242,14 +250,16 @@ duplicate classification, D1 retry timing through attempt five,
 unavailable/throwing verifier redaction, stale/expired/renewal-conflict leases,
 expiry after a committed PUT, and clearing writer-owned temporary buffers.
 
-The restore suite covers trusted-manifest validation before any object read,
-hostile object-key selection, exact metadata and stored checksum contracts,
-missing/unavailable objects, zero/short/oversized/overflowing/erroring streams,
-full computed SHA-256, reader cancellation, custody unavailable/integrity/error
-classification, noncanonical or manifest-divergent records, provider mutation,
-detached immutable results and temporary-buffer clearing.
-Provider-owned checksum/body buffers are also asserted unchanged; thrown
-objects, accessors and provider text are reconstructed as fixed restore errors.
+The restore suite covers trusted-manifest validation before dependency
+resolution, hostile object-key selection, private failure provenance, exact
+own-data metadata and captured stored-checksum copy contracts, zero-read unused
+body cancellation, real zero/short/oversized/overflowing/erroring/malformed
+streams, full computed SHA-256, reader cleanup, custody result/array/record
+shapes, independent count/sequence binding, provider mutation, detached frozen
+results and overridden/detached temporary-buffer cleanup. Provider-owned
+checksum/body buffers are asserted unchanged; thrown objects, accessors,
+Proxies, hidden/symbol extras, method overrides, thenables and provider text are
+reconstructed as fixed restore errors.
 
 ## Remaining gates
 
@@ -259,6 +269,8 @@ satisfy encrypted archive continuity. The dependency must remain
 and execute their proof in the same run:
 
 - archive-domain fingerprint derivation, KEK custody and key escrow;
+- an authenticated, independently retained trusted-manifest provenance adapter
+  and evidence source that does not derive authority from the restored object;
 - add the closed KEK/custody adapter, writer and restore runtime integration,
   remote proof, and an isolated restore sink/exercise around the bounded
   non-HTTP verifier;

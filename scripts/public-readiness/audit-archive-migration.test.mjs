@@ -276,3 +276,217 @@ test("archive lease predicates retain canonical millisecond boundaries", () => {
     /SELECT 1 FROM "audit_archive_batch"[\s\S]*?"batch_key" = NEW\."batch_key"/,
   );
 });
+
+test("fresh 0021 renews only the same live lease without another attempt", () => {
+  const database = openDatabase();
+  try {
+    applyThrough(database, "0021_audit_archive.sql");
+    const occurredAt = "2026-07-18T05:00:00.000Z";
+    const createdAt = "2026-07-18T05:00:01.000Z";
+    const eventId = "node.archive.renew";
+    database
+      .prepare(
+        `INSERT INTO audit_event (id, event_type, outcome, occurred_at)
+         VALUES (?, 'test.archive', 'success', ?)`,
+      )
+      .run(eventId, occurredAt);
+    const { sequence } = database
+      .prepare("SELECT sequence FROM audit_archive_source WHERE event_id = ?")
+      .get(eventId);
+    database
+      .prepare(
+        `INSERT INTO audit_archive_key_sentinel
+          (key_version, domain, fingerprint_ref, fingerprint_hash_version,
+           created_at)
+         VALUES ('v1', 'pgid.audit_archive_kek_fingerprint.v1', ?, 1, ?)`,
+      )
+      .run("A".repeat(43), createdAt);
+
+    const batchKey = `${"B".repeat(42)}E`;
+    const objectSha256 = "1".repeat(64);
+    const plaintextSha256 = "2".repeat(64);
+    const objectBytes = new Uint8Array([1, 2, 3]);
+    const objectKey = `audit/v1/${String(sequence).padStart(16, "0")}-${String(
+      sequence,
+    ).padStart(16, "0")}/${objectSha256}.pgid-audit`;
+    const record = {
+      actorRef: null,
+      actorRefHashVersion: null,
+      actorUserId: null,
+      clientId: null,
+      eventId,
+      eventType: "test.archive",
+      ipHash: null,
+      metadataJson: null,
+      occurredAt,
+      outcome: "success",
+      sequence,
+      sessionId: null,
+      subjectId: null,
+      userAgentHash: null,
+    };
+    const canonicalRecord = JSON.stringify(record);
+    const plaintextBytes = Buffer.byteLength(
+      JSON.stringify({
+        contract: "pgid-audit-records-v1",
+        records: [record],
+        schemaVersion: 1,
+      }),
+    );
+    const manifest = {
+      batchGeneration: 1,
+      checkpointFromSequence: 0,
+      contentType: "application/vnd.pg72.pgid-audit-archive+json",
+      contract: "pgid-audit-archive-v1",
+      createdAt,
+      eventCount: 1,
+      firstSequence: sequence,
+      keyVersion: "v1",
+      lastSequence: sequence,
+      objectBytes: objectBytes.byteLength,
+      objectKey,
+      objectSha256,
+      plaintextSha256,
+      schemaVersion: 1,
+    };
+
+    database.exec("BEGIN");
+    try {
+      database
+        .prepare(
+          `INSERT INTO audit_archive_batch_item
+            (batch_key, ordinal, source_sequence, event_id, event_type,
+             actor_user_id, actor_ref, actor_ref_hash_version, subject_id,
+             client_id, session_id, outcome, ip_hash, user_agent_hash,
+             metadata_json, occurred_at, canonical_record_json,
+             canonical_record_bytes)
+           VALUES (?, 1, ?, ?, 'test.archive', NULL, NULL, NULL, NULL,
+                   NULL, NULL, 'success', NULL, NULL, NULL, ?, ?, ?)`,
+        )
+        .run(
+          batchKey,
+          sequence,
+          eventId,
+          occurredAt,
+          canonicalRecord,
+          Buffer.byteLength(canonicalRecord),
+        );
+      database
+        .prepare(
+          `INSERT INTO audit_archive_batch
+            (batch_key, batch_generation, checkpoint_revision,
+             checkpoint_from_sequence, schema_version, contract, manifest_json,
+             first_sequence, last_sequence, event_count, plaintext_bytes,
+             plaintext_sha256, key_version, content_type, object_key,
+             object_bytes, object_sha256, encrypted_envelope, status,
+             dispatch_generation, attempts, next_attempt_at, lease_id,
+             lease_expires_at, r2_version, r2_etag, r2_readback_sha256,
+             r2_readback_at, archived_at, envelope_gc_at, last_error_code,
+             manual_replay_audit_id, created_at, updated_at)
+           VALUES (?, 1, 0, 0, 1, 'pgid-audit-archive-v1', ?, ?, ?, 1, ?, ?,
+                   'v1', 'application/vnd.pg72.pgid-audit-archive+json', ?, ?, ?,
+                   ?, 'pending', 1, 0, ?, NULL, NULL, NULL, NULL, NULL, NULL,
+                   NULL, NULL, NULL, NULL, ?, ?)`,
+        )
+        .run(
+          batchKey,
+          JSON.stringify(manifest),
+          sequence,
+          sequence,
+          plaintextBytes,
+          plaintextSha256,
+          objectKey,
+          objectBytes.byteLength,
+          objectSha256,
+          objectBytes,
+          createdAt,
+          createdAt,
+          createdAt,
+        );
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+
+    const leaseId = `${"C".repeat(42)}E`;
+    database
+      .prepare(
+        `UPDATE audit_archive_batch
+            SET status = 'processing', attempts = 1, next_attempt_at = NULL,
+                lease_id = ?, lease_expires_at = ?, updated_at = ?
+          WHERE batch_key = ?`,
+      )
+      .run(
+        leaseId,
+        "2026-07-18T05:03:00.000Z",
+        "2026-07-18T05:00:02.000Z",
+        batchKey,
+      );
+    const renewed = database
+      .prepare(
+        `UPDATE audit_archive_batch
+            SET lease_expires_at = ?, updated_at = ?
+          WHERE batch_key = ? AND lease_id = ?`,
+      )
+      .run(
+        "2026-07-18T05:04:30.000Z",
+        "2026-07-18T05:01:30.000Z",
+        batchKey,
+        leaseId,
+      );
+    assert.equal(renewed.changes, 1);
+    assert.equal(
+      database.prepare("SELECT count(*) AS count FROM audit_archive_attempt").get()
+        .count,
+      1,
+    );
+    assert.deepEqual(
+      {
+        ...database
+        .prepare(
+          `SELECT status, attempts, lease_id, lease_expires_at, updated_at
+             FROM audit_archive_batch WHERE batch_key = ?`,
+        )
+        .get(batchKey),
+      },
+      {
+        attempts: 1,
+        lease_expires_at: "2026-07-18T05:04:30.000Z",
+        lease_id: leaseId,
+        status: "processing",
+        updated_at: "2026-07-18T05:01:30.000Z",
+      },
+    );
+    assert.throws(() =>
+      database
+        .prepare(
+          `UPDATE audit_archive_batch
+              SET lease_expires_at = ?, updated_at = ?
+            WHERE batch_key = ?`,
+        )
+        .run(
+          "2026-07-18T05:05:00.000Z",
+          "2026-07-18T05:04:30.000Z",
+          batchKey,
+        )
+    );
+    assert.throws(() =>
+      database
+        .prepare(
+          `UPDATE audit_archive_batch
+              SET lease_id = ?, lease_expires_at = ?, updated_at = ?
+            WHERE batch_key = ?`,
+        )
+        .run(
+          `${"D".repeat(42)}E`,
+          "2026-07-18T05:05:00.000Z",
+          "2026-07-18T05:02:00.000Z",
+          batchKey,
+        )
+    );
+    integrity(database);
+  } finally {
+    database.close();
+  }
+});

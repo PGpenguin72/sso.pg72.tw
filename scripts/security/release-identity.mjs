@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 
 const workflowDigests = Object.freeze({
-  "ci.yml": "eedcbefb68e7d0a4047a0793013545a95387274d608c4840d86e80360e29f7b0",
+  "ci.yml": "e907641bdb2659f86a922ad696c49d8d3ab117a8ffff117891ac281c6a50bfda",
   "dast-preview.yml": "9826177b4315c8f0ca29fe812508349d1ac0fcab6e3cce9d1e0772c9c124e711",
 });
 

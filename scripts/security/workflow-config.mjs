@@ -53,11 +53,11 @@ const codeOwnedExpressionContexts = Object.freeze([
 ]);
 const codeOwnedPackageRoots = Object.freeze([".", "apps/sso", "apps/test-rp", "wiki"]);
 const codeOwnedWorkflowSourceDigests = Object.freeze({
-  "ci.yml": "eedcbefb68e7d0a4047a0793013545a95387274d608c4840d86e80360e29f7b0",
+  "ci.yml": "e907641bdb2659f86a922ad696c49d8d3ab117a8ffff117891ac281c6a50bfda",
   "dast-preview.yml": "9826177b4315c8f0ca29fe812508349d1ac0fcab6e3cce9d1e0772c9c124e711",
 });
 const codeOwnedReachablePackageScriptDigest =
-  "fd7e280671c8d2ec864c296948d1bb07c2106852b451eb867d5864af512caecb";
+  "6027cfa69c065976cec03896dccfcaaaeb821288ed294f45f325a403d4832c42";
 const codeOwnedCompletePackageScriptDigest =
   "9785193a907eec3edd5152a6597353e9f80beea18775c060a8106aa7e97fdb32";
 const codeOwnedWorkflowRuns = Object.freeze({
@@ -67,7 +67,6 @@ const codeOwnedWorkflowRuns = Object.freeze({
     "verify:5": "pnpm check",
     "verify:6": "pnpm security:tools:install",
     "verify:7": "pnpm security:check",
-    "verify:8": "pnpm dast:local",
   }),
   "dast-preview.yml": Object.freeze({
     "safe-dast:1": "node scripts/security/release-identity.mjs",
@@ -79,7 +78,6 @@ const codeOwnedWorkflowRuns = Object.freeze({
 const codeOwnedReachablePackageScripts = Object.freeze({
   ".": Object.freeze({
     check: "pnpm test:clean-dist && pnpm test:public-readiness && pnpm --filter @pg72/id check && pnpm --filter @pg72/test-rp check && pnpm --filter @pg72/wiki check",
-    "dast:local": "node scripts/security/dast-local.mjs",
     "dast:preview": "node scripts/security/dast.mjs --preview",
     "security:artifact": "node scripts/security/artifact-gate.mjs",
     "security:audit": "node scripts/security/accepted-advisories.mjs",
@@ -219,7 +217,7 @@ const codeOwnedLocalScripts = Object.freeze([
 ]);
 const codeOwnedArtifactUpload = Object.freeze({
   filename: "ci.yml",
-  step: "verify:9",
+  step: "verify:8",
   name: "Upload release assurance inventories",
   uses: "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
   with: Object.freeze({

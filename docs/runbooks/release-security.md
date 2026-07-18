@@ -11,14 +11,24 @@ dependency/toolchain or an untested operator command.
 
 ## Required Local Gate
 
-From a frozen install at the exact release candidate:
+Automatic push/pull-request CI runs from a frozen install at the exact release
+candidate:
 
 ```bash
 pnpm check
 pnpm security:tools:install
 pnpm security:check
+```
+
+Automatic CI excludes DAST. Before Production GO, the owner must separately
+authorize and retain the credential-free exact-candidate baseline:
+
+```bash
 pnpm dast:local
 ```
+
+This owner-authorized local DAST evidence is required but does not satisfy the
+still-pending authenticated isolated-Preview DAST gate.
 
 `pnpm security:check` runs these tracked sub-gates:
 
@@ -47,11 +57,12 @@ pre-existing `node_modules` at all four roots, regardless of whether the path
 is a file, directory, symlink, or unreadable. CI then runs `pnpm check`,
 installs actionlint and Gitleaks from the exact
 versions and SHA-256 checksums in `security/tool-versions.json`, then runs the
-security and local DAST gates. Every third-party Action is pinned to the
+security gate. It does not invoke DAST. Every third-party Action is pinned to the
 immutable commit recorded in the same file. The checked-in upload step selects
 only `.artifacts/release`, errors when it is absent, excludes hidden files, and
 uses seven-day retention; the dry-run bundle and temporary D1 state are outside
-that selected path.
+that selected path. The automatic CI artifact contains source-assurance
+inventories, not DAST evidence.
 
 This boundary follows pnpm's documented
 [`--frozen-lockfile`](https://pnpm.io/11.x/cli/install#--frozen-lockfile),

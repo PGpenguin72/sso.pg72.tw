@@ -104,6 +104,34 @@ test("accepts only the exact recursively reachable package-script graph", () => 
     );
     assert.deepEqual(validateWorkflowCommands(document, filename, context), []);
   }
+
+  const document = YAML.parse(
+    readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8"),
+  );
+  assert.deepEqual(Object.keys(document.on).sort(), ["pull_request", "push"]);
+  assert.equal(
+    document.jobs.verify.steps.some((step) => step.run === "pnpm dast:local"),
+    false,
+  );
+
+  assert.equal(
+    context.packagesByRoot["."].scripts["dast:local"],
+    "node scripts/security/dast-local.mjs",
+  );
+
+  const changed = structuredClone(document);
+  const uploadIndex = changed.jobs.verify.steps.findIndex((step) =>
+    step.uses?.startsWith("actions/upload-artifact@"),
+  );
+  changed.jobs.verify.steps.splice(uploadIndex, 0, {
+    name: "Run localhost-only DAST",
+    run: "pnpm dast:local",
+  });
+  assert.ok(
+    validateWorkflowCommands(changed, "ci.yml", context).some((error) =>
+      error.includes("job/step run map differs"),
+    ),
+  );
 });
 
 test("pins the exact workflow file set and raw LF-only tracked bytes", () => {
@@ -174,7 +202,7 @@ test("pins reachable package-script names and complete values to one code-owned 
   const baseline = loadWorkflowCommandContext();
   assert.equal(
     reachablePackageScriptDigest(baseline),
-    "fd7e280671c8d2ec864c296948d1bb07c2106852b451eb867d5864af512caecb",
+    "6027cfa69c065976cec03896dccfcaaaeb821288ed294f45f325a403d4832c42",
   );
   assert.deepEqual(validateReachablePackageScriptIdentity(baseline), []);
 

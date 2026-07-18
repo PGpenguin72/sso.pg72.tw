@@ -91,14 +91,25 @@ Passing this narrower gate permits an invite-beta release only. It does not auth
 
 ## Automated Source Assurance
 
-Run the tracked local gates from a frozen install:
+Automatic push/pull-request CI runs the tracked source-assurance gates from a
+frozen install:
 
 ```bash
 pnpm check
 pnpm security:tools:install
 pnpm security:check
+```
+
+Automatic CI does not run DAST. Before Production GO, the owner must separately
+authorize and retain exact-candidate evidence from the credential-free local
+baseline:
+
+```bash
 pnpm dast:local
 ```
+
+That owner-authorized local result remains required but is not sufficient for
+Production GO; authenticated isolated-Preview DAST remains an unmet gate below.
 
 `pnpm security:check` combines type-aware Worker Promise analysis, required
 checksum-pinned Gitleaks full-history scanning, an explicit bounded/redacted
@@ -159,6 +170,10 @@ rejection, dynamic-registration denial, logout/admin unauthenticated behavior,
 security/cache headers, and a cross-Origin mutation denial. This baseline does
 not cover real login, consent, authenticated admin/gateway/logout behavior,
 abuse/load testing, or an independent review.
+
+The automatic CI artifact therefore contains source-assurance inventories, not
+DAST evidence. DAST evidence must come from the separately owner-authorized
+exact-candidate run.
 
 The separate `Isolated Preview DAST` workflow is manual and targets only the
 exact origin committed to `security/dast-policy.json` and repeated in the

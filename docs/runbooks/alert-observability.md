@@ -5,15 +5,20 @@
 > repositories, bounded audit, OAuth-report, global fan-out-gap, logout
 > delivery, global runtime-health, and approximate Queue-DLQ source repositories,
 > a D1 Queue streak repository, `0021` archive-ledger source, additive `0023`
-> R2-evidence contract and unwired archive D1 repository, plus the additive
+> R2-evidence contract, `0024` forward evidence guard, unwired archive D1
+> repository, pure unwired create-only writer, and pure non-HTTP one-object
+> restore verifier, plus the additive
 > `0022` evaluator run/source/decision proof
 > ledger with compatible local run and lifecycle-state proof repositories, and
 > an unwired local nine-source evaluator orchestration module. None of these
-> modules is imported by the Worker entry point or a scheduler. A scheduled
-> handler, reviewed bindings/configuration, alert/archive Queue/DLQ,
-> Email/admin delivery, R2 archive
-> runtime, bounded restore, external backup, and deployment remain absent.
-> Production records remain through migration `0012`.
+> modules is imported, invoked, or awaited by the existing scheduled handler;
+> that handler registers logout delivery dispatch with `ctx.waitUntil()` only.
+> Reviewed
+> bindings/configuration, alert/archive Queue/DLQ, Email/admin delivery, R2
+> archive runtime, an authenticated retained manifest source, KEK custody,
+> restore sink/exercise, external backup/retention, and remote proof remain
+> absent. The last recorded production state was through migration `0012` and
+> must be reverified.
 
 ## What `0020` provides
 
@@ -133,8 +138,9 @@ not support the Free plan. Each statement inside `batch()` counts separately;
 the focused Workerd integration counts the actual complete local path rather
 than treating one batch as one query. See [D1 limits](https://developers.cloudflare.com/d1/platform/limits/).
 
-This remains local and unwired. There is no scheduled-handler import, Queue
-binding, mode/config variable, secret declaration, Email adapter, remote
+This remains local and unwired. The existing logout-only scheduled handler does
+not import, invoke, or await this orchestration. There is no alert Queue binding,
+mode/config variable, secret declaration, Email adapter, remote
 migration, or deployment in this checkpoint. Applying `0022` while continuing
 to call the legacy evaluator runtime lease methods would fail closed, so rollout
 still requires reviewed entry-point/configuration wiring to this compatible run
@@ -198,9 +204,9 @@ the fixed repository error `counter_exhausted`; ordinary lease contention still
 returns no lease.
 The runtime repository also owns the exact projection read below. The local
 evaluator orchestrator invokes these modules in focused and real-D1 Workerd
-integration, but the Worker entry point and scheduler do not import it. No
-scheduled handler, generated bindings/configuration, or deployed execution path
-exists.
+integration, but the Worker entry point and its existing logout-only scheduled
+handler do not import, invoke, or await it. No generated alert
+bindings/configuration or operational execution path exists.
 
 The bounded audit repository executes one timestamp-integrity projection and
 its fourteen closed rule projections in one awaited D1 batch. The integrity
@@ -256,8 +262,9 @@ and the closed runtime status/error domains. It also requires
 retained `last_success_at` after a later run starts.
 
 This in-place `0020` source correction is allowed only while the target ledger
-has never applied the old `0020` bytes. Production is recorded through `0012`,
-but every target still needs explicit ledger evidence before migration. Recreate
+has never applied the old `0020` bytes. The last production record was through
+`0012`, but it must be reverified and every target still needs explicit ledger
+evidence before migration. Recreate
 disposable local or isolated Preview databases that applied the old migration
 and rehearse the complete ordered ledger again. If any persistent D1 already
 contains the old `0020`, stop: editing the migration file will not rerun it.
@@ -347,13 +354,14 @@ the global source incomplete; malformed or unavailable D1 evidence returns only
 a fixed repository error. No query projects payload, incident, idempotency,
 subject, user, email, token, or delivery-provider data.
 
-This repository is not imported by the Worker entry point or scheduler. By
+This repository is not imported by the Worker entry point. By
 itself it does not initialize or run the evaluator, persist alert lifecycle
 state, claim or deliver outbox work, add Cron/Queue/Email/admin/configuration
 wiring, or change the artifact identity. The local evaluator orchestrator now
 composes this source with the `0022` run/state contracts and proves a synthetic
 same-run path in Workerd, but that orchestrator remains absent from the Worker
-entry point, scheduled handler, bindings, and configuration.
+entry point, the existing logout-only scheduled handler, bindings, and
+configuration.
 
 OAuth reporter coverage is a whole-evaluation gate. Until every in-window row
 has either its legacy raw reporter ID or the persisted reporter reference, the
@@ -510,20 +518,27 @@ the local audit repository uses it for bounded tracked-identity zero fill.
 The local archive-crypto module separately seals and opens bounded canonical v1
 records. It preserves the nullable `actorRef`/`actorRefHashVersion` pair and
 authenticates `checkpointFromSequence` across the header, manifest, and AES-GCM
-AAD. Migration `0021` now owns the monotonic source ledger, deterministic
-backfill, immutable batch snapshots, archive-key sentinel schema, and terminal
-checkpoint/BLOB-cleanup transaction. Additive migration `0023` preserves legacy
-conflict receipts without inventing observations and adds exact current conflict
-and successful object-size/stored-SHA/readback-SHA evidence described in
-[`audit-archive.md`](./audit-archive.md). The unwired request-scoped archive D1
-repository owns fingerprint-only sentinel continuity, bounded source selection,
-canonical batch persistence, dispatch-generation claims, lease-bound envelope
-reads, bounded due/expired/checkpoint work selection, exact lease/terminal
-receipts, and audited dead replay. These remain local source contracts, not an archive service: there is no
-`audit-archive.ts` runtime module, archive-domain fingerprint derivation or KEK
-custody, `AUDIT_ARCHIVE` R2 binding/writer, Queue/DLQ, Cron, bounded restore,
-retention exercise, or external backup. `encrypted_r2_archive` therefore
-remains `dependency_missing`.
+AAD. Migration `0021` owns the monotonic source ledger, immutable snapshots and
+terminal checkpoint/BLOB cleanup. `0023` preserves legacy conflict receipts and
+adds current R2 evidence; head migration `0024` leaves those immutable legacy
+receipts intact while rejecting new terminal R2-version evidence without an
+observed byte count. The unwired archive repository owns fingerprint-only
+sentinel continuity, bounded persistence/work selection, lease/terminal
+receipts, dead replay, and same-fence live strict-descendant lease adoption.
+
+The pure unwired writer owns fixed 30/120/480/900-second retry timing and
+supplies `nextAttemptAt` for repository validation/persistence. On attempt five,
+only transient-error or lease-expiry exhaustion becomes `dead`; integrity
+failures, object conflicts, and readback mismatches remain `corrupt`. The pure
+non-HTTP one-object restore verifier requires an externally
+supplied exact manifest, verifies object identity, metadata, size, and
+stored/computed digests, then returns detached records. Only module/writer-owned
+temporary copies are cleared; caller-, provider-, and R2-owned buffers are never
+mutated. Authenticated independently retained manifest provenance, KEK custody,
+runtime R2 binding/integration, restore sink/exercise, external backup/retention,
+Queue/DLQ/Cron wiring, and remote proof remain absent. These are local source
+contracts, not an archive service; `encrypted_r2_archive` therefore remains
+`dependency_missing`. Details are in [`audit-archive.md`](./audit-archive.md).
 
 The local `alert-state-repository` reconstructs one lifecycle/CAS snapshot from
 the state and current-generation incident rows, then accepts one already-
@@ -590,8 +605,9 @@ repairs them to canonical text, and proves the indexes become empty without a
 base-table scan.
 It proves the existing audit insert/delete compensation still works before the
 separate source ledger is added. The archive schema/migration suites apply the
-ordered ledger through `0023`, verify the six-table `0021` transaction contract,
-the forward-only evidence rebuild and legacy-conflict preservation, and retain
+ordered ledger through head `0024`, verify the six-table `0021` transaction
+contract, the forward-only evidence rebuild/guard and legacy-conflict
+preservation, and retain
 that compensation behavior. The pure evaluator suites verify the exact
 15-rule matrix, redacted dimensions, source projections, deterministic lifecycle
 and persistence shape without scheduling work. The state repository suites use
@@ -637,7 +653,7 @@ overflow/incomplete behavior, result-shape and chronology validation, redacted
 errors, and all three existing-index query plans without claiming or delivering
 work. The archive schema and migration suites verify that one invalid parent
 aborts backfill and that a repaired canonical parent succeeds, plus the `0021`
-ledger transaction and additive `0023` evidence contracts. The archive-crypto
+ledger transaction and additive `0023`/`0024` evidence contracts. The archive-crypto
 and repository suites verify the record/envelope/checkpoint binding, bounded
 source and persistence behavior, dispatch-generation and lease-bound reads,
 exact lease/terminal/replay receipts, response-loss retries, and concurrent
@@ -652,16 +668,18 @@ bounded local `audit_event`, OAuth-report, fan-out-gap, logout-delivery,
 runtime-health, and approximate Queue-DLQ source repositories must still report
 observability as `source_present_unverified`, leaving continuity and drills
 blocked. A later reviewed slice must add generated binding/config types and wire
-the compatible orchestrator into the directly awaited scheduled handler; it
+the compatible orchestrator into the existing scheduled handler, which currently
+registers logout-only dispatch with `ctx.waitUntil()`; it
 must also add dedicated alert Queue/DLQ, an Email Service adapter, admin
 acknowledge/resolve/replay
 operations, and redaction/race/failure tests. Archive crypto plus the `0021`
-ledger, `0023` evidence contract, unwired D1 repository, and pure unwired writer
-do not satisfy the separate encrypted archive dependency;
-`encrypted_r2_archive` remains `dependency_missing` until archive-domain
-fingerprint derivation and KEK custody, writer runtime integration and remote
-proof, bounded restore, Queue/DLQ, Cron redrive, retention proof, and
-external-backup exercise exist.
+ledger, `0023`/`0024` evidence contracts, unwired D1 repository, pure unwired
+writer, and pure non-HTTP verifier do not satisfy the separate encrypted archive
+dependency. `encrypted_r2_archive` remains `dependency_missing` until
+authenticated retained manifest provenance, archive-domain fingerprint
+derivation and KEK custody, runtime R2 integration and remote proof, a restore
+sink/exercise, Queue/DLQ/Cron redrive, retention proof, and external-backup
+exercise exist.
 
 Isolated Preview must then apply the ordered migration ledger, tune thresholds,
 exercise exact D1 and approximate Queue evidence, prove real Email receipt and

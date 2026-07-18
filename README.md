@@ -8,15 +8,16 @@ PGID is the custom identity provider for PG72 services. Phase 0 runs on Cloudfla
 - nonempty central `sid` claims on every user ID token, with refresh issuance bound to the same live user session;
 - admin/developer-managed OAuth clients (dynamic registration disabled), mandatory consent, and the `bootadmin`/`admin`/`developer`/`user` platform role model;
 - host-only central sessions, device revocation, invitations, account suspension, and audit events;
-- versioned D1 migrations through local source `0020`: `0013` normalizes confidential client authentication, `0014` adds Passkey step-up state, `0015` enforces global provider-identity ownership, `0016` adds one-time public-registration intents plus immutable legal-acceptance history, `0017` adds persistent restricted-account access, `0018` adds durable global-logout state, `0019` adds hash-only recovery codes plus a separate short-lived recovery principal, and `0020` adds schema-only redacted alert incident/outbox/runtime state, persistent audit-actor/OAuth-reporter reference fields, a key-continuity sentinel, and bounded source indexes; the latest production record remains applied through `0012`, and `0020` performs no actor/reporter backfill, sentinel initialization, evaluation, or delivery;
+- an ordered local D1 migration ledger from `0001` through head `0024`: `0013`-`0019` add the confidential-client, Passkey step-up, identity-ownership, registration, restricted-account, global-logout, and recovery contracts; `0020`-`0022` add the schema-only observability and evaluator-proof foundations; `0021`, `0023`, and `0024` add the archive ledger, R2 evidence contract, and forward evidence guard. `0024` preserves existing immutable legacy receipts while rejecting new terminal R2-version evidence without an observed byte count. The last recorded production state was applied through `0012`; an authorized operator must reverify the live ledger before relying on that historical record;
 - a local durable global-logout path: actual `(sid, client)` visits, atomic D1 revoke/audit/outbox writes, a dedicated Queue/DLQ, bounded retry/Cron recovery, redacted operator replay, and an idempotent test-RP receiver; migration, queue provisioning, production RP receivers, external alerts, and rollout evidence remain incomplete;
-- a tightly scoped mail introspection path for Dovecot: local source authorizes only `pgid-mail-introspect` to inspect eligible `pg72-webmail` access tokens and disclose verified email; this path is not deployed or provisioned in production;
-- Passkey step-up before every OAuth client mutation, using a one-time session/user-bound challenge, required user verification, and a D1 session timestamp; this path is implemented and tested locally but not migrated, deployed, independently reviewed, or smoke-tested in production;
-- a local, default-disabled recovery path: ten one-use 160-bit `PGID-R1` codes, hash-only storage, an isolated ten-minute recovery session, required-UV Passkey replacement, atomic code rotation, and central session/token revocation; production has not applied `0019`, enabled `RECOVERY_MODE`, or completed a recovery drill;
+- a local archive source boundary with an unwired create-only R2 writer and a pure non-HTTP one-object restore verifier. The verifier checks an externally supplied expected manifest, object identity, metadata, size, and stored/computed digests before returning detached records. Authenticated independently retained manifest provenance, KEK custody, runtime R2 integration, a restore sink/exercise, external backup/retention, and remote proof remain absent; observability remains `source_present_unverified` and `encrypted_r2_archive` remains `dependency_missing`;
+- a tightly scoped mail introspection path for Dovecot: local source authorizes only `pgid-mail-introspect` to inspect eligible `pg72-webmail` access tokens and disclose verified email; the last production record did not include deployment or provisioning of this path, and live state must be reverified;
+- Passkey step-up before every OAuth client mutation, using a one-time session/user-bound challenge, required user verification, and a D1 session timestamp; this path is implemented and tested locally, while the last production record did not include its migration/deployment, independent review, or smoke test, and the current live state must be reverified;
+- a local, default-disabled recovery path: ten one-use 160-bit `PGID-R1` codes, hash-only storage, an isolated ten-minute recovery session, required-UV Passkey replacement, atomic code rotation, and central session/token revocation; the last production record did not include `0019`, enabled `RECOVERY_MODE`, or a recovery drill, and must be reverified;
 - an independent OIDC relying party based on `oauth4webapi`;
 - workerd regression tests for discovery, security headers, registration policy, request aborts, D1 constraints, PKCE transactions, and callback replay.
 
-The canonical architecture and migration decisions are in [`codex.md`](./codex.md). PGID is deployed at `https://sso.pg72.tw` as an invite-only beta, and deployment records show Copy and Link using it in production. This is not full Production GO: public registration, global-logout Preview/production rollout and RP receivers, external alerting, recovery-code Preview/production rollout and drills, and other security gates remain incomplete.
+The canonical architecture and migration decisions are in [`codex.md`](./codex.md). Existing deployment records describe PGID at `https://sso.pg72.tw` as an invite-only beta and show Copy and Link using it for production sign-in; those records must be reverified and are not full Production GO. Public registration, global-logout Preview/production rollout and RP receivers, external alerting, recovery-code Preview/production rollout and drills, and other security gates remain incomplete.
 
 ## Documentation
 
@@ -36,7 +37,14 @@ The canonical architecture and migration decisions are in [`codex.md`](./codex.m
 
 ## Registration Policy
 
-The deployed `REGISTRATION_MODE` in `apps/sso/wrangler.jsonc` is currently `"invite"`. The code supports and tests both modes, but the switch to `"public"` requires the `codex.md` §9.2 gate, explicit owner approval, and a production deployment. Invitations stay fully functional in either mode; a pending invitation still assigns its role (for example `admin`) and is consumed on first sign-in.
+The committed production-target `REGISTRATION_MODE` in
+`apps/sso/wrangler.jsonc` is `"invite"`. That source configuration is not proof
+of the mode currently deployed; an authorized operator must verify live Worker
+configuration. The code supports and tests both modes, but the switch to
+`"public"` requires the `codex.md` §9.2 gate, explicit owner approval, and a
+production deployment. Invitations stay fully functional in either mode; a
+pending invitation still assigns its role (for example `admin`) and is consumed
+on first sign-in.
 
 Current safeguards in public mode:
 
@@ -93,14 +101,15 @@ the remaining gates are tracked in `codex.md` §18:
 
 | Service | Integration | Status |
 | --- | --- | --- |
-| Copy (`copy.pg72.tw`) | Native OIDC confidential client + PKCE, guest-code path kept separate | **Production live**. Guest six-digit code retained. |
-| Link (`link.pg72.tw`) | `oauth4webapi` BFF, stable `sub` session | **Production live**. PGID delivery is local-only; Link receiver/rollout remains pending. |
-| Status (`status.pg72.tw`) | OIDC BFF + D1 opaque session | Local login integration complete; Preview and back-channel receiver remain pending. |
-| Upload admin (`upload.pg72.tw/admin`) | Authlib OIDC + SQLite session (`client_secret_post`) | Local integration complete; Preview and cutover pending. |
-| File Browser (`file.pg72.tw`) | oauth2-proxy gateway + proxy auth header | Planned; not yet deployed. |
-| Roundcube (`webmail.pg72.tw`) | Native Generic OIDC + Dovecot XOAUTH2 for mail | PGID prerequisite is implemented locally; deployment, service-client provisioning, and mail cutover remain pending. |
+| Copy (`copy.pg72.tw`) | Native OIDC confidential client + PKCE, guest-code path kept separate | Recorded as production live; reverify. Guest six-digit code retained. |
+| Link (`link.pg72.tw`) | `oauth4webapi` BFF, stable `sub` session | Recorded as production live; reverify. PGID delivery is local-only; Link receiver/rollout remains pending. |
+| Status (`status.pg72.tw`) | OIDC BFF + D1 opaque session | Local-source login integration complete; Preview and receiver state require authorized live re-verification. |
+| Upload admin (`upload.pg72.tw/admin`) | Authlib OIDC + SQLite session (`client_secret_post`) | Local-source integration complete; Preview and cutover state require authorized live re-verification. |
+| File Browser (`file.pg72.tw`) | oauth2-proxy gateway + proxy auth header | Source plan only; deployment state requires authorized live re-verification. |
+| Roundcube (`webmail.pg72.tw`) | Native Generic OIDC + Dovecot XOAUTH2 for mail | PGID prerequisite implemented locally; deployment, service-client provisioning, and mail-cutover state require authorized live re-verification. |
 
-Copy and Link have switched production traffic to PGID. Relying parties must use
+Existing records show Copy and Link switched production traffic to PGID; live
+state must be reverified. Relying parties must use
 `client_secret_post` for the token endpoint (the provider's HTTP Basic parsing is
 not RFC-6749-percent-decode compatible).
 
@@ -252,11 +261,13 @@ never be stored in source control.
 
 ### Production
 
-The `pg72-id` Worker is deployed with a production identity D1, queues/secrets,
-the exact `sso.pg72.tw` custom domain, and production issuer/Passkey settings.
-Existing records report migrations through `0012`; an authorized operator must
-verify current remote state before a maintenance operation. Deployment history is
-not evidence that the full gate below has passed.
+Existing records describe a `pg72-id` Worker with a production identity D1,
+queues/secrets, the exact `sso.pg72.tw` custom domain, and production
+issuer/Passkey settings.
+The last recorded production state reports migrations through `0012`; an
+authorized operator must reverify current remote state before a maintenance
+operation. Deployment history is not evidence that the full gate below has
+passed.
 
 The committed `database_id` is a local-development placeholder. Configure the
 reviewed production binding through the deployment environment before any remote
@@ -273,9 +284,9 @@ Full Production GO checklist:
 
 Mail Path A remains a separate owner-run rollout:
 
-1. Review the locally implemented Passkey step-up and verify its session/challenge binding, UV, replay, expiry, and missing-Passkey behavior independently; production still lacks migration `0014` and this Worker version.
+1. Review the locally implemented Passkey step-up and verify its session/challenge binding, UV, replay, expiry, and missing-Passkey behavior independently; the last recorded production state lacked migration `0014` and this Worker version, so reverify before rollout.
 2. Verify the exact production `pg72-webmail` client metadata and take a private production D1 backup.
-3. Run the provider-identity and Passkey credential duplicate preflights in `codex.md` §§0.1-0.2 and review pending migrations in numeric order (`0013` through `0020`) in isolated Preview. Provision the dedicated logout Queue/DLQ and deploy only verified Worker source with `PASSKEY_STEP_UP_MAX_AGE_SECONDS=600` plus Rate Limiting namespaces `1004`, `1005`, and `1006` bound as configured. Migrations `0016`–`0019` are required by the current Worker schema even while production remains invite-only and recovery-disabled; schema-only `0020` requires its separate observability gate and does not enable alerts. Applying any migration does not authorize changing `REGISTRATION_MODE`, changing `RECOVERY_MODE`, or enabling an RP receiver/provider.
+3. Run the provider-identity and Passkey credential duplicate preflights in `codex.md` §§0.1-0.2 and review pending migrations in numeric order (`0013` through `0024`) in isolated Preview. Provision the dedicated logout Queue/DLQ and deploy only verified Worker source with `PASSKEY_STEP_UP_MAX_AGE_SECONDS=600` plus Rate Limiting namespaces `1004`, `1005`, and `1006` bound as configured. Migrations `0016`-`0019` are required by the current Worker schema even while the committed production target remains invite-only and recovery-disabled; `0020`-`0024` remain unwired observability/archive foundations and do not enable alerts or archival. Applying any migration does not authorize changing `REGISTRATION_MODE`, changing `RECOVERY_MODE`, or enabling an RP receiver/provider.
 4. After Passkey step-up, use a same-origin PGID admin session less than 10 minutes old to provision `pgid-mail-introspect`; immediately store its one-time secret in the approved secret store, never source, logs, issues, or chat.
 5. Verify eligible active, ineligible inactive, and bad-credential `401` production behavior. Verify rate-limit `429` and limiter-failure `503` only in isolated Preview or a controlled local test, never by flooding or breaking production.
 6. Cut over Dovecot/Roundcube only in an owner-controlled maintenance window with

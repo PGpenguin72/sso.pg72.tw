@@ -1,18 +1,63 @@
 # Security Policy
 
-PGID currently runs as a deployed, invite-only production beta. Existing deployment records show Copy and Link using PGID for production sign-in. Public registration remains disabled.
+Existing deployment records describe PGID as an invite-only production beta and
+show Copy and Link using PGID for production sign-in. They are historical
+evidence, not a live-state assertion; an authorized operator must reverify the
+current deployment and registration mode.
 
-This deployed state is not the same as full Production GO or general-public approval. Local source now includes the central ID-token `sid`, visited-client ledger, replay-safe durable back-channel logout delivery, an idempotent test RP receiver, and a default-disabled recovery-code path. Final independent source review of this release candidate, Preview and production rollout, external alerting, recovery/rotation drills, and the other gates below are still incomplete; no document may treat local tests or production traffic alone as proof that those controls passed.
+That recorded state is not the same as full Production GO or general-public approval. Local source now includes the central ID-token `sid`, visited-client ledger, replay-safe durable back-channel logout delivery, an idempotent test RP receiver, and a default-disabled recovery-code path. Final independent source review of this release candidate, Preview and production rollout, external alerting, recovery/rotation drills, and the other gates below are still incomplete; no document may treat local tests or historical production traffic alone as proof that those controls passed.
 
-The repository's local source now includes the narrowly scoped Mail Path A introspection prerequisite, Passkey step-up for every OAuth client mutation, public-registration prerequisites using Turnstile, versioned legal acceptance and persistent restricted-account access, the global-logout source contract, recovery migration `0019`, observability migration `0020`, archive ledger migration `0021`, evaluator proof migration `0022`, and archive evidence migration `0023`. The observability source includes pure alert rule/evaluator/parser modules; evaluator runtime and lifecycle-state repositories; bounded source slices for ten `audit_event` rules, the OAuth client-report rule, the global fan-out-gap rule, the logout-delivery health rule, the global runtime-health rule, and the four approximate Queue-DLQ dimensions; the additive run/source/decision proof ledger and compatible run/state proof APIs; an unwired nine-source evaluator orchestration; plus the pure audit-archive record/envelope crypto contract, an unwired request-scoped archive D1 repository, and a pure unwired create-only R2 writer over injected R2 and envelope-verification dependencies.
+The repository's ordered local migration ledger runs from `0001` through head
+`0024`. It includes the narrowly scoped Mail Path A introspection prerequisite,
+Passkey step-up for every OAuth client mutation, public-registration
+prerequisites using Turnstile, versioned legal acceptance and persistent
+restricted-account access, the global-logout source contract, recovery migration
+`0019`, observability migration `0020`, archive ledger migration `0021`,
+evaluator proof migration `0022`, archive evidence migration `0023`, and the
+forward evidence guard in `0024`. The guard preserves existing immutable legacy
+receipts while rejecting new terminal R2-version evidence that lacks an observed
+byte count. The observability source includes pure alert rule/evaluator/parser
+modules; evaluator runtime and lifecycle-state repositories; bounded source
+slices for ten `audit_event` rules, the OAuth client-report rule, the global
+fan-out-gap rule, the logout-delivery health rule, the global runtime-health
+rule, and the four approximate Queue-DLQ dimensions; the additive
+run/source/decision proof ledger and compatible run/state proof APIs; an unwired
+nine-source evaluator orchestration; plus the pure audit-archive record/envelope
+crypto contract, an unwired request-scoped archive D1 repository, a pure unwired
+create-only R2 writer, and a pure non-HTTP one-object restore verifier over
+injected dependencies.
 
-The runtime repository owns initialization, immutable first-success bootstrap, and exact health projection. After `0022`, the compatible run repository owns evaluator lease acquisition/renewal, source/decision manifests, and terminal success/failure through exact run/runtime fencing. The state repository reconstructs the lifecycle snapshot and can atomically persist an already-pure decision, incident state, immutable Email outbox snapshot, canonical payload digest, and optional same-batch applied/no-state decision proof. The bounded source repositories expose only their reviewed redacted projections; after `0023`, the archive repository owns fingerprint-only sentinel continuity, bounded source selection, canonical batch persistence, exact dispatch-generation leases, lease-bound claimed-envelope reads, bounded runtime-work projections, error-specific terminal receipts, and audited dead replay.
+The runtime repository owns initialization, immutable first-success bootstrap, and exact health projection. After `0022`, the compatible run repository owns evaluator lease acquisition/renewal, source/decision manifests, and terminal success/failure through exact run/runtime fencing. The state repository reconstructs the lifecycle snapshot and can atomically persist an already-pure decision, incident state, immutable Email outbox snapshot, canonical payload digest, and optional same-batch applied/no-state decision proof. The bounded source repositories expose only their reviewed redacted projections; through `0024`, the archive repository owns fingerprint-only sentinel continuity, bounded source selection, canonical batch persistence, exact dispatch-generation leases, lease-bound claimed-envelope reads, bounded runtime-work projections, error-specific terminal receipts, and audited dead replay. The writer owns the fixed 30/120/480/900-second retry timing and supplies `nextAttemptAt`; the repository validates and persists it. On attempt five, only transient-error or lease-expiry exhaustion becomes `dead`; integrity failures, object conflicts, and readback mismatches remain `corrupt`. Startup accepts an exact still-live current lease. If the persisted lease has changed, including after an ambiguous renewal result, recovery may adopt only a live strict descendant under the exact same fence.
 
-None of these repositories, the evaluator orchestration, or the archive writer is imported by the Worker entry point or a scheduler. The fan-out source does not add durable general security-event delivery, a replayer, or Queue wiring; the logout source does not change delivery, replay, Queue, or Cron guarantees; the runtime-health source does not schedule evaluation or claim/deliver outbox work; the Queue metrics source adds no binding or sampling loop; and the archive repository/writer add no archive binding, Queue, KEK adapter, Cron or runtime wiring. The scheduled handler and generated bindings/configuration, dedicated alert or archive Queue/DLQ, Email Service adapter, operator API/UI, archive-domain fingerprint derivation and KEK custody, writer runtime integration/remote proof, bounded restore, external backup, and deployed same-run execution proof remain absent. Observability must therefore remain `source_present_unverified`, while `encrypted_r2_archive` remains `dependency_missing`; local transaction, orchestration, or writer proofs do not make observability or encrypted archive storage operational or verified.
+None of these repositories, evaluator orchestration, archive writer, or restore
+verifier is imported, invoked, or awaited by the Worker entry point's existing
+scheduled handler. That handler schedules logout delivery dispatch only. The
+fan-out source does not add durable general security-event delivery, a replayer,
+or Queue wiring; the logout source does not change delivery, replay, Queue, or
+Cron guarantees; the runtime-health source does not schedule evaluation or
+claim/deliver outbox work; the Queue metrics source adds no binding or sampling
+loop; and the archive modules add no archive binding, Queue, KEK adapter, Cron,
+or runtime wiring. The pure restore verifier validates the externally supplied
+exact manifest, object identity, metadata, size, stored/computed digests, and
+returns detached records. Authenticated independently retained manifest
+provenance, archive-domain fingerprint derivation and KEK custody, runtime R2
+binding/integration, a restore sink/exercise, external backup/retention, and
+remote proof remain absent. Observability must therefore remain
+`source_present_unverified`, while `encrypted_r2_archive` remains
+`dependency_missing`; local transaction, orchestration, writer, or verifier
+proofs do not make either dependency operational or verified. Only
+module/writer-owned temporary copies are cleared; caller-, provider-, and
+R2-owned buffers are never mutated.
 
-The undeployed local `0020` source also adds sparse single-column indexes over only non-canonical `audit_event.occurred_at`, `oauth_client_report.created_at`, `logout_delivery.created_at`, and non-null `logout_delivery_attempt.completed_at` rows, then prevents future non-canonical inserts or timestamp updates. Audit, OAuth-report, fan-out, and logout repositories probe the appropriate sparse indexes with covering `EXISTS ... LIMIT 1` statements at the start of the same D1 batch as their lexical windows. Any legacy corruption fails closed with a fixed repository error; healthy empty indexes permit the bounded window reads. `0021` independently validates each parent audit timestamp by primary key before capture or backfill can allocate a sequence. These are local migration/source contracts, not evidence that production has applied them or that observability is operational.
+The local `0020` source also adds sparse single-column indexes over only non-canonical `audit_event.occurred_at`, `oauth_client_report.created_at`, `logout_delivery.created_at`, and non-null `logout_delivery_attempt.completed_at` rows, then prevents future non-canonical inserts or timestamp updates. Audit, OAuth-report, fan-out, and logout repositories probe the appropriate sparse indexes with covering `EXISTS ... LIMIT 1` statements at the start of the same D1 batch as their lexical windows. Any legacy corruption fails closed with a fixed repository error; healthy empty indexes permit the bounded window reads. `0021` independently validates each parent audit timestamp by primary key before capture or backfill can allocate a sequence. These are local migration/source contracts, not evidence that production has applied them or that observability is operational.
 
-Production has none of migrations `0013` through `0023` or this Worker version; `pgid-mail-introspect` has not been provisioned, no public-registration or logout/alert/archive Queue bindings have been configured, `RECOVERY_MODE` remains disabled, no remote D1 operation was performed, and the mail VPS and production RP receivers have not been cut over. These local results must not be represented as production behavior.
+The last recorded production state was through migration `0012` and did not
+include migrations `0013` through `0024` or this Worker version. The same record
+showed no `pgid-mail-introspect` provisioning, public-registration or
+logout/alert/archive Queue bindings, mail VPS cutover, or production RP receiver
+cutover, and recorded `RECOVERY_MODE` as disabled. This historical state must be
+reverified before any maintenance operation; local results must not be
+represented as current production behavior.
 
 The repository also contains fail-closed synthetic continuity and bounded-load tooling. It requires an exact clean Git commit, uses fresh local D1 state, complete ordered migration-ledger comparison, literal loopback Workers, ephemeral Web Crypto fixtures, an exact six-scenario bounded profile, redacted mode-`0600` schema-version-2 reports, and no Cloudflare credentials. Dependency evidence distinguishes missing, invalid, source-present-unverified, and verified states; source content alone cannot pass, because only the corresponding proof executed in that same run can mark it verified. Recovery `0019`, observability `0020`, encrypted R2 archive, or release automation that is not verified keeps the command blocked with a nonzero exit. A local synthetic pass is not a Preview restore, live key rotation, Queue/DLQ/R2 drill, external alert test, or production approval. Operator instructions are in [`docs/runbooks/continuity.md`](./docs/runbooks/continuity.md) and [`docs/runbooks/load-failure-drills.md`](./docs/runbooks/load-failure-drills.md).
 
@@ -30,7 +75,7 @@ exploit against a live PG72 service. Email
 
 ## Invite Beta Release Gate
 
-Changes to the deployed invite beta require:
+An invite-beta release requires:
 
 - strict TypeScript, workerd tests, production builds, dependency audit, and secret scan appropriate to the change;
 - no open Critical or High finding;
@@ -140,16 +185,19 @@ Before enabling `REGISTRATION_MODE=public` or declaring full Production GO, comp
   session/token revocation, and RP logout-delivery drill before any
   owner-approved enablement;
 - signing-key rotation, D1 restore, and Queue retry/DLQ drills;
-- independently review the integrated local recovery and release-automation source/proofs, finalize the Worker artifact identity only after all runtime inputs are frozen, and complete and independently review the observability repository/Cron/delivery proof plus the `0021`/`0023` encrypted R2 writer/checkpoint/restore and external-backup path; the local `0020` schema, `0022` transaction-proof foundation, pure evaluator/parser, unwired evaluator/source/archive repositories and nine-source orchestration, archive crypto contract, pure unwired writer, `0021` ledger, and `0023` evidence contract do not complete this gate; only then may a clean synthetic run be recorded without treating it as remote evidence;
+- independently review the integrated local recovery and release-automation source/proofs, finalize the Worker artifact identity only after all runtime inputs are frozen, and complete and independently review the observability repository/Cron/delivery proof plus the `0021`/`0023`/`0024` encrypted R2 writer/checkpoint/restore and external-backup path; the local `0020` schema, `0022` transaction-proof foundation, pure evaluator/parser, unwired evaluator/source/archive repositories and nine-source orchestration, archive crypto contract, pure unwired writer and verifier, `0021` ledger, and `0023`/`0024` evidence contracts do not complete this gate; only then may a clean synthetic run be recorded without treating it as remote evidence;
 - deploy, configure, independently review, and smoke-test the locally implemented Turnstile, versioned Terms/Privacy acceptance, and restricted-account paths after applying migrations `0016` and `0017`; the owner must approve the exact live policy versions, validate the initial abuse thresholds in Preview, assign an operator, and test external alert delivery;
 - deploy and independently review the locally implemented Passkey step-up for high-risk system-client provisioning and secret rotation; production must apply migration `0014`, and the session-age freshness check remains an additional condition rather than a substitute;
 - no unresolved Critical or High finding; every accepted Medium still needs an owner, deadline, and compensating control.
 
-The canonical checklist is [`codex.md`](./codex.md) §9.2. The deployed configuration remains `invite` until that gate passes and the owner explicitly approves and deploys the switch.
+The canonical checklist is [`codex.md`](./codex.md) §9.2. The committed
+production-target configuration remains `invite`; that is not proof of the live
+mode. A switch requires the gate, explicit owner approval, deployment, and live
+verification.
 
 The verified-email enrollment boundary applies to every new account. Telegram Login Widget payloads contain no email, so an unmatched Telegram identity is rate-limited, audited without its Telegram ID or other PII, and rejected in both `invite` and `public` modes. Telegram may authenticate only an active account to which that provider identity was explicitly linked from a standard authenticated PGID session; an existing link remains an ordinary login method after later restriction. No placeholder-email account is created. D1 enforces one owner for every `(providerId, accountId)` pair, and Telegram linking uses the constraint result rather than a race-prone read-then-insert decision.
 
-The local public-registration path fails closed unless the browser explicitly accepts the configured current policy versions and completes Turnstile. The Worker validates the Turnstile response server-side for the exact issuer hostname and fixed registration action, returns a random short-lived one-time intent once, and stores only its SHA-256 digest. Registration exchanges the raw intent for an independent reference whose digest is bound to Better Auth's actual OAuth state digest; the callback consumes that pair atomically before Google verified-email account creation. Optional social providers cannot create public users. Only the public site key and policy version identifiers are exposed as configuration; the Turnstile secret belongs in Wrangler secrets or Secrets Store. Migration `0016` stores the server-side acceptance time and guards the version history against direct UPDATE/DELETE while its account exists; deleting the parent account removes its account-scoped history under the published privacy policy. None of these controls are active in the deployed invite-only production configuration.
+The local public-registration path fails closed unless the browser explicitly accepts the configured current policy versions and completes Turnstile. The Worker validates the Turnstile response server-side for the exact issuer hostname and fixed registration action, returns a random short-lived one-time intent once, and stores only its SHA-256 digest. Registration exchanges the raw intent for an independent reference whose digest is bound to Better Auth's actual OAuth state digest; the callback consumes that pair atomically before Google verified-email account creation. Optional social providers cannot create public users. Only the public site key and policy version identifiers are exposed as configuration; the Turnstile secret belongs in Wrangler secrets or Secrets Store. Migration `0016` stores the server-side acceptance time and guards the version history against direct UPDATE/DELETE while its account exists; deleting the parent account removes its account-scoped history under the published privacy policy. The last recorded production state did not include these controls; an authorized operator must reverify the current remote state.
 
 ## Local Restricted Account Boundary
 
@@ -161,11 +209,19 @@ Migration `0017` adds an independent `user.accessLevel` with `standard` and `res
 - Restrict/promote and suspend/reactivate state transitions use guarded D1 batches so the state mutation and success audit either both match the same user snapshot or neither is written. Restricted-action denials expose only a user UUID and fixed surface enum in audit metadata.
 - [`docs/runbooks/public-registration-abuse.md`](./docs/runbooks/public-registration-abuse.md) defines the current manual, redacted D1 evidence, initial thresholds, triage, containment, false-positive handling, and configuration rollback. It is not an external monitoring system; Preview threshold validation, operator assignment, aggregation, and alert delivery remain public-launch gates.
 
-Production is still invite-only and has not applied `0017`, deployed this Worker, or exercised these controls in Preview/production.
+The last recorded production state was invite-only and did not include `0017` or
+this Worker version. No retained Preview/production exercise evidence establishes
+these controls, and an authorized operator must reverify the current remote
+state.
 
 ## Local Recovery Boundary
 
-Migration `0019` and the current Worker add a recovery path that remains disabled by default and is not deployed in production. `RECOVERY_MODE=disabled` returns 404 from both account-management and lost-device recovery endpoints; applying the migration alone does not enable the feature. Existing users receive no recovery-code rows automatically.
+Migration `0019` and the current local Worker source add a recovery path that is
+disabled by default. The last recorded production state did not include this
+Worker path; current remote state must be reverified. `RECOVERY_MODE=disabled`
+returns 404 from both account-management and lost-device recovery endpoints;
+applying the migration alone does not enable the feature. Existing users receive
+no recovery-code rows automatically.
 
 - An active user must first create codes from a normal session less than ten minutes old after completing Passkey step-up on that exact session. There is no administrator or `bootadmin` bypass. Each generation contains ten 160-bit `PGID-R1` codes; D1 stores only globally unique SHA-256 digests, and raw codes are returned once under `Cache-Control: no-store`.
 - Recovery entry is independently rate-limited before parsing or lookup. Malformed, unknown, consumed, revoked, expired, suspended, and concurrent-loser inputs return the same generic denial. A successfully accepted code is consumed permanently even if the user cancels or the later Passkey ceremony fails.
@@ -175,7 +231,7 @@ Migration `0019` and the current Worker add a recovery path that remains disable
 - Removing the final linked social provider requires both another sign-in method and at least one active unused recovery code while recovery is enabled. The committing DELETE repeats the code and login-method predicates so a concurrent recovery-code consume cannot bypass the policy.
 - Audit, Queue, logs, and operator views must never contain raw recovery codes, recovery cookies, Passkey challenges, credential IDs, full email, or full IP. Recovery codes are not daily login credentials, cannot be reconstructed from backups, and must not become an email-based account-merging or support override path.
 
-The local workerd suite covers hash-only storage, one-view rotation, revoke/cascade, freshness and step-up races, restricted/suspended state, concurrent consumption, cookie scope, cancellation, limiter failure, exact origin, required UV, challenge replay, completion rollback, Queue failure, normal Passkey re-login, and logout outbox creation. This evidence is local only. Before owner-approved enablement, complete the migration, isolated Preview, independent review, lost-device, concurrency, rollback, and multi-RP logout acceptance in [`docs/runbooks/account-recovery.md`](./docs/runbooks/account-recovery.md). Production records still show migrations only through `0012` and `RECOVERY_MODE` disabled.
+The local workerd suite covers hash-only storage, one-view rotation, revoke/cascade, freshness and step-up races, restricted/suspended state, concurrent consumption, cookie scope, cancellation, limiter failure, exact origin, required UV, challenge replay, completion rollback, Queue failure, normal Passkey re-login, and logout outbox creation. This evidence is local only. Before owner-approved enablement, complete the migration, isolated Preview, independent review, lost-device, concurrency, rollback, and multi-RP logout acceptance in [`docs/runbooks/account-recovery.md`](./docs/runbooks/account-recovery.md). The last production record showed migrations only through `0012` and `RECOVERY_MODE` disabled; reverify rather than treating it as current state.
 
 ## Local Mail Introspection Boundary
 
@@ -185,7 +241,7 @@ The only delegated introspection relationship is the fixed confidential client `
 - A successful mail response exposes only the minimal allowlist required by Dovecot. It omits `sub` and `sid`; the verified email is solely a legacy mailbox lookup value, never a PGID/RP primary key, general authorization input, or account-linking key.
 - Introspection uses an IP limiter at 1200 requests per 60 seconds in namespace `1004`, plus a client-class/IP limiter at 600 requests per 60 seconds in namespace `1005`. Binding failure fails closed with 503. Cloudflare's binding is per-location and permissive/eventually consistent, so these thresholds mitigate abuse but are not an exact global security counter and do not replace client authentication or D1 revocation state.
 - The service secret is returned once and stored only as a hash. On suspected compromise, disable `pgid-mail-introspect` first, rotate it, and update the managed secret store and Dovecot configuration. A disabled client cannot pass a real introspection smoke test, so re-enable it in a maintenance window, run the smoke check immediately, and re-disable and roll back if it fails. Never place the secret in source, plaintext D1, logs, documents, issues, or chat.
-- Provisioning, rotation, status changes, and deletion require `clients.manage_all` for system-reserved clients, a session less than 10 minutes old, and a recent Passkey step-up timestamp on that exact D1 session. The local ceremony uses a one-time session/user-bound challenge, exact origin/RP ID, required user verification, and guarded credential counters. Production has not applied `0014` or deployed this code, so independent review, deployment, and production smoke remain rollout blockers.
+- Provisioning, rotation, status changes, and deletion require `clients.manage_all` for system-reserved clients, a session less than 10 minutes old, and a recent Passkey step-up timestamp on that exact D1 session. The local ceremony uses a one-time session/user-bound challenge, exact origin/RP ID, required user verification, and guarded credential counters. The last production record did not include `0014` or this code; current remote state must be reverified, and independent review, deployment, and production smoke remain rollout blockers.
 - Client state mutations and their audit insert commit together in D1 before a response. The D1 `audit_event` row is the source of truth; Queue delivery is post-commit, best-effort event fan-out and must not make a committed mutation appear rolled back when delivery fails. There is no durable outbox or replayer yet, so a Queue failure before acceptance can lose fan-out while the authoritative D1 audit row remains; closing that gap stays on the Production GO gate.
 
 This behavior is pinned by the exact-version patch `patches/@better-auth__oauth-provider@1.6.23.patch`. It keeps same-client introspection as the default and adds only an opt-in opaque-access-token authorization hook, RFC 7662 inactive handling, hint fallback, and JOSE/`kid` classification. Do not carry the patch mechanically to another provider version or use `allowUnusedPatches` to hide a mismatch. Remove it only after an audited pinned stable provider supplies equivalent behavior, a clean frozen install succeeds without the patch, and the full introspection/protocol regression suite passes.

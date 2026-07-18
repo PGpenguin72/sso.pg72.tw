@@ -53,12 +53,17 @@ The command uses fresh migrated local D1 state and performs:
 - finally-block listener and temporary-state cleanup, with any cleanup failure
   recorded as a blocker.
 
-The workerd Queue suite is synthetic. Encrypted R2 archival is
-`dependency_missing` while its source slice is absent and must remain `not_run`
-after source integration until a real local archive/restore exercise is added;
-source presence alone never yields `passed`. Real Queue/DLQ operations also
-remain an independent exercise. This command does not simulate an external
-Cloudflare outage and does not justify a production fault-injection claim.
+The workerd Queue suite is synthetic. The pure archive writer and one-object
+restore-verifier source are present, but the required archive runtime dependency
+is absent. `encrypted_r2_archive` and the R2 invariant therefore both remain
+`dependency_missing`. Once exact runtime source is integrated but its
+corresponding same-run proof is absent, the dependency is
+`source_present_unverified` and the R2 invariant remains `not_run`; only that
+same-run archive/restore exercise can produce `verified` and `passed`. The
+independently retained manifest, custody/runtime R2 integration, restore sink,
+and real exercise are still missing. Real Queue/DLQ operations also remain an
+independent exercise. This command does not simulate an external Cloudflare
+outage and does not justify a production fault-injection claim.
 
 ## Run
 

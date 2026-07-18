@@ -3,19 +3,22 @@
 > Status: local, request-scoped, unwired D1 repository, pure R2 writer and pure
 > one-object restore verifier.
 > Migration
-> `0021_audit_archive.sql`, `0023_audit_archive_r2_evidence.sql`, and
+> `0021_audit_archive.sql`, `0023_audit_archive_r2_evidence.sql`,
+> `0024_audit_archive_r2_evidence_guard.sql`, and
 > `worker/audit-archive-repository.ts` still do not read a KEK or access R2.
 > `worker/audit-archive-r2-writer.ts` accepts injected D1, R2 and envelope
 > verification dependencies. `worker/audit-archive-r2-restore.ts` accepts one
 > externally supplied expected manifest plus injected R2-read and custody-opener
 > dependencies; it never receives a raw KEK. No entry point, Wrangler binding,
-> Queue, scheduler or production mode imports either service. There is no real
+> Queue or production mode imports either service. The existing scheduled
+> handler invokes only logout delivery dispatch; it does not import, invoke, or
+> await alert/archive orchestration. There is no real
 > custody adapter, restore sink, operator endpoint, external backup or restore
 > exercise. Neither service publishes or consumes Queue messages, schedules
-> Cron work, or deletes retained objects. Production records remain through
-> migration `0012`.
+> Cron work, or deletes retained objects. The last recorded production state was
+> through migration `0012` and must be reverified before any maintenance work.
 
-## What `0021` and `0023` provide
+## What `0021`, `0023`, and `0024` provide
 
 `0021` is additive after `0020_alert_observability.sql` and creates
 exactly six durable tables:
@@ -49,6 +52,12 @@ transition requires observed bytes, R2 stored SHA-256, and full readback
 SHA-256 to match the immutable batch object identity before the envelope can be
 cleared or the checkpoint can advance.
 
+`0024` adds a forward-only terminal evidence guard. It does not rewrite or
+invalidate existing immutable `legacy_0021_full` receipts. It rejects every new
+terminal current-format row that carries an R2 version for
+`crypto_integrity`/`r2_readback_mismatch` evidence without the observed byte
+count.
+
 ## What the local repository provides
 
 The repository accepts only a pre-derived, archive-domain fingerprint
@@ -72,6 +81,13 @@ immutable attempt/audit receipts distinguish response-loss retry from a
 divergent concurrent loser. These functions are not imported by the Worker
 entry point and perform no R2, Queue or Cron work.
 
+The repository permits startup to continue with an exact, still-live current
+lease. If the persisted lease differs from the supplied lease, including after
+an ambiguous renewal result, adoption is allowed only for a still-live strict
+descendant that retains the exact batch/dispatch/attempt/lease/start fence while
+both `updated_at` and `lease_expires_at` advance. A stale, expired, differently
+fenced, or partially advanced projection is a conflict.
+
 ## What the unwired writer provides
 
 `worker/audit-archive-r2-writer.ts` is a bounded service over the repository's
@@ -91,15 +107,23 @@ the envelope provider to decrypt the readback again. Only that exact result can
 call the repository's atomic archive finalizer. A matching pre-existing object
 is an idempotent success; a bounded mismatch records the error-specific full or
 partial `0023` evidence. Pre-R2 cryptographic failure records no R2 evidence.
-R2/provider transient failures use the D1-owned 30/120/480/900-second schedule,
-attempt five becomes dead, and work at or after lease expiry uses the repository
-expiry path. A lease with less than 60 seconds remaining is CAS-renewed before
-new R2 I/O. The injected raw clock is normalized to a strictly increasing
+The writer owns the fixed 30/120/480/900-second retry schedule and supplies the
+resulting `nextAttemptAt`; the repository validates and persists that exact
+intent. Attempts one through four can become retry work. On attempt five, only a
+transient failure or lease-expiry exhaustion becomes `dead`; integrity failures,
+object conflicts, and readback mismatches remain `corrupt`. Work at or after
+lease expiry uses the repository expiry path. A lease with less than 60 seconds
+remaining is CAS-renewed before new R2 I/O. On startup,
+the writer may continue with the repository's exact still-live current lease. If
+that persisted lease has changed, including after an ambiguous renewal result,
+the writer may continue only by adopting the same-fence, still-live strict
+descendant. The injected raw clock is normalized to a strictly increasing
 logical millisecond sequence: equal raw samples advance by one millisecond,
 while a true raw reversal fails before the next R2 operation. Lease renewal,
-completion and expiry comparisons use that logical time. Caller-owned envelope,
-readback and checksum buffers are cleared in `finally` paths where the runtime
-permits it.
+completion and expiry comparisons use that logical time. Only writer/module-
+owned temporary copies are cleared in `finally` paths where the runtime permits
+it; caller-, verifier/provider-, and R2-platform-owned buffers are never
+mutated.
 
 This source is deliberately not imported by `worker/index.ts`; there is no R2
 binding, KEK adapter, Queue consumer, Cron path, real bucket access or remote
@@ -181,6 +205,14 @@ lease ID/generation/attempt, a strictly later timestamp and expiry, and a new
 expiry no more than five minutes after renewal. Renewal never creates a second
 attempt and cannot alter manifest, membership, envelope, R2/error or replay
 state.
+
+Writer startup may resume an exact persisted lease while it remains live. If the
+persisted lease differs from the supplied lease, including during ambiguous
+renewal recovery, it may be adopted only when it is a live strict descendant
+under the exact same fence: batch key, dispatch generation, attempt number,
+lease ID, and attempt start remain equal, while both update time and expiry are
+strictly later. Adoption never creates a new attempt or changes archive data.
+
 Canonical timestamps compare at millisecond precision; work completed 400 ms
 before expiry is still before expiry, while `lease_expired` is accepted exactly
 at expiry. A retry due time cannot precede its terminal completion time. An
@@ -188,8 +220,10 @@ equal millisecond is valid persisted evidence, but cannot be reclaimed at that
 same instant because every batch transition must advance `updated_at`.
 
 Only the matching in-flight attempt may terminalize. Retry is bounded to
-attempts one through four; attempt five becomes dead. Integrity/object
-conflicts become `corrupt` and cannot enter automatic or manual replay.
+attempts one through four. On attempt five, only a transient failure or
+lease-expiry exhaustion becomes `dead`; integrity failures, object conflicts,
+and readback mismatches remain `corrupt` and cannot enter automatic or manual
+replay.
 Dead-only manual replay requires a same-batch successful audit event, increments
 the dispatch generation and resets attempts without changing manifest,
 envelope or object identity.
@@ -229,14 +263,15 @@ pnpm --filter @pg72/test-rp test
 git diff --check
 ```
 
-The focused suites cover fresh and seeded-`0020` migration, `0021` to `0023`
+The focused suites cover fresh and seeded-`0020` migration, `0021` through `0024`
 active-lease and legacy-conflict preservation, deterministic backfill,
 invalid-parent transactional abort and canonical repair,
 bounded/byte-capped source selection, sentinel continuity, deferred canonical
 item-first persistence and rollback, hostile replace/update/delete with
 recursive triggers disabled, Passkey-compatible source cascade, response-loss
 retry, concurrent creator/claim/terminal/replay losers, exact same-owner lease
-renewal, millisecond expiry boundaries, attempts one through five, full-evidence
+renewal and same-fence live strict-descendant adoption, millisecond expiry
+boundaries, attempts one through five, full-evidence
 corrupt state, audited manual replay, stale-checkpoint all-or-nothing rollback,
 BLOB cleanup, strict projection parsing, pinned query plans, private
 backup/isolated restore, `quick_check` and foreign-key integrity.
@@ -246,7 +281,8 @@ uncertain-PUT readback, uncertain conflicting objects, GET null/throw, absent or
 wrong stored checksums, extra/missing/wrong metadata, zero/short/oversized and
 overflowing bodies with cancellation, full body and post-readback crypto
 mismatches, pre-R2 crypto failure without R2 evidence, terminal response-loss
-duplicate classification, D1 retry timing through attempt five,
+duplicate classification, writer-owned retry timing and repository validation
+through attempt five,
 unavailable/throwing verifier redaction, stale/expired/renewal-conflict leases,
 expiry after a committed PUT, and clearing writer-owned temporary buffers.
 
@@ -256,14 +292,16 @@ own-data metadata and captured stored-checksum copy contracts, zero-read unused
 body cancellation, real zero/short/oversized/overflowing/erroring/malformed
 streams, full computed SHA-256, reader cleanup, custody result/array/record
 shapes, independent count/sequence binding, provider mutation, detached frozen
-results and overridden/detached temporary-buffer cleanup. Provider-owned
-checksum/body buffers are asserted unchanged; thrown objects, accessors,
+results and overridden/detached temporary-buffer cleanup. Caller-, provider-,
+and R2-owned checksum/body buffers are asserted unchanged; thrown objects,
+accessors,
 Proxies, hidden/symbol extras, method overrides, thenables and provider text are
 reconstructed as fixed restore errors.
 
 ## Remaining gates
 
-Schema, repository, pure writer and pure restore-verifier presence do not
+Schema through head `0024`, repository, pure writer and pure restore-verifier
+presence do not
 satisfy encrypted archive continuity. The dependency must remain
 `dependency_missing` until separately reviewed slices add all of the following
 and execute their proof in the same run:

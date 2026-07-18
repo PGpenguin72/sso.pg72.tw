@@ -656,12 +656,12 @@ the compatible orchestrator into the directly awaited scheduled handler; it
 must also add dedicated alert Queue/DLQ, an Email Service adapter, admin
 acknowledge/resolve/replay
 operations, and redaction/race/failure tests. Archive crypto plus the `0021`
-ledger, `0023` evidence contract and unwired D1 repository do not satisfy the
-separate encrypted archive dependency; `encrypted_r2_archive` remains
-`dependency_missing` until
-archive-domain fingerprint derivation and KEK custody, the R2 writer/bounded
-restore, Queue/DLQ, Cron redrive, retention proof, and external-backup exercise
-exist.
+ledger, `0023` evidence contract, unwired D1 repository, and pure unwired writer
+do not satisfy the separate encrypted archive dependency;
+`encrypted_r2_archive` remains `dependency_missing` until archive-domain
+fingerprint derivation and KEK custody, writer runtime integration and remote
+proof, bounded restore, Queue/DLQ, Cron redrive, retention proof, and
+external-backup exercise exist.
 
 Isolated Preview must then apply the ordered migration ledger, tune thresholds,
 exercise exact D1 and approximate Queue evidence, prove real Email receipt and

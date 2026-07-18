@@ -1,11 +1,15 @@
-# Audit archive D1 repository boundary
+# Audit archive D1 repository and unwired writer boundary
 
-> Status: local, request-scoped, unwired D1 repository. Migration
+> Status: local, request-scoped, unwired D1 repository and pure R2 writer.
+> Migration
 > `0021_audit_archive.sql`, `0023_audit_archive_r2_evidence.sql`, and
-> `worker/audit-archive-repository.ts` do not read
-> a KEK, write or restore R2, publish or consume Queue messages, schedule Cron
-> work, delete retained objects, or provide an operator endpoint. Production
-> records remain through migration `0012`.
+> `worker/audit-archive-repository.ts` still do not read a KEK or access R2.
+> `worker/audit-archive-r2-writer.ts` accepts injected D1, R2 and envelope
+> verification dependencies, but no entry point, Wrangler binding, Queue,
+> scheduler or production mode imports it. Neither module restores R2, publishes
+> or consumes Queue messages, schedules Cron work, deletes retained objects, or
+> provides an operator endpoint. Production records remain through migration
+> `0012`.
 
 ## What `0021` and `0023` provide
 
@@ -63,6 +67,39 @@ writes or projections from treating a concurrent no-op as success; exact
 immutable attempt/audit receipts distinguish response-loss retry from a
 divergent concurrent loser. These functions are not imported by the Worker
 entry point and perform no R2, Queue or Cron work.
+
+## What the unwired writer provides
+
+`worker/audit-archive-r2-writer.ts` is a bounded service over the repository's
+lease-bound immutable envelope reader. It accepts only a narrow R2 binding
+surface and an injected KEK/envelope verification provider; the writer itself
+does not read a secret or define a binding. Before upload it decrypts and
+validates a copied envelope through that provider. It then uses a single-part
+create-only R2 PUT with `If-None-Match: *`, the exact content type and
+`no-store`, one canonical manifest metadata value, and the immutable object
+SHA-256.
+
+A null conditional result and a thrown PUT both enter the same immediate
+readback path. The writer uses R2 binding consistency directly, rejects unsafe
+metadata, buffers at most the reviewed 512 KiB object cap, computes the full
+readback SHA-256, compares stored and computed hashes plus body bytes, and asks
+the envelope provider to decrypt the readback again. Only that exact result can
+call the repository's atomic archive finalizer. A matching pre-existing object
+is an idempotent success; a bounded mismatch records the error-specific full or
+partial `0023` evidence. Pre-R2 cryptographic failure records no R2 evidence.
+R2/provider transient failures use the D1-owned 30/120/480/900-second schedule,
+attempt five becomes dead, and work at or after lease expiry uses the repository
+expiry path. A lease with less than 60 seconds remaining is CAS-renewed before
+new R2 I/O. The injected raw clock is normalized to a strictly increasing
+logical millisecond sequence: equal raw samples advance by one millisecond,
+while a true raw reversal fails before the next R2 operation. Lease renewal,
+completion and expiry comparisons use that logical time. Caller-owned envelope,
+readback and checksum buffers are cleared in `finally` paths where the runtime
+permits it.
+
+This source is deliberately not imported by `worker/index.ts`; there is no R2
+binding, KEK adapter, Queue consumer, Cron path, real bucket access or remote
+proof. Source presence is not encrypted archive continuity.
 
 ## Source and snapshot invariants
 
@@ -124,9 +161,9 @@ terminal attempt UPDATE validates object bytes + stored/readback SHA-256
 ```
 
 If the lease or checkpoint is stale, any trigger abort rolls back the terminal
-attempt, batch state, R2 evidence, BLOB clear and cursor together. R2 I/O will
-remain outside D1 in a later slice; crash recovery must verify an existing
-create-only object before issuing this terminal update.
+attempt, batch state, R2 evidence, BLOB clear and cursor together. R2 I/O stays
+outside the D1 transaction. The unwired writer verifies an existing create-only
+object before issuing this terminal update, but no runtime calls it yet.
 
 ## Local verification
 
@@ -136,7 +173,8 @@ From a clean worktree with the frozen dependency set:
 pnpm --filter @pg72/id exec vitest run \
   test/audit-archive-schema.spec.ts \
   test/audit-archive-crypto.spec.ts \
-  test/audit-archive-repository.spec.ts
+  test/audit-archive-repository.spec.ts \
+  test/audit-archive-r2-writer.spec.ts
 node --test scripts/public-readiness/alert-source-time-integrity-migration.test.mjs \
   scripts/public-readiness/audit-archive-migration.test.mjs \
   scripts/public-readiness/d1-manifest.test.mjs \
@@ -159,14 +197,25 @@ corrupt state, audited manual replay, stale-checkpoint all-or-nothing rollback,
 BLOB cleanup, strict projection parsing, pinned query plans, private
 backup/isolated restore, `quick_check` and foreign-key integrity.
 
+The writer suite additionally covers create success, exact conditional and
+uncertain-PUT readback, uncertain conflicting objects, GET null/throw, absent or
+wrong stored checksums, extra/missing/wrong metadata, zero/short/oversized and
+overflowing bodies with cancellation, full body and post-readback crypto
+mismatches, pre-R2 crypto failure without R2 evidence, terminal response-loss
+duplicate classification, D1 retry timing through attempt five,
+unavailable/throwing verifier redaction, stale/expired/renewal-conflict leases,
+expiry after a committed PUT, and clearing caller-owned temporary buffers.
+
 ## Remaining gates
 
-Schema and repository presence do not satisfy encrypted archive continuity. The
-dependency must remain `dependency_missing` until a separately reviewed slice
-adds all of the following and executes their proof in the same run:
+Schema, repository and pure writer presence do not satisfy encrypted archive
+continuity. The dependency must remain `dependency_missing` until a separately
+reviewed slice adds all of the following and executes their proof in the same
+run:
 
 - archive-domain fingerprint derivation, KEK custody and key escrow;
-- create-only R2 writer and bounded non-HTTP restore;
+- add the closed KEK adapter, writer runtime integration and remote proof, and
+  implement the bounded non-HTTP restore;
 - dedicated Queue, DLQ consumer and D1-authoritative Cron redrive;
 - key escrow, external non-Cloudflare backup and restore exercise;
 - owner-approved retention/Bucket Lock policy, Preview failure drills and

@@ -3,11 +3,12 @@
 > Status: local schema, pure evaluator/parser and archive-crypto contracts,
 > evaluator runtime-status/lease/bootstrap and alert state/incident/outbox CAS
 > repositories, bounded audit, OAuth-report, global fan-out-gap, and logout
-> delivery source repositories, and `0021` archive-ledger source. None of these
-> repositories is imported by the Worker entry point or a scheduler. The Queue
-> metric source, Cron, alert/archive Queue/DLQ, Email/admin delivery, same-run
-> proof, R2 archive runtime, bounded restore, external backup, and deployment
-> remain absent. Production records remain through migration `0012`.
+> delivery source repositories, a bounded approximate Queue-DLQ source and D1
+> streak repository, and `0021` archive-ledger source. None of these repositories
+> is imported by the Worker entry point or a scheduler. Evaluator Cron,
+> alert/archive Queue/DLQ, Email/admin delivery, same-run proof, R2 archive
+> runtime, bounded restore, external backup, and deployment remain absent.
+> Production records remain through migration `0012`.
 
 ## What `0020` provides
 
@@ -210,6 +211,31 @@ client ID, metadata, or PII. This repository is local source only. It is not
 imported by the Worker or scheduler and does not alter logout delivery, replay,
 Queue, Cron, configuration, artifact identity, or operator behavior.
 
+The local Queue source is deliberately narrower than Queue operation or alert
+delivery. A caller injects exactly one request-scoped Cloudflare Queue binding,
+and the repository awaits its official `metrics()` method. The provider result
+may contain only finite, nonnegative safe-integer `backlogCount` and
+`backlogBytes` plus an optional `oldestMessageTimestamp`; a nonempty Queue must
+have a finite `Date` no later than the sample clock, while an empty Queue must
+have zero bytes and no oldest timestamp. The provider promise completion-time
+clock is the canonical `sampledAt` and evaluator `asOf`; oldest age is floored
+to whole seconds. These values remain best-effort point-in-time
+`queue_approximate` evidence, never exact Queue accounting.
+
+The four closed Queue dimensions map only to `security_dlq`, `logout_dlq`,
+`alert_dlq`, and `audit_archive_dlq` rows in `alert_runtime_status`. One awaited
+D1 batch applies a revision-bounded, unleased compare-and-swap, reads
+`changes()`, and projects that exact row. A positive sample increments its
+streak only at exactly 60 seconds, a gap restarts at one, and zero resets the
+streak and start time. A `changes() = 0` exact duplicate is a response-loss
+replay only while the strict projection proves `updated_at` still equals that
+sample time and both lease fields remain null. A later status/revision
+transition retaining the metrics, any retained lease, out-of-order samples,
+contradictory concurrent losers, stale or malformed provider/D1 results, and all
+read/write failures yield a fixed, redacted unknown observation instead of a
+clear. This module is not imported by the Worker or scheduler and adds no
+binding, configuration, Cron, Queue producer/consumer, or production behavior.
+
 OAuth reporter coverage is a whole-evaluation gate. Until every in-window row
 has either its legacy raw reporter ID or the persisted reporter reference, the
 evaluator reports the source as partial, records runtime `source_incomplete`, and
@@ -401,6 +427,7 @@ pnpm --filter @pg72/id exec vitest run \
   test/alert-fanout-source-repository.spec.ts \
   test/alert-logout-source-repository.spec.ts \
   test/alert-oauth-source-repository.spec.ts \
+  test/alert-queue-source-repository.spec.ts \
   test/alert-evaluator.spec.ts test/alert-rules.spec.ts \
   test/audit-archive-crypto.spec.ts
 node --test scripts/public-readiness/alert-source-time-integrity-migration.test.mjs \
@@ -449,20 +476,24 @@ logout source suite verifies old current failures, exact delivery/attempt
 boundaries, closed status/outcome semantics, sparse timestamp integrity and
 guards, global/client reconciliation, sentinel continuity, tracked zero-fill,
 exact caps, bounded query plans, and redacted failures without wiring an
-evaluator or changing delivery runtime. The archive schema and migration suites
-verify that one invalid parent aborts
-backfill and that a repaired canonical parent succeeds, plus the `0021` ledger
-transaction contract, while the archive-crypto
-suite verifies the record/envelope and checkpoint binding without R2 or Queue
-I/O.
+evaluator or changing delivery runtime. The Queue source suite verifies all four
+closed mappings, promise-completion sample time, age flooring, finite caps,
+exact 60-second increment/reset behavior, 15-minute critical duration, D1
+revision/lease/`changes()` CAS, exact replay ownership, response-loss replay,
+out-of-order and concurrent losers, strict provider/D1 parsing, fixed redacted
+errors, and primary-key query plans without adding a binding, Cron, or evaluator
+wiring. The archive schema and migration suites verify that one invalid parent
+aborts backfill and that a repaired canonical parent succeeds, plus the `0021`
+ledger transaction contract, while the archive-crypto suite verifies the
+record/envelope and checkpoint binding without R2 or Queue I/O.
 
 ## Remaining gates
 
 Schema, pure evaluator/parser, the two unwired evaluator repositories, and the
-bounded local `audit_event`, OAuth-report, fan-out-gap, and logout-delivery
-source repositories must still report observability as
+bounded local `audit_event`, OAuth-report, fan-out-gap, logout-delivery, and
+approximate Queue-DLQ source repositories must still report observability as
 `source_present_unverified`, leaving continuity and drills blocked. Later
-reviewed slices must add the remaining Queue source; wire both evaluator
+reviewed slices must wire both evaluator repositories and all five source
 repositories into Cron with
 repository-controlled successful-run and same-run proof; and add dedicated
 alert Queue/DLQ, an Email Service adapter, admin acknowledge/resolve/replay

@@ -21,6 +21,10 @@ import {
   BOUNDED_RETRY_ACCEPTANCE_SCOPE,
   BUILD_UUID_ACCEPTANCE_RESIDUAL,
   MAX_DUPLICATE_INACTIVE_VERSIONS,
+  MAX_UPLOAD_ACTION_DURATION_MS,
+  MAX_UPLOAD_EVALUATION_DELAY_MS,
+  MAX_UPLOAD_POSTFLIGHT_DELAY_MS,
+  MAX_UPLOAD_PREFLIGHT_AGE_MS,
   MAX_VERSION_CREATE_ATTEMPTS,
   PINNED_WRANGLER,
   PRODUCTION_EXECUTION_BLOCKERS,
@@ -61,6 +65,11 @@ const NEW_VERSION_3 = "77777777-7777-4777-8777-777777777777";
 const SERVICE_TAG = "service-tag-fixture";
 const OBSERVED_SCRIPT_ETAG = "observed-script-etag-fixture";
 const NOW = Date.parse("2026-07-19T00:00:00.000Z");
+const ACTION_TIMES = Object.freeze({
+  evaluatedAt: NOW,
+  finishedAt: NOW,
+  startedAt: NOW,
+});
 const BUILD_UUID = "55555555-5555-4555-8555-555555555555";
 const RELEASE_POLICY = JSON.parse(
   readFileSync(new URL("../../security/release-policy.json", import.meta.url), "utf8"),
@@ -694,7 +703,13 @@ test("classifies bounded inactive versions with unchanged control-plane state", 
   const outputRecord = { version_id: NEW_VERSION };
   const success = normalizedChildResult();
   assert.deepEqual(
-    classifyPostflight({ before, after, outputRecord, childResult: success }),
+    classifyPostflight({
+      ...ACTION_TIMES,
+      before,
+      after,
+      outputRecord,
+      childResult: success,
+    }),
     {
       status: "VERIFIED_INACTIVE_VERSION",
       addedVersionIds: [NEW_VERSION],
@@ -708,10 +723,7 @@ test("classifies bounded inactive versions with unchanged control-plane state", 
     ["UNEXPECTED_CONTROL_PLANE_MUTATION", (value) => (value.schedules[0].cron = "5 * * * *")],
     [
       "REMOTE_OBSERVATION_PROVENANCE_REVIEW_REQUIRED",
-      (value) => {
-        value.observation.firstObservedAt = new Date(NOW - 1).toISOString();
-        value.observation.lastObservedAt = new Date(NOW - 1).toISOString();
-      },
+      (value) => (value.observation.singleWriterVerified = true),
     ],
     ["UNEXPECTED_ACTIVE_DEPLOYMENT_MUTATION", (value) => (value.deployments[0].id = NEW_VERSION)],
     [
@@ -727,7 +739,14 @@ test("classifies bounded inactive versions with unchanged control-plane state", 
     const changed = structuredClone(after);
     mutate(changed);
     expectCode(
-      () => classifyPostflight({ before, after: changed, outputRecord, childResult: success }),
+      () =>
+        classifyPostflight({
+          ...ACTION_TIMES,
+          before,
+          after: changed,
+          outputRecord,
+          childResult: success,
+        }),
       code,
     );
   }
@@ -739,6 +758,7 @@ test("classifies bounded inactive versions with unchanged control-plane state", 
   expectCode(
     () =>
       classifyPostflight({
+        ...ACTION_TIMES,
         before,
         after: staleLatestOrder,
         outputRecord,
@@ -748,6 +768,7 @@ test("classifies bounded inactive versions with unchanged control-plane state", 
   );
   assert.deepEqual(
     classifyPostflight({
+      ...ACTION_TIMES,
       before,
       after,
       outputRecord: null,
@@ -762,6 +783,7 @@ test("classifies bounded inactive versions with unchanged control-plane state", 
   );
   assert.deepEqual(
     classifyPostflight({
+      ...ACTION_TIMES,
       before,
       after: normalizedSnapshot(config, { phase: "postflight" }),
       outputRecord: null,
@@ -776,6 +798,7 @@ test("classifies bounded inactive versions with unchanged control-plane state", 
   );
   assert.deepEqual(
     classifyPostflight({
+      ...ACTION_TIMES,
       before,
       after,
       outputRecord,
@@ -791,6 +814,7 @@ test("classifies bounded inactive versions with unchanged control-plane state", 
   expectCode(
     () =>
       classifyPostflight({
+        ...ACTION_TIMES,
         before,
         after,
         outputRecord,
@@ -798,6 +822,148 @@ test("classifies bounded inactive versions with unchanged control-plane state", 
       }),
     "CHILD_RESULT_SCHEMA",
   );
+});
+
+test("requires a canonical bounded action-time bracket for every outcome", () => {
+  const boundary = offlineEvidence({
+    acceptance: ownerAcceptance({
+      expiresAt: new Date(NOW + 60 * 60 * 1000).toISOString(),
+    }),
+  });
+  boundary.before.observation.firstObservedAt = new Date(
+    NOW - MAX_UPLOAD_PREFLIGHT_AGE_MS,
+  ).toISOString();
+  boundary.before.observation.lastObservedAt = new Date(
+    NOW - MAX_UPLOAD_PREFLIGHT_AGE_MS,
+  ).toISOString();
+  boundary.finishedAt = NOW + MAX_UPLOAD_ACTION_DURATION_MS;
+  boundary.after.observation.firstObservedAt = new Date(
+    boundary.finishedAt + MAX_UPLOAD_POSTFLIGHT_DELAY_MS,
+  ).toISOString();
+  boundary.after.observation.lastObservedAt =
+    boundary.after.observation.firstObservedAt;
+  boundary.evaluatedAt =
+    Date.parse(boundary.after.observation.lastObservedAt) +
+    MAX_UPLOAD_EVALUATION_DELAY_MS;
+  assert.equal(
+    evaluateOfflineProductionVersionUploadEvidence(boundary).status,
+    "VERIFIED_INACTIVE_VERSION",
+  );
+
+  const invalidBrackets = [
+    (value) => {
+      value.before.observation.firstObservedAt = new Date(
+        NOW - MAX_UPLOAD_PREFLIGHT_AGE_MS - 1,
+      ).toISOString();
+      value.before.observation.lastObservedAt =
+        value.before.observation.firstObservedAt;
+    },
+    (value) => {
+      value.before.observation.firstObservedAt = new Date(NOW + 1).toISOString();
+      value.before.observation.lastObservedAt =
+        value.before.observation.firstObservedAt;
+    },
+    (value) => {
+      value.startedAt = NOW + 1;
+    },
+    (value) => {
+      value.finishedAt = NOW + MAX_UPLOAD_ACTION_DURATION_MS + 1;
+      value.after.observation.firstObservedAt = new Date(value.finishedAt).toISOString();
+      value.after.observation.lastObservedAt =
+        value.after.observation.firstObservedAt;
+      value.evaluatedAt = value.finishedAt;
+    },
+    (value) => {
+      value.after.observation.firstObservedAt = new Date(NOW - 1).toISOString();
+      value.after.observation.lastObservedAt =
+        value.after.observation.firstObservedAt;
+    },
+    (value) => {
+      value.after.observation.firstObservedAt = new Date(
+        NOW + MAX_UPLOAD_POSTFLIGHT_DELAY_MS + 1,
+      ).toISOString();
+      value.after.observation.lastObservedAt =
+        value.after.observation.firstObservedAt;
+      value.evaluatedAt = Date.parse(value.after.observation.lastObservedAt);
+    },
+    (value) => {
+      value.after.observation.firstObservedAt = new Date(NOW + 1).toISOString();
+      value.after.observation.lastObservedAt =
+        value.after.observation.firstObservedAt;
+    },
+    (value) => {
+      value.evaluatedAt = NOW + MAX_UPLOAD_EVALUATION_DELAY_MS + 1;
+    },
+  ];
+  for (const mutate of invalidBrackets) {
+    const evidence = offlineEvidence({
+      acceptance: ownerAcceptance({
+        expiresAt: new Date(NOW + 60 * 60 * 1000).toISOString(),
+      }),
+    });
+    mutate(evidence);
+    expectCode(
+      () => evaluateOfflineProductionVersionUploadEvidence(evidence),
+      "UPLOAD_ACTION_TIME_BRACKET",
+    );
+  }
+
+  const outcomeVariants = [
+    offlineEvidence(),
+    offlineEvidence({ outputBytes: Buffer.alloc(0) }),
+    offlineEvidence({
+      outputBytes: Buffer.alloc(0),
+      childResult: normalizedChildResult({ status: 1 }),
+    }),
+    offlineEvidence({
+      outputBytes: Buffer.alloc(0),
+      childResult: normalizedChildResult({ status: null }),
+    }),
+    offlineEvidence({
+      outputBytes: Buffer.alloc(0),
+      childResult: normalizedChildResult({ status: null, timedOut: true }),
+    }),
+    offlineEvidence({ addedVersionIds: [] }),
+  ];
+  for (const evidence of outcomeVariants) {
+    evidence.before.observation.firstObservedAt = new Date(
+      NOW - MAX_UPLOAD_PREFLIGHT_AGE_MS - 1,
+    ).toISOString();
+    evidence.before.observation.lastObservedAt =
+      evidence.before.observation.firstObservedAt;
+    expectCode(
+      () => evaluateOfflineProductionVersionUploadEvidence(evidence),
+      "UPLOAD_ACTION_TIME_BRACKET",
+    );
+  }
+
+  const config = derivePrivateProductionConfig(generatedConfig("/reviewed"), {
+    accountId: ACCOUNT_ID,
+    d1Uuid: D1_UUID,
+  });
+  const direct = {
+    before: normalizedSnapshot(config),
+    after: normalizedSnapshot(config, { uploaded: true }),
+    childResult: normalizedChildResult(),
+    outputRecord: { version_id: NEW_VERSION },
+    ...ACTION_TIMES,
+  };
+  const invertedPostflight = structuredClone(direct);
+  invertedPostflight.after.observation.firstObservedAt = new Date(NOW + 1).toISOString();
+  expectCode(
+    () => classifyPostflight(invertedPostflight),
+    "UPLOAD_ACTION_TIME_BRACKET",
+  );
+  for (const [field, value] of [
+    ["startedAt", "2026-07-19T00:00:00.000Z"],
+    ["finishedAt", NOW + 0.5],
+    ["evaluatedAt", Number.MAX_SAFE_INTEGER],
+  ]) {
+    expectCode(
+      () => classifyPostflight({ ...direct, [field]: value }),
+      "UPLOAD_ACTION_TIME_SCHEMA",
+    );
+  }
 });
 
 test("fails closed on unreviewed version annotations, preview, secrets, and binding schemas", () => {

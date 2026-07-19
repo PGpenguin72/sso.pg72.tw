@@ -318,6 +318,21 @@ function normalizeObservationResponses(observation, contract) {
         info.total_pages === observation.responses.length,
       "ADAPTER_PAGINATION_INCOMPLETE",
     );
+    const standardTotalPages = Math.max(
+      1,
+      Math.ceil(info.total_count / info.per_page),
+    );
+    const finalPageCount =
+      info.total_count === 0
+        ? 0
+        : ((info.total_count - 1) % info.per_page) + 1;
+    const standardPageCount =
+      info.page < standardTotalPages ? info.per_page : finalPageCount;
+    requireCondition(
+      info.total_pages === standardTotalPages &&
+        response.result.length === standardPageCount,
+      "ADAPTER_PAGINATION_INCOMPLETE",
+    );
     expectedTotalCount ??= info.total_count;
     expectedTotalPages ??= info.total_pages;
     expectedPerPage ??= info.per_page;

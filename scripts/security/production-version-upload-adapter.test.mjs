@@ -185,13 +185,13 @@ function responseEnvelopes(contract, result) {
   }));
 }
 
-function expectation(phase = "preflight") {
+function expectation(phase = "preflight", results = endpointResults()) {
   return {
     accountId: ACCOUNT_ID,
     correlationSha256: CORRELATION,
     observationNotAfter: OBSERVED_AT,
     observationNotBefore: OBSERVED_AT,
-    pairingSha256: pairingDigest(),
+    pairingSha256: pairingDigest(results),
     phase,
     schemaVersion: 1,
     serviceTag: SERVICE_TAG,
@@ -200,8 +200,7 @@ function expectation(phase = "preflight") {
   };
 }
 
-function bundle(phase = "preflight") {
-  const results = endpointResults();
+function bundle(phase = "preflight", results = endpointResults()) {
   const pairingSha256 = pairingDigest(results);
   return {
     correlationSha256: CORRELATION,
@@ -402,6 +401,89 @@ test("rejects foreign targets, reordered endpoints, incomplete pages, and unpair
     expectCode(
       () => normalizeCloudflareProductionSnapshot(bytes(changed), bytes(expectation())),
       code,
+    );
+  }
+});
+
+test("enforces standard pagination cardinality including the reviewed empty form", () => {
+  const baseline = normalizeCloudflareProductionSnapshot(
+    bytes(bundle()),
+    bytes(expectation()),
+  );
+  assert.equal(baseline.routes.length, 2);
+  assert.equal(baseline.versions.length, 2);
+
+  const emptyResults = endpointResults();
+  emptyResults.set("schedules", []);
+  const empty = normalizeCloudflareProductionSnapshot(
+    bytes(bundle("preflight", emptyResults)),
+    bytes(expectation("preflight", emptyResults)),
+  );
+  assert.deepEqual(empty.schedules, []);
+
+  const route = (index) => ({
+    id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    pattern: `p${index}.pg72.tw/*`,
+    script: PRODUCTION_WORKER_NAME,
+  });
+  const response = (result, page, perPage, totalCount, totalPages) => ({
+    errors: [],
+    messages: [],
+    result,
+    result_info: {
+      count: result.length,
+      page,
+      per_page: perPage,
+      total_count: totalCount,
+      total_pages: totalPages,
+    },
+    success: true,
+  });
+  const cases = [
+    [
+      "inflated page count",
+      "ADAPTER_PAGINATION_INCOMPLETE",
+      [response([route(1)], 1, 50, 2, 2), response([route(2)], 2, 50, 2, 2)],
+    ],
+    [
+      "underfilled non-final page",
+      "ADAPTER_PAGINATION_INCOMPLETE",
+      [response([route(1), route(2)], 1, 3, 5, 2), response([route(3), route(4)], 2, 3, 5, 2)],
+    ],
+    [
+      "unexpected full final page",
+      "ADAPTER_PAGINATION_INCOMPLETE",
+      [
+        response([route(1), route(2), route(3)], 1, 3, 5, 2),
+        response([route(4), route(5), route(6)], 2, 3, 5, 2),
+      ],
+    ],
+    ["zero-page empty list", "ADAPTER_RESPONSE_ENVELOPE", []],
+    [
+      "empty list declaring zero total pages",
+      "ADAPTER_PAGINATION_INCOMPLETE",
+      [response([], 1, 50, 0, 0)],
+    ],
+    [
+      "empty list split across pages",
+      "ADAPTER_PAGINATION_INCOMPLETE",
+      [response([], 1, 50, 0, 2), response([], 2, 50, 0, 2)],
+    ],
+  ];
+  for (const [label, code, responses] of cases) {
+    const changed = bundle();
+    changed.observations.find(({ endpoint }) => endpoint === "routes").responses =
+      responses;
+    assert.throws(
+      () =>
+        normalizeCloudflareProductionSnapshot(
+          bytes(changed),
+          bytes(expectation()),
+        ),
+      (error) =>
+        error instanceof ProductionUploadGateError &&
+        error.code === code,
+      label,
     );
   }
 });

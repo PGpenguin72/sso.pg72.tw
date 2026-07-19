@@ -10,6 +10,10 @@ export const UPLOAD_MESSAGE_PREFIX = "PGID release ";
 export const WRANGLER_OUTPUT_MAX_BYTES = 8 * 1024;
 export const MAX_VERSION_CREATE_ATTEMPTS = 3;
 export const MAX_DUPLICATE_INACTIVE_VERSIONS = 2;
+export const MAX_UPLOAD_PREFLIGHT_AGE_MS = 10 * 60 * 1000;
+export const MAX_UPLOAD_ACTION_DURATION_MS = 10 * 60 * 1000;
+export const MAX_UPLOAD_POSTFLIGHT_DELAY_MS = 10 * 60 * 1000;
+export const MAX_UPLOAD_EVALUATION_DELAY_MS = 10 * 60 * 1000;
 export const BOUNDED_RETRY_ACCEPTANCE_SCOPE =
   "pgid-production-version-upload:bounded-inactive-retry:v1";
 export const ASSET_RETRY_RESIDUAL =
@@ -357,6 +361,16 @@ function canonicalTimestamp(value, code) {
     code,
   );
   return timestamp;
+}
+
+function canonicalActionTime(value) {
+  requireCondition(
+    Number.isSafeInteger(value) &&
+      value >= 0 &&
+      Number.isFinite(new Date(value).getTime()),
+    "UPLOAD_ACTION_TIME_SCHEMA",
+  );
+  return value;
 }
 
 export function validateBoundedRetryOwnerAcceptance({
@@ -1504,7 +1518,68 @@ function versionMap(versions) {
   return result;
 }
 
-export function classifyPostflight({ before, after, outputRecord, childResult }) {
+function validateUploadSnapshotTimeBracket({
+  before,
+  after,
+  startedAt,
+  finishedAt,
+  evaluatedAt,
+}) {
+  const uploadStartedAt = canonicalActionTime(startedAt);
+  const uploadFinishedAt = canonicalActionTime(finishedAt);
+  const evaluationTime = canonicalActionTime(evaluatedAt);
+  const preflightFirstObservedAt = canonicalTimestamp(
+    before?.observation?.firstObservedAt,
+    "UPLOAD_ACTION_TIME_BRACKET",
+  );
+  const preflightLastObservedAt = canonicalTimestamp(
+    before?.observation?.lastObservedAt,
+    "UPLOAD_ACTION_TIME_BRACKET",
+  );
+  const postflightFirstObservedAt = canonicalTimestamp(
+    after?.observation?.firstObservedAt,
+    "UPLOAD_ACTION_TIME_BRACKET",
+  );
+  const postflightLastObservedAt = canonicalTimestamp(
+    after?.observation?.lastObservedAt,
+    "UPLOAD_ACTION_TIME_BRACKET",
+  );
+
+  requireCondition(
+    preflightFirstObservedAt <= preflightLastObservedAt &&
+      preflightLastObservedAt <= uploadStartedAt &&
+      uploadStartedAt <= uploadFinishedAt &&
+      uploadFinishedAt <= postflightFirstObservedAt &&
+      postflightFirstObservedAt <= postflightLastObservedAt &&
+      postflightLastObservedAt <= evaluationTime &&
+      uploadStartedAt - preflightLastObservedAt <=
+        MAX_UPLOAD_PREFLIGHT_AGE_MS &&
+      uploadFinishedAt - uploadStartedAt <=
+        MAX_UPLOAD_ACTION_DURATION_MS &&
+      postflightFirstObservedAt - uploadFinishedAt <=
+        MAX_UPLOAD_POSTFLIGHT_DELAY_MS &&
+      evaluationTime - postflightLastObservedAt <=
+        MAX_UPLOAD_EVALUATION_DELAY_MS,
+    "UPLOAD_ACTION_TIME_BRACKET",
+  );
+}
+
+export function classifyPostflight({
+  before,
+  after,
+  outputRecord,
+  childResult,
+  startedAt,
+  finishedAt,
+  evaluatedAt,
+}) {
+  validateUploadSnapshotTimeBracket({
+    before,
+    after,
+    startedAt,
+    finishedAt,
+    evaluatedAt,
+  });
   requireCondition(
     exactKeys(childResult, ["overflow", "signal", "status", "timedOut"]) &&
       (childResult.status === null || Number.isInteger(childResult.status)) &&
@@ -1847,6 +1922,13 @@ export function evaluateOfflineProductionVersionUploadEvidence({
   );
   validateNormalizedSnapshot(before, context);
   validateNormalizedSnapshot(after, context);
+  validateUploadSnapshotTimeBracket({
+    before,
+    after,
+    startedAt,
+    finishedAt,
+    evaluatedAt,
+  });
   requireCondition(Buffer.isBuffer(outputBytes), "WRANGLER_OUTPUT_TYPE");
   const outputRecord =
     outputBytes.length === 0
@@ -1861,6 +1943,9 @@ export function evaluateOfflineProductionVersionUploadEvidence({
     after,
     outputRecord,
     childResult,
+    startedAt,
+    finishedAt,
+    evaluatedAt,
   });
   requireCondition(Array.isArray(details), "UPLOADED_VERSION_DETAILS_SCHEMA");
   const detailById = new Map();

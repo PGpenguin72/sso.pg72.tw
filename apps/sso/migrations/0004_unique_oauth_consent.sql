@@ -1,15 +1,8 @@
 DELETE FROM oauthConsent
-WHERE rowid IN (
-  SELECT duplicate_rowid
-  FROM (
-    SELECT rowid AS duplicate_rowid,
-           ROW_NUMBER() OVER (
-             PARTITION BY clientId, userId, referenceId
-             ORDER BY updatedAt DESC, rowid DESC
-           ) AS consent_rank
-    FROM oauthConsent
-  )
-  WHERE consent_rank > 1
+WHERE rowid NOT IN (
+  SELECT MAX(rowid)
+  FROM oauthConsent
+  GROUP BY clientId, userId, COALESCE(referenceId, '')
 );
 
 CREATE UNIQUE INDEX oauth_consent_user_client_unique

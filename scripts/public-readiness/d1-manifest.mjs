@@ -7,6 +7,18 @@ import { runWrangler } from "./local-runtime.mjs";
 
 const APPLICATION_TABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MIGRATION_FILENAME_PATTERN = /^\d{4}_[a-z0-9_]+\.sql$/;
+const RECOVERED_APPLY_TIME_MIGRATION_SHA256 = Object.freeze({
+  "0001_better_auth.sql":
+    "ac10d43c7d178ca64193d55780f570aac4dab9f555b125375806a849b7500580",
+  "0002_pg72_identity.sql":
+    "5fc36695f3ba44a0704d587874227de508f595de6ae3017163c2cb9652cc67b3",
+  "0003_require_oauth_consent.sql":
+    "ca28df588d3d189ebe1d37e0d1c327411d69e782ac3cd7dce1bb800ff29d947f",
+  "0004_unique_oauth_consent.sql":
+    "458828888ace305e4e038269e37404a2a48fc3ca7e5da51b25b19cbf7199b057",
+  "0005_copy_refresh_grant.sql":
+    "5cf2398a42bde7bb87613d1bfbb3cc40a5b1e40984fcdef025e99f0921d2a16c",
+});
 export const D1_CONSISTENCY_CHECK_SQL = "PRAGMA quick_check";
 const MANIFEST_ERROR_NAMES = new Set([
   "D1ForeignKeyError",
@@ -118,7 +130,24 @@ export function assertIntegratedMigrationLedger(ledger) {
 }
 
 export function expectedIntegratedMigrationLedger(migrationsDirectory) {
-  return assertIntegratedMigrationLedger(expectedMigrationLedger(migrationsDirectory));
+  const ledger = expectedMigrationLedger(migrationsDirectory);
+  assertRecoveredApplyTimeMigrationDigests(migrationsDirectory);
+  return assertIntegratedMigrationLedger(ledger);
+}
+
+export function assertRecoveredApplyTimeMigrationDigests(migrationsDirectory) {
+  for (const [name, expected] of Object.entries(
+    RECOVERED_APPLY_TIME_MIGRATION_SHA256,
+  )) {
+    const actual = createHash("sha256")
+      .update(readFileSync(path.join(migrationsDirectory, name)))
+      .digest("hex");
+    assert.equal(
+      actual,
+      expected,
+      `${name} recovered apply-time migration bytes drifted`,
+    );
+  }
 }
 
 function canonicalMigrationLedger(names) {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  copyFileSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -22,6 +23,7 @@ import {
   INTEGRATED_MIGRATION_LEDGER,
   assertEquivalentD1,
   assertIntegratedMigrationLedger,
+  assertRecoveredApplyTimeMigrationDigests,
   classifiedManifestStep,
   expectedMigrationHead,
   expectedIntegratedMigrationLedger,
@@ -185,6 +187,38 @@ test("derives the complete migration ledger from the integrated source sequence"
     { count: ledger.count, head: ledger.head },
     INTEGRATED_MIGRATION_LEDGER,
   );
+});
+
+test("locks recovered 0001-0005 apply-time bytes", () => {
+  const migrationsDirectory = path.join(ssoRoot, "migrations");
+  const directory = mkdtempSync(path.join(os.tmpdir(), "pgid-applied-migrations-"));
+  try {
+    for (const name of readdirSync(migrationsDirectory).filter((candidate) =>
+      /^000[1-5]_.+\.sql$/.test(candidate),
+    )) {
+      copyFileSync(path.join(migrationsDirectory, name), path.join(directory, name));
+    }
+    assert.doesNotThrow(() =>
+      assertRecoveredApplyTimeMigrationDigests(directory),
+    );
+
+    const missing = path.join(directory, "0005_copy_refresh_grant.sql");
+    rmSync(missing);
+    assert.throws(
+      () => assertRecoveredApplyTimeMigrationDigests(directory),
+      (error) => error?.code === "ENOENT",
+    );
+    copyFileSync(path.join(migrationsDirectory, path.basename(missing)), missing);
+
+    const migration = path.join(directory, "0004_unique_oauth_consent.sql");
+    writeFileSync(migration, `${readFileSync(migration, "utf8")}-- drift\n`);
+    assert.throws(
+      () => assertRecoveredApplyTimeMigrationDigests(directory),
+      /0004_unique_oauth_consent\.sql recovered apply-time migration bytes drifted/,
+    );
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
 });
 
 test("integrated migration proof requires exact 0024 count and head", () => {

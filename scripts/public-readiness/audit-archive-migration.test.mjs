@@ -343,6 +343,28 @@ function createMigrationRunnerProject(projectDirectory, names) {
   return fixtureMigrations;
 }
 
+function runnerQueryRows(projectDirectory, sql) {
+  const results = executeD1(projectDirectory, sql);
+  assert.equal(results.length, 1);
+  return (results[0].results ?? []).map((row) => ({ ...row }));
+}
+
+function incrementalRunnerSnapshot(projectDirectory) {
+  return {
+    consents: runnerQueryRows(
+      projectDirectory,
+      `SELECT id, clientId, userId, referenceId, scopes, createdAt, updatedAt
+         FROM oauthConsent ORDER BY id`,
+    ),
+    foreignKeys: runnerQueryRows(projectDirectory, "PRAGMA foreign_key_check"),
+    ledger: runnerQueryRows(
+      projectDirectory,
+      "SELECT id, name FROM d1_migrations ORDER BY id",
+    ),
+    quickCheck: runnerQueryRows(projectDirectory, "PRAGMA quick_check"),
+  };
+}
+
 function runnerSnapshot(projectDirectory) {
   const statements = [
     taggedJsonRowsSql(
@@ -1152,6 +1174,65 @@ test("normal local migration runner applies 0024 once and then no-ops", () => {
         ({ name }) => name === "0024_audit_archive_r2_evidence_guard.sql",
       ),
       [{ id: 24, name: "0024_audit_archive_r2_evidence_guard.sql" }],
+    );
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("normal local migration runner preserves recovered 0001-0005", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "pgid-applied-runner-"));
+  const projectDirectory = path.join(directory, "project");
+  const expectedLedger = migrationNames.map((name, index) => ({
+    id: index + 1,
+    name,
+  }));
+  try {
+    const fixtureMigrations = createMigrationRunnerProject(
+      projectDirectory,
+      migrationNames.slice(0, 5),
+    );
+    applyAllMigrations(projectDirectory);
+    assert.deepEqual(
+      runnerQueryRows(
+        projectDirectory,
+        "SELECT id, name FROM d1_migrations ORDER BY id",
+      ),
+      expectedLedger.slice(0, 5),
+    );
+
+    executeD1(
+      projectDirectory,
+      `INSERT INTO oauthClient (id, clientId, redirectUris)
+       VALUES ('runner-client-row', 'runner-client', '["https://rp.example/callback"]');
+       INSERT INTO oauthConsent
+        (id, clientId, userId, referenceId, scopes, createdAt, updatedAt)
+       VALUES
+        ('runner-consent-a', 'runner-client', NULL, 'runner-reference',
+         '["openid"]', '2026-07-15 06:58:00', '2026-07-15 06:58:00'),
+        ('runner-consent-b', 'runner-client', NULL, 'runner-reference',
+         '["openid","email"]', '2026-07-15 06:59:00', '2026-07-15 06:59:00');`,
+    );
+    const before = incrementalRunnerSnapshot(projectDirectory);
+    assert.equal(before.consents.length, 2);
+
+    for (const name of migrationNames.slice(5)) {
+      copyFileSync(
+        path.join(migrationsDirectory, name),
+        path.join(fixtureMigrations, name),
+      );
+    }
+    applyAllMigrations(projectDirectory);
+    const afterFirstApply = incrementalRunnerSnapshot(projectDirectory);
+    assert.deepEqual(afterFirstApply.consents, before.consents);
+    assert.deepEqual(afterFirstApply.ledger, expectedLedger);
+    assert.deepEqual(afterFirstApply.quickCheck, [{ quick_check: "ok" }]);
+    assert.deepEqual(afterFirstApply.foreignKeys, []);
+
+    applyAllMigrations(projectDirectory);
+    assert.deepEqual(
+      incrementalRunnerSnapshot(projectDirectory),
+      afterFirstApply,
     );
   } finally {
     rmSync(directory, { force: true, recursive: true });

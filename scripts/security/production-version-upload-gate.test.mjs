@@ -1043,6 +1043,8 @@ test("uses only the pinned CLI path and a fixed argument surface", () => {
     cliPath,
     "versions",
     "upload",
+    "--experimental-provision=false",
+    "--experimental-auto-create=false",
     "--config",
     privateConfigPath,
     "--strict",
@@ -1056,6 +1058,33 @@ test("uses only the pinned CLI path and a fixed argument surface", () => {
   assert.equal(value.args.includes("--preview-alias"), false);
   assert.equal(value.args.includes("--keep-vars"), false);
   assert.equal(value.args.includes("--secrets-file"), false);
+  for (const flag of [
+    "--experimental-provision",
+    "--experimental-auto-create",
+  ]) {
+    assert.deepEqual(
+      value.args.filter((entry) => entry === flag || entry.startsWith(`${flag}=`)),
+      [`${flag}=false`],
+    );
+  }
+  assert.equal(
+    value.args.some(
+      (entry) =>
+        entry.startsWith("--x-provision") || entry.startsWith("--x-auto-create"),
+    ),
+    false,
+  );
+  for (const command of [
+    "create",
+    "delete",
+    "deploy",
+    "promote",
+    "provision",
+    "rollback",
+    "triggers",
+  ]) {
+    assert.equal(value.args.includes(command), false);
+  }
   expectCode(
     () =>
       wranglerUploadArguments({

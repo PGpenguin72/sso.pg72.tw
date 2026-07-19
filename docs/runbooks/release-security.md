@@ -254,6 +254,22 @@ SHA-256 into the receipt. It is not evidence that the owner pre-approved the
 server-assigned UUID. Retrigger replay, input injection, issuance provenance,
 and build/token custody remain production blockers.
 
+The same pinned CLI defines the hidden global `experimental-provision` and
+`experimental-auto-create` booleans with `true` defaults. The reviewed upload
+argument model therefore fixes `--experimental-provision=false` and
+`--experimental-auto-create=false` exactly once; callers cannot omit, enable,
+duplicate, or replace them with aliases. A missing D1 or Queue resource must
+stop the operation before version creation and must never be provisioned by the
+upload command.
+
+The private config's `workers_dev=false` and `preview_urls=false` values are
+artifact equality constraints, not mutations of live Worker subdomain
+settings. Before any version-create POST, an independently bound live preflight
+must prove workers.dev `enabled=false` and Preview URLs
+`previews_enabled=false` for the exact account and Worker. Any mismatch or
+unprovable state stops the lane; `--strict` and the private config do not replace
+that proof or authorize changing either live setting.
+
 For one to three added versions, every normalized detail must retain the exact
 candidate tag/message, runtime, binding and secret-name inventory, remain
 inactive, and share one observed script ETag. Only an exact successful output

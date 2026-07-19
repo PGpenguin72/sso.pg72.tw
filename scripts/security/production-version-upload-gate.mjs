@@ -1782,6 +1782,8 @@ export function wranglerUploadArguments({
       cliPath,
       "versions",
       "upload",
+      "--experimental-provision=false",
+      "--experimental-auto-create=false",
       "--config",
       privateConfigPath,
       "--strict",

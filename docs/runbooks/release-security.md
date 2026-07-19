@@ -197,11 +197,42 @@ direct command for it. An offline model result is never production deploy
 evidence and does not authorize version promotion, traffic changes, routes,
 triggers, or DAST.
 
+The adjacent adapter is also a non-executable source model. It accepts only
+bounded duplicate-aware JSON bytes and has no transport, credential, socket, or
+mutation method. It requires the exact account and Worker target on every
+observation, standard success/error/message response envelopes, closed
+multi-page result metadata, one ordered endpoint set, bounded observation
+times, and recomputed pairing across routes, custom domains, schedules, Queue
+consumers, and Queue triggers. Unordered collections are canonicalized with a
+locale-independent ordering while semantic version order is preserved and
+validated. Duplicate semantic routes, domains, bindings, schedules, or Queue
+identities fail closed. If the complete inventory cannot fit the adapter's
+bounded input, the operation must stop; truncation is not an accepted snapshot.
+
+Those checks establish only a normalized source schema. They do not prove API
+permission coverage, response provenance, cross-endpoint atomicity, single-
+writer custody, or that an opaque correlation/token digest came from the owner.
+The normalized snapshot and every receipt therefore keep those verification
+fields false. External C must still compare the endpoint/result shapes and
+pagination behavior with the actual Cloudflare API before any activation
+proposal.
+
+No custody validator or wrapper candidate is retained in this slice. The
+attempted custody schema could not yet represent the gate's split generated-dir
+config and private-temp output layout, a complete Node/ELF plus transitive
+JS/native/WASM execution closure, or every child executable/argument/
+environment/cwd identity without vacuous graph declarations. That is an
+explicit representability stop, not accepted residual evidence. A future
+immutable task must solve and independently review those contracts before a
+data-only wrapper can be reconsidered; production execution remains blocked.
+
 A future Workers Builds production command must invoke a separately reviewed
 gate that can upload only an inactive version. That path remains blocked on all
 of the following:
 
 - external-C review of the normalized Cloudflare API adapter;
+- multi-endpoint snapshot provenance, permission coverage, atomicity, and
+  single-writer review;
 - owner review of the Workers Builds trigger and token custody;
 - a reviewed owner-acceptance issuance/provenance channel for pinned Wrangler's
   bounded internal version-create retries;

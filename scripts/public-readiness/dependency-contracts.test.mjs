@@ -367,6 +367,7 @@ const releaseTestCounts = new Map([
   ["artifact-gate.test.mjs", 11],
   ["dast.test.mjs", 6],
   ["dependency-inventory.test.mjs", 2],
+  ["production-version-upload-adapter.test.mjs", 4],
   ["production-version-upload-gate.test.mjs", 26],
   ["release-identity.test.mjs", 13],
   ["secret-family.test.mjs", 21],
@@ -561,6 +562,8 @@ test("only same-run recovery and release checks produce their opaque proofs", ()
     );
     const releaseProof = runReleaseAutomationDependencyProof(homeDirectory);
     for (const relative of [
+      "scripts/security/production-version-upload-adapter.mjs",
+      "scripts/security/production-version-upload-adapter.test.mjs",
       "scripts/security/secret-family.mjs",
       "scripts/security/secret-family.test.mjs",
       "scripts/security/typescript-static-values.mjs",

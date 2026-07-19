@@ -131,7 +131,11 @@ function runtimeBindings(config, secretNames = config.secrets.required) {
   }
   bindings.push({ name: config.assets.binding, type: "assets" });
   for (const name of secretNames) bindings.push({ name, type: "secret_text" });
-  return bindings;
+  return bindings.sort((left, right) => {
+    const leftKey = `${left.type}\0${left.name}`;
+    const rightKey = `${right.type}\0${right.name}`;
+    return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+  });
 }
 
 function versionDetail(
@@ -164,10 +168,24 @@ function versionDetail(
 
 function normalizedSnapshot(
   config,
-  { uploaded = false, addedVersionIds = uploaded ? [NEW_VERSION] : [] } = {},
+  {
+    uploaded = false,
+    addedVersionIds = uploaded ? [NEW_VERSION] : [],
+    phase = uploaded || addedVersionIds.length > 0 ? "postflight" : "preflight",
+  } = {},
 ) {
   return {
+    accountId: ACCOUNT_ID,
     activeVersion: versionDetail(ACTIVE_VERSION, config),
+    customDomains: [
+      {
+        environment: "production",
+        hostname: "sso.pg72.tw",
+        id: "d".repeat(32),
+        service: PRODUCTION_WORKER_NAME,
+        zoneId: "e".repeat(32),
+      },
+    ],
     deployments: [
       {
         id: "44444444-4444-4444-8444-444444444444",
@@ -180,19 +198,67 @@ function normalizedSnapshot(
           message: `${UPLOAD_MESSAGE_PREFIX}${CANDIDATE}`,
         })
       : versionDetail(ACTIVE_VERSION, config),
-    schemaVersion: 1,
+    observation: {
+      apiProvenanceVerified: false,
+      atomicSnapshotVerified: false,
+      controlPlanePairingSha256: "f".repeat(64),
+      correlationSha256: (phase === "preflight" ? "1" : "2").repeat(64),
+      endpointSetSha256: "3".repeat(64),
+      firstObservedAt: new Date(NOW).toISOString(),
+      lastObservedAt: new Date(NOW).toISOString(),
+      paginationStructureClosed: true,
+      permissionScopeVerified: false,
+      phase,
+      singleWriterVerified: false,
+      tokenBindingSha256: "6".repeat(64),
+    },
+    queueConsumers: [
+      {
+        consumerId: "4".repeat(32),
+        deadLetterQueue: "logout-dlq",
+        maxBatchSize: 10,
+        maxBatchTimeout: 5,
+        maxRetries: 5,
+        queueName: "logout",
+        scriptName: PRODUCTION_WORKER_NAME,
+      },
+    ],
+    queueTriggers: [
+      {
+        environment: "production",
+        queueName: "logout",
+        scriptName: PRODUCTION_WORKER_NAME,
+      },
+    ],
+    routes: [
+      {
+        id: "55555555-5555-4555-8555-555555555555",
+        pattern: "sso.pg72.tw/*",
+        script: PRODUCTION_WORKER_NAME,
+      },
+    ],
+    schedules: [
+      {
+        createdOn: new Date(NOW).toISOString(),
+        cron: "* * * * *",
+        modifiedOn: new Date(NOW).toISOString(),
+      },
+    ],
+    schemaVersion: 2,
     scriptSettings: {
       logpush: false,
-      observability: { enabled: true },
+      observability: { enabled: true, headSamplingRate: null },
       tags: ["production"],
       tail_consumers: [],
     },
     serviceTag: SERVICE_TAG,
-    singleWriter: true,
     subdomain: { enabled: false, previews_enabled: false },
     versions: [
-      ...addedVersionIds.map((id) => ({ id })),
-      { id: ACTIVE_VERSION },
+      ...addedVersionIds.map((id, index) => ({
+        id,
+        number: 100 + addedVersionIds.length - index,
+      })),
+      { id: ACTIVE_VERSION, number: 50 },
     ],
     workerName: PRODUCTION_WORKER_NAME,
   };
@@ -403,7 +469,10 @@ function offlineEvidence({
     d1Uuid: D1_UUID,
   });
   const before = normalizedSnapshot(privateConfig);
-  const after = normalizedSnapshot(privateConfig, { addedVersionIds });
+  const after = normalizedSnapshot(privateConfig, {
+    addedVersionIds,
+    phase: "postflight",
+  });
   return {
     before,
     after,
@@ -443,6 +512,7 @@ test("production entry is structurally blocked before any injected action", asyn
   assert.equal(calls, 0);
   assert.deepEqual(PRODUCTION_EXECUTION_BLOCKERS, [
     "external-c-normalized-api-adapter-review",
+    "multi-endpoint-snapshot-provenance-and-single-writer-review",
     "owner-workers-builds-trigger-and-token-custody",
     "bounded-pinned-wrangler-internal-retry-owner-acceptance-review",
     "child-process-tree-custody-review",
@@ -537,27 +607,34 @@ test("requires exact remote state while separating latest from active version", 
   });
   const valid = normalizedSnapshot(config);
   assert.doesNotThrow(() =>
-    validateNormalizedSnapshot(valid, { matchTag: SERVICE_TAG }),
+    validateNormalizedSnapshot(valid, { accountId: ACCOUNT_ID, matchTag: SERVICE_TAG }),
   );
   for (const [code, mutate] of [
     ["REMOTE_PREVIEW_STATE", (value) => (value.subdomain.enabled = true)],
     ["REMOTE_PREVIEW_STATE", (value) => delete value.subdomain.previews_enabled],
     ["REMOTE_TAG_STATE", (value) => value.scriptSettings.tags.push("cf:service=legacy")],
-    ["REMOTE_SINGLE_WRITER_EVIDENCE_REQUIRED", (value) => (value.singleWriter = false)],
-    ["REMOTE_LATEST_VERSION_MISMATCH", (value) => value.versions.unshift({ id: NEW_VERSION })],
+    ["REMOTE_OBSERVATION_PROVENANCE_REVIEW_REQUIRED", (value) => (value.observation.singleWriterVerified = true)],
+    ["REMOTE_LATEST_VERSION_MISMATCH", (value) => value.versions.unshift({ id: NEW_VERSION, number: 51 })],
+    [
+      "REMOTE_DEPLOYMENT_VERSION_INVENTORY_MISMATCH",
+      (value) => {
+        value.activeVersion.id = NEW_VERSION;
+        value.deployments[0].versions[0].version_id = NEW_VERSION;
+      },
+    ],
   ]) {
     const changed = structuredClone(valid);
     mutate(changed);
     expectCode(
-      () => validateNormalizedSnapshot(changed, { matchTag: SERVICE_TAG }),
+      () => validateNormalizedSnapshot(changed, { accountId: ACCOUNT_ID, matchTag: SERVICE_TAG }),
       code,
     );
   }
   const inactiveLatest = normalizedSnapshot(config);
-  inactiveLatest.versions.unshift({ id: NEW_VERSION });
+  inactiveLatest.versions.unshift({ id: NEW_VERSION, number: 51 });
   inactiveLatest.latestVersion = versionDetail(NEW_VERSION, config);
   assert.doesNotThrow(() =>
-    validateNormalizedSnapshot(inactiveLatest, { matchTag: SERVICE_TAG }),
+    validateNormalizedSnapshot(inactiveLatest, { accountId: ACCOUNT_ID, matchTag: SERVICE_TAG }),
   );
 });
 
@@ -628,14 +705,22 @@ test("classifies bounded inactive versions with unchanged control-plane state", 
   for (const [code, mutate] of [
     ["UNEXPECTED_SUBDOMAIN_OR_IDENTITY_MUTATION", (value) => (value.subdomain.enabled = true)],
     ["UNEXPECTED_SCRIPT_SETTINGS_MUTATION", (value) => value.scriptSettings.tags.push("drift")],
+    ["UNEXPECTED_CONTROL_PLANE_MUTATION", (value) => (value.schedules[0].cron = "5 * * * *")],
+    [
+      "REMOTE_OBSERVATION_PROVENANCE_REVIEW_REQUIRED",
+      (value) => {
+        value.observation.firstObservedAt = new Date(NOW - 1).toISOString();
+        value.observation.lastObservedAt = new Date(NOW - 1).toISOString();
+      },
+    ],
     ["UNEXPECTED_ACTIVE_DEPLOYMENT_MUTATION", (value) => (value.deployments[0].id = NEW_VERSION)],
     [
       "BOUNDED_RETRY_VERSION_LIMIT_EXCEEDED",
       (value) =>
         value.versions.unshift(
-          { id: "88888888-8888-4888-8888-888888888888" },
-          { id: "99999999-9999-4999-8999-999999999999" },
-          { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+          { id: "88888888-8888-4888-8888-888888888888", number: 103 },
+          { id: "99999999-9999-4999-8999-999999999999", number: 102 },
+          { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", number: 101 },
         ),
     ],
   ]) {
@@ -648,8 +733,8 @@ test("classifies bounded inactive versions with unchanged control-plane state", 
   }
   const staleLatestOrder = structuredClone(after);
   staleLatestOrder.versions = [
-    { id: ACTIVE_VERSION },
-    { id: NEW_VERSION },
+    { id: ACTIVE_VERSION, number: 50 },
+    { id: NEW_VERSION, number: 101 },
   ];
   expectCode(
     () =>
@@ -678,7 +763,7 @@ test("classifies bounded inactive versions with unchanged control-plane state", 
   assert.deepEqual(
     classifyPostflight({
       before,
-      after: before,
+      after: normalizedSnapshot(config, { phase: "postflight" }),
       outputRecord: null,
       childResult: normalizedChildResult({ status: 1 }),
     }),
@@ -1062,6 +1147,11 @@ test("evaluates exact output as one blocked verified inactive version", () => {
   assert.equal(result.pinnedToolInternalRetryAccepted, true);
   assert.equal(result.assetIdentityVerified, false);
   assert.equal(result.scriptArtifactIdentityVerified, false);
+  assert.equal(result.remoteApiProvenanceVerified, false);
+  assert.equal(result.remoteSnapshotAtomicityVerified, false);
+  assert.equal(result.remotePermissionScopeVerified, false);
+  assert.equal(result.remoteSingleWriterVerified, false);
+  assert.equal(result.normalizedControlPlaneCollectionsEqual, true);
   assert.equal(result.assetRetryResidual, ASSET_RETRY_RESIDUAL);
   assert.equal(result.scriptIdentityResidual, SCRIPT_IDENTITY_RESIDUAL);
   assert.equal(

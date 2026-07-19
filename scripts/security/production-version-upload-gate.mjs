@@ -20,6 +20,7 @@ export const SCRIPT_IDENTITY_RESIDUAL =
   "observed-script-etag-equality-does-not-prove-local-artifact-identity;sealed-toolchain-and-normalized-content-manifest-proof-remain-production-blocking";
 export const PRODUCTION_EXECUTION_BLOCKERS = Object.freeze([
   "external-c-normalized-api-adapter-review",
+  "multi-endpoint-snapshot-provenance-and-single-writer-review",
   "owner-workers-builds-trigger-and-token-custody",
   "bounded-pinned-wrangler-internal-retry-owner-acceptance-review",
   "child-process-tree-custody-review",
@@ -39,6 +40,7 @@ const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ACCOUNT_ID_PATTERN = /^[0-9a-f]{32}$/;
 const SAFE_OPAQUE_TAG_PATTERN = /^[\x21-\x7e]{1,256}$/;
+const SAFE_CONTROL_TEXT_PATTERN = /^[\x20-\x7e]{1,1024}$/;
 const WRANGLER_VERSION = "4.110.0";
 const OWNER_ACCEPTANCE_DECISION =
   "accept-exact-bounded-inactive-version-duplicates-only";
@@ -114,6 +116,10 @@ function requireCondition(condition, code) {
 
 function matchesPattern(value, pattern) {
   return typeof value === "string" && pattern.test(value);
+}
+
+function compareExactText(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 export function sha256(value) {
@@ -891,8 +897,10 @@ function validateVersionSummary(version) {
   requireCondition(
     version &&
       typeof version === "object" &&
-      exactKeys(version, ["id"]) &&
-      matchesPattern(version.id, UUID_PATTERN),
+      exactKeys(version, ["id", "number"]) &&
+      matchesPattern(version.id, UUID_PATTERN) &&
+      Number.isSafeInteger(version.number) &&
+      version.number > 0,
     "REMOTE_VERSION_SCHEMA_REVIEW_REQUIRED",
   );
   return version;
@@ -921,33 +929,239 @@ function validateVersionDetail(detail) {
         "compatibility_date",
         "compatibility_flags",
       ]) &&
+      typeof detail.resources.script_runtime.compatibility_date === "string" &&
+      Array.isArray(detail.resources.script_runtime.compatibility_flags) &&
       detail.metadata &&
       typeof detail.metadata === "object" &&
       exactKeys(detail.metadata, ["hasPreview"]) &&
       typeof detail.metadata.hasPreview === "boolean" &&
       detail.annotations &&
       typeof detail.annotations === "object" &&
-      exactKeys(detail.annotations, ["workers/message", "workers/tag"]),
+      exactKeys(detail.annotations, ["workers/message", "workers/tag"]) &&
+      typeof detail.annotations["workers/message"] === "string" &&
+      typeof detail.annotations["workers/tag"] === "string",
     "REMOTE_RUNTIME_SCHEMA_REVIEW_REQUIRED",
+  );
+  const flags = detail.resources.script_runtime.compatibility_flags;
+  requireCondition(
+    flags.every((flag) => typeof flag === "string" && flag.length > 0) &&
+      new Set(flags).size === flags.length &&
+      isDeepStrictEqual(flags, [...flags].sort(compareExactText)),
+    "REMOTE_RUNTIME_ORDER_REVIEW_REQUIRED",
+  );
+  requireCondition(
+    isDeepStrictEqual(detail.resources.bindings, sortBindings(detail.resources.bindings)),
+    "REMOTE_BINDING_ORDER_REVIEW_REQUIRED",
   );
   return detail;
 }
 
+function canonicalOrderedUnique(values, identity, duplicateCode, orderCode) {
+  const identities = values.map(identity);
+  requireCondition(new Set(identities).size === identities.length, duplicateCode);
+  requireCondition(
+    isDeepStrictEqual(identities, [...identities].sort(compareExactText)),
+    orderCode,
+  );
+}
+
+function validateObservation(observation) {
+  requireCondition(
+    exactKeys(observation, [
+      "apiProvenanceVerified",
+      "atomicSnapshotVerified",
+      "controlPlanePairingSha256",
+      "correlationSha256",
+      "endpointSetSha256",
+      "firstObservedAt",
+      "lastObservedAt",
+      "paginationStructureClosed",
+      "permissionScopeVerified",
+      "phase",
+      "singleWriterVerified",
+      "tokenBindingSha256",
+    ]) &&
+      ["preflight", "postflight"].includes(observation.phase) &&
+      matchesPattern(observation.controlPlanePairingSha256, DIGEST_PATTERN) &&
+      matchesPattern(observation.correlationSha256, DIGEST_PATTERN) &&
+      matchesPattern(observation.endpointSetSha256, DIGEST_PATTERN) &&
+      matchesPattern(observation.tokenBindingSha256, DIGEST_PATTERN) &&
+      observation.paginationStructureClosed === true &&
+      observation.apiProvenanceVerified === false &&
+      observation.atomicSnapshotVerified === false &&
+      observation.permissionScopeVerified === false &&
+      observation.singleWriterVerified === false,
+    "REMOTE_OBSERVATION_PROVENANCE_REVIEW_REQUIRED",
+  );
+  const firstObservedAt = canonicalTimestamp(
+    observation.firstObservedAt,
+    "REMOTE_OBSERVATION_TIME_REVIEW_REQUIRED",
+  );
+  const lastObservedAt = canonicalTimestamp(
+    observation.lastObservedAt,
+    "REMOTE_OBSERVATION_TIME_REVIEW_REQUIRED",
+  );
+  requireCondition(
+    firstObservedAt <= lastObservedAt &&
+      lastObservedAt - firstObservedAt <= 5 * 60 * 1000,
+    "REMOTE_OBSERVATION_TIME_REVIEW_REQUIRED",
+  );
+}
+
+function validateControlPlaneCollections(snapshot) {
+  requireCondition(Array.isArray(snapshot.routes), "REMOTE_ROUTE_SCHEMA_REVIEW_REQUIRED");
+  for (const route of snapshot.routes) {
+    requireCondition(
+      exactKeys(route, ["id", "pattern", "script"]) &&
+        matchesPattern(route.id, UUID_PATTERN) &&
+        matchesPattern(route.pattern, SAFE_CONTROL_TEXT_PATTERN) &&
+        route.script === PRODUCTION_WORKER_NAME,
+      "REMOTE_ROUTE_SCHEMA_REVIEW_REQUIRED",
+    );
+  }
+  canonicalOrderedUnique(
+    snapshot.routes,
+    ({ pattern }) => pattern,
+    "REMOTE_ROUTE_DUPLICATE",
+    "REMOTE_ROUTE_ORDER_REVIEW_REQUIRED",
+  );
+  requireCondition(
+    new Set(snapshot.routes.map(({ id }) => id)).size === snapshot.routes.length,
+    "REMOTE_ROUTE_DUPLICATE",
+  );
+
+  requireCondition(
+    Array.isArray(snapshot.customDomains),
+    "REMOTE_CUSTOM_DOMAIN_SCHEMA_REVIEW_REQUIRED",
+  );
+  for (const domain of snapshot.customDomains) {
+    requireCondition(
+      exactKeys(domain, ["environment", "hostname", "id", "service", "zoneId"]) &&
+        matchesPattern(domain.id, ACCOUNT_ID_PATTERN) &&
+        matchesPattern(domain.zoneId, ACCOUNT_ID_PATTERN) &&
+        typeof domain.hostname === "string" &&
+        /^[a-z0-9.-]{1,253}$/.test(domain.hostname) &&
+        domain.service === PRODUCTION_WORKER_NAME &&
+        domain.environment === "production",
+      "REMOTE_CUSTOM_DOMAIN_SCHEMA_REVIEW_REQUIRED",
+    );
+  }
+  canonicalOrderedUnique(
+    snapshot.customDomains,
+    ({ hostname }) => hostname,
+    "REMOTE_CUSTOM_DOMAIN_DUPLICATE",
+    "REMOTE_CUSTOM_DOMAIN_ORDER_REVIEW_REQUIRED",
+  );
+  requireCondition(
+    new Set(snapshot.customDomains.map(({ id }) => id)).size ===
+      snapshot.customDomains.length,
+    "REMOTE_CUSTOM_DOMAIN_DUPLICATE",
+  );
+
+  requireCondition(
+    Array.isArray(snapshot.schedules),
+    "REMOTE_SCHEDULE_SCHEMA_REVIEW_REQUIRED",
+  );
+  for (const schedule of snapshot.schedules) {
+    requireCondition(
+      exactKeys(schedule, ["createdOn", "cron", "modifiedOn"]) &&
+        matchesPattern(schedule.cron, SAFE_CONTROL_TEXT_PATTERN) &&
+        schedule.cron.length <= 256,
+      "REMOTE_SCHEDULE_SCHEMA_REVIEW_REQUIRED",
+    );
+    canonicalTimestamp(schedule.createdOn, "REMOTE_SCHEDULE_SCHEMA_REVIEW_REQUIRED");
+    canonicalTimestamp(schedule.modifiedOn, "REMOTE_SCHEDULE_SCHEMA_REVIEW_REQUIRED");
+  }
+  canonicalOrderedUnique(
+    snapshot.schedules,
+    ({ cron }) => cron,
+    "REMOTE_SCHEDULE_DUPLICATE",
+    "REMOTE_SCHEDULE_ORDER_REVIEW_REQUIRED",
+  );
+
+  requireCondition(
+    Array.isArray(snapshot.queueConsumers),
+    "REMOTE_QUEUE_CONSUMER_SCHEMA_REVIEW_REQUIRED",
+  );
+  for (const consumer of snapshot.queueConsumers) {
+    requireCondition(
+      exactKeys(consumer, [
+        "consumerId",
+        "deadLetterQueue",
+        "maxBatchSize",
+        "maxBatchTimeout",
+        "maxRetries",
+        "queueName",
+        "scriptName",
+      ]) &&
+        matchesPattern(consumer.consumerId, ACCOUNT_ID_PATTERN) &&
+        (consumer.deadLetterQueue === null ||
+          matchesPattern(consumer.deadLetterQueue, SAFE_CONTROL_TEXT_PATTERN)) &&
+        Number.isSafeInteger(consumer.maxBatchSize) &&
+        consumer.maxBatchSize > 0 &&
+        Number.isSafeInteger(consumer.maxBatchTimeout) &&
+        consumer.maxBatchTimeout >= 0 &&
+        Number.isSafeInteger(consumer.maxRetries) &&
+        consumer.maxRetries >= 0 &&
+        matchesPattern(consumer.queueName, SAFE_CONTROL_TEXT_PATTERN) &&
+        consumer.scriptName === PRODUCTION_WORKER_NAME,
+      "REMOTE_QUEUE_CONSUMER_SCHEMA_REVIEW_REQUIRED",
+    );
+  }
+  canonicalOrderedUnique(
+    snapshot.queueConsumers,
+    ({ queueName }) => queueName,
+    "REMOTE_QUEUE_CONSUMER_DUPLICATE",
+    "REMOTE_QUEUE_CONSUMER_ORDER_REVIEW_REQUIRED",
+  );
+  requireCondition(
+    new Set(snapshot.queueConsumers.map(({ consumerId }) => consumerId)).size ===
+      snapshot.queueConsumers.length,
+    "REMOTE_QUEUE_CONSUMER_DUPLICATE",
+  );
+
+  requireCondition(
+    Array.isArray(snapshot.queueTriggers),
+    "REMOTE_QUEUE_TRIGGER_SCHEMA_REVIEW_REQUIRED",
+  );
+  for (const trigger of snapshot.queueTriggers) {
+    requireCondition(
+      exactKeys(trigger, ["environment", "queueName", "scriptName"]) &&
+        trigger.environment === "production" &&
+        matchesPattern(trigger.queueName, SAFE_CONTROL_TEXT_PATTERN) &&
+        trigger.scriptName === PRODUCTION_WORKER_NAME,
+      "REMOTE_QUEUE_TRIGGER_SCHEMA_REVIEW_REQUIRED",
+    );
+  }
+  canonicalOrderedUnique(
+    snapshot.queueTriggers,
+    ({ queueName }) => queueName,
+    "REMOTE_QUEUE_TRIGGER_DUPLICATE",
+    "REMOTE_QUEUE_TRIGGER_ORDER_REVIEW_REQUIRED",
+  );
+}
+
 export function validateNormalizedSnapshot(
   snapshot,
-  { matchTag },
+  { accountId, matchTag },
 ) {
   requireCondition(
     snapshot &&
-      snapshot.schemaVersion === 1 &&
+      snapshot.schemaVersion === 2 &&
       exactKeys(snapshot, [
+        "accountId",
         "activeVersion",
+        "customDomains",
         "deployments",
         "latestVersion",
+        "observation",
+        "queueConsumers",
+        "queueTriggers",
+        "routes",
+        "schedules",
         "schemaVersion",
         "scriptSettings",
         "serviceTag",
-        "singleWriter",
         "subdomain",
         "versions",
         "workerName",
@@ -955,10 +1169,13 @@ export function validateNormalizedSnapshot(
     "REMOTE_SNAPSHOT_SCHEMA_REVIEW_REQUIRED",
   );
   requireCondition(
-    snapshot.workerName === PRODUCTION_WORKER_NAME &&
+    matchesPattern(accountId, ACCOUNT_ID_PATTERN) &&
+      snapshot.accountId === accountId &&
+      snapshot.workerName === PRODUCTION_WORKER_NAME &&
       snapshot.serviceTag === matchTag,
     "REMOTE_WORKER_IDENTITY",
   );
+  validateObservation(snapshot.observation);
   requireCondition(
     exactKeys(snapshot.subdomain, ["enabled", "previews_enabled"]) &&
       snapshot.subdomain.enabled === false &&
@@ -979,21 +1196,45 @@ export function validateNormalizedSnapshot(
         typeof snapshot.scriptSettings.logpush === "boolean") &&
       (snapshot.scriptSettings.observability === null ||
         (typeof snapshot.scriptSettings.observability === "object" &&
-          !Array.isArray(snapshot.scriptSettings.observability))) &&
+          !Array.isArray(snapshot.scriptSettings.observability) &&
+          exactKeys(snapshot.scriptSettings.observability, [
+            "enabled",
+            "headSamplingRate",
+          ]) &&
+          typeof snapshot.scriptSettings.observability.enabled === "boolean" &&
+          (snapshot.scriptSettings.observability.headSamplingRate === null ||
+            (typeof snapshot.scriptSettings.observability.headSamplingRate === "number" &&
+              Number.isFinite(snapshot.scriptSettings.observability.headSamplingRate) &&
+              snapshot.scriptSettings.observability.headSamplingRate >= 0 &&
+              snapshot.scriptSettings.observability.headSamplingRate <= 1)))) &&
       Array.isArray(snapshot.scriptSettings.tags) &&
       snapshot.scriptSettings.tags.every(
         (tag) =>
-          typeof tag === "string" &&
+          matchesPattern(tag, SAFE_CONTROL_TEXT_PATTERN) &&
           !tag.startsWith("cf:service=") &&
           !tag.startsWith("cf:environment="),
       ) &&
-      Array.isArray(snapshot.scriptSettings.tail_consumers),
+      new Set(snapshot.scriptSettings.tags).size === snapshot.scriptSettings.tags.length &&
+      isDeepStrictEqual(
+        snapshot.scriptSettings.tags,
+        [...snapshot.scriptSettings.tags].sort(compareExactText),
+      ) &&
+      Array.isArray(snapshot.scriptSettings.tail_consumers) &&
+      snapshot.scriptSettings.tail_consumers.every(
+        (consumer) =>
+          exactKeys(consumer, ["environment", "service"]) &&
+          consumer.environment === "production" &&
+          matchesPattern(consumer.service, SAFE_CONTROL_TEXT_PATTERN),
+      ),
     "REMOTE_TAG_STATE",
   );
-  requireCondition(
-    snapshot.singleWriter === true,
-    "REMOTE_SINGLE_WRITER_EVIDENCE_REQUIRED",
+  canonicalOrderedUnique(
+    snapshot.scriptSettings.tail_consumers,
+    ({ environment, service }) => `${service}\0${environment}`,
+    "REMOTE_TAIL_CONSUMER_DUPLICATE",
+    "REMOTE_TAIL_CONSUMER_ORDER_REVIEW_REQUIRED",
   );
+  validateControlPlaneCollections(snapshot);
   requireCondition(
     Array.isArray(snapshot.deployments) && snapshot.deployments.length === 1,
     "REMOTE_DEPLOYMENT_SCHEMA_REVIEW_REQUIRED",
@@ -1004,10 +1245,16 @@ export function validateNormalizedSnapshot(
     "REMOTE_VERSION_SCHEMA_REVIEW_REQUIRED",
   );
   const versionIds = new Set();
+  let priorVersionNumber = Number.POSITIVE_INFINITY;
   for (const version of snapshot.versions) {
     validateVersionSummary(version);
     requireCondition(!versionIds.has(version.id), "REMOTE_VERSION_DUPLICATE");
+    requireCondition(
+      version.number < priorVersionNumber,
+      "REMOTE_VERSION_ORDER_REVIEW_REQUIRED",
+    );
     versionIds.add(version.id);
+    priorVersionNumber = version.number;
   }
   const activeVersion = validateVersionDetail(snapshot.activeVersion);
   requireCondition(
@@ -1019,6 +1266,13 @@ export function validateNormalizedSnapshot(
     latestVersion.id === snapshot.versions[0].id,
     "REMOTE_LATEST_VERSION_MISMATCH",
   );
+  requireCondition(
+    versionIds.has(activeVersion.id) &&
+      activeDeployment.versions.every(({ version_id }) =>
+        versionIds.has(version_id),
+      ),
+    "REMOTE_DEPLOYMENT_VERSION_INVENTORY_MISMATCH",
+  );
   return snapshot;
 }
 
@@ -1029,7 +1283,8 @@ function normalizeBinding(binding) {
   );
   const { name, type } = binding;
   requireCondition(
-    typeof name === "string" && name.length > 0 && typeof type === "string",
+    matchesPattern(name, SAFE_CONTROL_TEXT_PATTERN) &&
+      matchesPattern(type, SAFE_CONTROL_TEXT_PATTERN),
     "REMOTE_BINDING_SCHEMA_REVIEW_REQUIRED",
   );
   if (type === "secret_text") {
@@ -1100,7 +1355,7 @@ function sortBindings(bindings) {
   const normalized = bindings
     .map((binding) => normalizeBinding(binding))
     .sort((left, right) =>
-      `${left.type}\0${left.name}`.localeCompare(`${right.type}\0${right.name}`),
+      compareExactText(`${left.type}\0${left.name}`, `${right.type}\0${right.name}`),
     );
   const names = new Set();
   for (const binding of normalized) {
@@ -1151,7 +1406,7 @@ function expectedBindings(privateConfig, latestVersion) {
   }
   for (const name of secretNames) expected.push({ name, type: "secret_text" });
   return expected.sort((left, right) =>
-    `${left.type}\0${left.name}`.localeCompare(`${right.type}\0${right.name}`),
+    compareExactText(`${left.type}\0${left.name}`, `${right.type}\0${right.name}`),
   );
 }
 
@@ -1259,15 +1514,43 @@ export function classifyPostflight({ before, after, outputRecord, childResult })
     "CHILD_RESULT_SCHEMA",
   );
   requireCondition(
-    before.workerName === after.workerName &&
+    before.accountId === after.accountId &&
+      before.workerName === after.workerName &&
       before.serviceTag === after.serviceTag &&
-      before.singleWriter === after.singleWriter &&
       isDeepStrictEqual(before.subdomain, after.subdomain),
     "UNEXPECTED_SUBDOMAIN_OR_IDENTITY_MUTATION",
   );
   requireCondition(
+    before.observation?.phase === "preflight" &&
+      after.observation?.phase === "postflight" &&
+      before.observation.apiProvenanceVerified === false &&
+      after.observation.apiProvenanceVerified === false &&
+      before.observation.atomicSnapshotVerified === false &&
+      after.observation.atomicSnapshotVerified === false &&
+      before.observation.permissionScopeVerified === false &&
+      after.observation.permissionScopeVerified === false &&
+      before.observation.singleWriterVerified === false &&
+      after.observation.singleWriterVerified === false &&
+      before.observation.endpointSetSha256 === after.observation.endpointSetSha256 &&
+      before.observation.controlPlanePairingSha256 ===
+        after.observation.controlPlanePairingSha256 &&
+      before.observation.tokenBindingSha256 ===
+        after.observation.tokenBindingSha256 &&
+      Date.parse(before.observation.lastObservedAt) <=
+        Date.parse(after.observation.firstObservedAt),
+    "REMOTE_OBSERVATION_PROVENANCE_REVIEW_REQUIRED",
+  );
+  requireCondition(
     isDeepStrictEqual(before.scriptSettings, after.scriptSettings),
     "UNEXPECTED_SCRIPT_SETTINGS_MUTATION",
+  );
+  requireCondition(
+    isDeepStrictEqual(before.routes, after.routes) &&
+      isDeepStrictEqual(before.customDomains, after.customDomains) &&
+      isDeepStrictEqual(before.schedules, after.schedules) &&
+      isDeepStrictEqual(before.queueConsumers, after.queueConsumers) &&
+      isDeepStrictEqual(before.queueTriggers, after.queueTriggers),
+    "UNEXPECTED_CONTROL_PLANE_MUTATION",
   );
   requireCondition(
     isDeepStrictEqual(before.deployments, after.deployments),
@@ -1666,10 +1949,19 @@ export function evaluateOfflineProductionVersionUploadEvidence({
         ? null
         : sha256(Buffer.from(canonicalJson(inventory))),
     observedScriptEtagSha256,
-    activeDeploymentUnchanged: true,
-    nonVersionedSettingsUnchanged: true,
-    addedVersionsInactive: true,
-    previewDisabled: true,
+    normalizedActiveDeploymentEqual: true,
+    normalizedNonVersionedSettingsEqual: true,
+    normalizedControlPlaneCollectionsEqual: true,
+    normalizedAddedVersionsInactive: true,
+    normalizedPreviewDisabled: true,
+    paginationStructureClosed: true,
+    remoteApiProvenanceVerified: false,
+    remoteSnapshotAtomicityVerified: false,
+    remotePermissionScopeVerified: false,
+    remoteSingleWriterVerified: false,
+    endpointSetSha256: before.observation.endpointSetSha256,
+    controlPlanePairingSha256:
+      before.observation.controlPlanePairingSha256,
     wrapperRetryAuthorized: false,
     pinnedToolInternalRetryAccepted: true,
     acceptedMaximumVersionCreateAttempts: MAX_VERSION_CREATE_ATTEMPTS,

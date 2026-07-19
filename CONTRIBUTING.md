@@ -9,6 +9,14 @@ canonical repository gate before opening a pull request:
 
 ```bash
 pnpm check
+```
+
+## Owner-Authorized Security Release Verification
+
+Only run the following security-sensitive release checks after the owner has
+explicitly authorized them for the exact candidate:
+
+```bash
 pnpm security:tools:install
 pnpm security:check
 pnpm dast:local
@@ -20,6 +28,10 @@ The DAST command is loopback-only and uses temporary synthetic D1 state. See the
 [release-security runbook](./docs/runbooks/release-security.md) for gate scope,
 artifacts, required checksum-pinned tools, and the separately protected Preview
 workflow.
+
+When authorized, local DAST is required before Production GO. It does not
+replace authenticated DAST in isolated Preview, authorize production, or prove
+production behavior.
 
 The Wiki uses the [workspace settings](./README.md#workspace) as the single
 source for its local and Cloudflare Pages build configuration; do not duplicate

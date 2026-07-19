@@ -163,15 +163,23 @@ The local test RP is a public client. It has no client secret; its transaction s
 
 ```bash
 pnpm check
-pnpm security:tools:install
-pnpm security:check
-pnpm dast:local
 ```
 
 `pnpm check` is the canonical repository gate. It runs the clean-build-output
 regression and workspace package checks, covering type checks, workerd and
 relying-party protocol tests, Wiki route/link/header validation, and production
 and static builds.
+
+### Owner-Authorized Security Release Verification
+
+Only run the following security-sensitive release checks after the owner has
+explicitly authorized them for the exact candidate:
+
+```bash
+pnpm security:tools:install
+pnpm security:check
+pnpm dast:local
+```
 
 `pnpm security:check` runs type-aware Promise analysis over both Workers,
 required checksum-pinned Gitleaks history scanning, a redacted bounded scanner
@@ -231,7 +239,9 @@ Critical advisories cannot be waived by this file.
 and test-RP Workers only at literal `127.0.0.1:5173`/`:5174`, and runs
 credential-free public/error probes without following redirects or permitting
 Host overrides. It terminates both process groups and deletes the synthetic
-state afterward.
+state afterward. When authorized, this local DAST is required before Production
+GO; it does not replace authenticated DAST in isolated Preview, authorize
+production, or prove production behavior.
 
 The protected manual Preview path and its limitations are documented in the
 [release-security runbook](./docs/runbooks/release-security.md); it has not been

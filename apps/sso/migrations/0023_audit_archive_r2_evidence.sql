@@ -226,7 +226,7 @@ SELECT "id", "batch_key", "dispatch_generation", "attempt_number", "lease_id",
        "outcome", "resulting_status", "next_attempt_at", "r2_version", "r2_etag",
        NULL, NULL, "r2_readback_sha256", "r2_readback_at",
        CASE WHEN "error_code" = 'r2_object_conflict'
-         THEN 'legacy_0021_full' ELSE NULL END,
+         THEN 'legacy_0021_full' ELSE NULL END ,
        "error_code", "started_at", "completed_at"
   FROM "audit_archive_attempt_0021";
 
@@ -341,24 +341,24 @@ BEGIN
            WHEN 'corrupt' THEN 'corrupt'
            WHEN 'lease_expired' THEN
              CASE WHEN NEW."attempt_number" = 5 THEN 'dead' ELSE 'retry' END
-         END,
+         END ,
          "next_attempt_at" = NEW."next_attempt_at",
          "lease_id" = NULL,
          "lease_expires_at" = NULL,
          "r2_version" = CASE WHEN NEW."outcome" = 'archived'
-           THEN NEW."r2_version" ELSE NULL END,
+           THEN NEW."r2_version" ELSE NULL END ,
          "r2_etag" = CASE WHEN NEW."outcome" = 'archived'
-           THEN NEW."r2_etag" ELSE NULL END,
+           THEN NEW."r2_etag" ELSE NULL END ,
          "r2_readback_sha256" = CASE WHEN NEW."outcome" = 'archived'
-           THEN NEW."r2_readback_sha256" ELSE NULL END,
+           THEN NEW."r2_readback_sha256" ELSE NULL END ,
          "r2_readback_at" = CASE WHEN NEW."outcome" = 'archived'
-           THEN NEW."r2_readback_at" ELSE NULL END,
+           THEN NEW."r2_readback_at" ELSE NULL END ,
          "archived_at" = CASE WHEN NEW."outcome" = 'archived'
-           THEN NEW."completed_at" ELSE NULL END,
+           THEN NEW."completed_at" ELSE NULL END ,
          "envelope_gc_at" = CASE WHEN NEW."outcome" = 'archived'
-           THEN NEW."completed_at" ELSE NULL END,
+           THEN NEW."completed_at" ELSE NULL END ,
          "encrypted_envelope" = CASE WHEN NEW."outcome" = 'archived'
-           THEN NULL ELSE "encrypted_envelope" END,
+           THEN NULL ELSE "encrypted_envelope" END ,
          "last_error_code" = NEW."error_code",
          "updated_at" = NEW."completed_at"
    WHERE "batch_key" = OLD."batch_key"

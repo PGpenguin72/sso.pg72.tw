@@ -901,18 +901,18 @@ BEGIN
   UPDATE "alert_evaluator_run"
      SET "status" = CASE
            WHEN NEW."status" = 'healthy' THEN 'succeeded' ELSE 'failed'
-         END,
+         END ,
          "completed_at" = NEW."updated_at",
          "watermark_at" = CASE
            WHEN NEW."status" = 'healthy' THEN NEW."watermark_at" ELSE NULL
-         END,
+         END ,
          "terminal_runtime_revision" = NEW."revision",
          "failure_status" = CASE
            WHEN NEW."status" = 'healthy' THEN NULL ELSE NEW."status"
-         END,
+         END ,
          "failure_error_code" = CASE
            WHEN NEW."status" = 'healthy' THEN NULL ELSE NEW."last_error_code"
-         END,
+         END ,
          "updated_at" = NEW."updated_at"
    WHERE "component" = 'evaluator'
      AND "runtime_generation" = OLD."generation"

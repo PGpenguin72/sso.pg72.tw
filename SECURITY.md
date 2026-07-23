@@ -59,7 +59,15 @@ cutover, and recorded `RECOVERY_MODE` as disabled. This historical state must be
 reverified before any maintenance operation; local results must not be
 represented as current production behavior.
 
-The repository also contains fail-closed synthetic continuity and bounded-load tooling. It requires an exact clean Git commit, uses fresh local D1 state, complete ordered migration-ledger comparison, literal loopback Workers, ephemeral Web Crypto fixtures, an exact six-scenario bounded profile, redacted mode-`0600` schema-version-2 reports, and no Cloudflare credentials. Dependency evidence distinguishes missing, invalid, source-present-unverified, and verified states; source content alone cannot pass, because only the corresponding proof executed in that same run can mark it verified. Recovery `0019`, observability `0020`, encrypted R2 archive, or release automation that is not verified keeps the command blocked with a nonzero exit. A local synthetic pass is not a Preview restore, live key rotation, Queue/DLQ/R2 drill, external alert test, or production approval. Operator instructions are in [`docs/runbooks/continuity.md`](./docs/runbooks/continuity.md) and [`docs/runbooks/load-failure-drills.md`](./docs/runbooks/load-failure-drills.md).
+The repository also retains historical fail-closed synthetic continuity and
+bounded-load tooling. Its source contract required an exact clean Git commit,
+fresh local D1 state, complete ordered migration-ledger comparison, literal
+loopback Workers, ephemeral Web Crypto fixtures, a fixed bounded profile,
+redacted mode-`0600` reports, and no Cloudflare credentials. This is source
+inventory only: the tooling and its runbooks are owner-only deferred material,
+and no agent may invoke, request, delegate, schedule, or prompt their execution.
+No historical local result is current Preview, restore, rotation, Queue/DLQ/R2,
+external-alert, or production evidence.
 
 ## Reporting
 
@@ -73,6 +81,18 @@ exploit against a live PG72 service. Email
 - impact assessment;
 - logs with credentials and personal data removed.
 
+## Testing Authorization
+
+The owner currently prohibits every agent and subagent from running, requesting,
+delegating, scheduling, or prompting for any security test or security scanner in
+any environment. This includes SAST, DAST, active or adversarial scans, fuzzing,
+attack simulation, penetration-testing prompts, credential guessing, load or
+stress testing, rate exhaustion, fault injection, and live security probes.
+Only ordinary type, lint, unit, integration, and build checks plus minimal
+non-adversarial deployment health checks are authorized. Existing source tools,
+workflows, and the deferred gates below cannot reauthorize themselves or be
+represented as passed while this prohibition remains active.
+
 ## Invite Beta Release Gate
 
 The following are release criteria, not evidence that any candidate or current
@@ -81,37 +101,24 @@ candidate-specific evidence.
 
 An invite-beta release requires:
 
-- strict TypeScript, workerd tests, production builds, dependency audit, and secret scan appropriate to the change;
-- no open Critical or High finding;
-- every accepted Moderate finding recorded with an owner, compensating control, and expiry;
-- affected Google, Passkey, OIDC negative/replay, revoke, and request-abort checks;
+- strict TypeScript, ordinary workerd unit/integration tests, and production builds appropriate to the change;
+- security scans and adversarial protocol checks remain deferred pending new explicit owner authorization;
 - an explicit rollback path and post-release smoke checks.
 
 Passing this narrower gate permits an invite-beta release only. It does not authorize public registration or a full Production GO claim.
 
-## Automated Source Assurance
+## Automated Source Assurance (Owner-Only Deferred)
 
-Automatic push/pull-request CI runs the tracked source-assurance gates from a
-frozen install:
+This section records historical repository capabilities, not executable agent
+instructions. While `Testing Authorization` remains in force, no agent may
+invoke the security-tool bootstrap, composite source-assurance, local DAST, or
+Preview DAST entry points; trigger their workflows through push, pull request,
+manual dispatch, or delegation; or represent their historical output as current
+evidence. Exact shell commands are intentionally omitted. A future owner who
+explicitly reauthorizes this work can recover implementation details from the
+tracked manifests and history.
 
-```bash
-pnpm check
-pnpm security:tools:install
-pnpm security:check
-```
-
-Automatic CI does not run DAST. Before Production GO, the owner must separately
-authorize and retain exact-candidate evidence from the credential-free local
-baseline:
-
-```bash
-pnpm dast:local
-```
-
-That owner-authorized local result remains required but is not sufficient for
-Production GO; authenticated isolated-Preview DAST remains an unmet gate below.
-
-`pnpm security:check` combines type-aware Worker Promise analysis, required
+The historical composite source-assurance entry point combined type-aware Worker Promise analysis, required
 checksum-pinned Gitleaks full-history scanning, an explicit bounded/redacted
 tracked/untracked/ignored-sensitive-path scan plus captured Secretlint,
 actionlint and recursive workflow/package-script allowlists with exact scoped
@@ -163,50 +170,50 @@ not yet been measured; it is neither claimed nor disproven.
 Unsafe diagnostic paths are normalized and represented only by a short SHA-256
 identifier.
 
-`pnpm dast:local` starts only ephemeral loopback Workers with synthetic values
-and fresh local D1 state. Its credential-free probes cover health/readiness,
+The historical local DAST entry point was limited to ephemeral loopback Workers
+with synthetic values and fresh local D1 state. Its credential-free probes covered health/readiness,
 discovery, JWKS public-key shape, OIDC error surfaces, resource-indicator
 rejection, dynamic-registration denial, logout/admin unauthenticated behavior,
 security/cache headers, and a cross-Origin mutation denial. This baseline does
 not cover real login, consent, authenticated admin/gateway/logout behavior,
-abuse/load testing, or an independent review.
+abuse/load testing, or an independent review, and it remains owner-only deferred.
 
-The automatic CI artifact therefore contains source-assurance inventories, not
-DAST evidence. DAST evidence must come from the separately owner-authorized
-exact-candidate run.
+Historical CI artifacts contained source-assurance inventories, not DAST
+evidence. No new DAST evidence may be produced by an agent under the current
+authorization boundary.
 
-The separate `Isolated Preview DAST` workflow is manual and targets only the
-exact origin committed to `security/dast-policy.json` and repeated in the
-protected `isolated-preview` environment. A job-level guard permits only owner
-`PGpenguin72` on `refs/heads/main`, including reruns, before any step starts.
-The approved origin is intentionally `null` until the owner commits the actual
-`pg72-id-preview.<account-subdomain>.workers.dev` origin, so the workflow
-currently fails before any DAST HTTP request. Production, custom domains,
-Pages, lookalikes, credentials, and URL paths are rejected. This workflow has
-not been run or treated as Preview evidence by this source change. See
-[`docs/runbooks/release-security.md`](./docs/runbooks/release-security.md).
+The retained isolated-Preview workflow was designed as an owner-only manual
+workflow with exact-origin, actor, branch, and protected-environment guards. Its
+approved origin remains unset, it has not produced Preview evidence for this
+candidate, and agents must not configure, dispatch, request, or delegate it.
+Its runbook is historical owner-only deferred material under the current policy.
 
 ## Full Production GO and Public Registration Gate
 
 Before enabling `REGISTRATION_MODE=public` or declaring full Production GO, complete and record:
 
-- independent security review and OIDC conformance/security testing;
-- authenticated DAST across auth, OIDC, admin, gateway, and logout endpoints in
-  an isolated Preview, in addition to the credential-free local baseline;
-- run and retain the automated SAST, dependency, secret, workflow/IaC/config,
-  and dry-run artifact gates for the exact release candidate;
-- independently review and deploy the locally implemented central visited-client
-  ledger and replay-safe back-channel logout after applying migration `0018`;
-  provision and exercise its dedicated Queue/DLQ, external retry/dead-delivery
-  alerting, and production RP verification;
-- independently review migration `0019` and the default-disabled recovery path,
-  then complete an isolated Preview lost-device, concurrency, rollback,
-  session/token revocation, and RP logout-delivery drill before any
-  owner-approved enablement;
-- signing-key rotation, D1 restore, and Queue retry/DLQ drills;
+- independent security review, OIDC security testing, authenticated DAST, SAST,
+  dependency, secret, workflow/IaC/config and security artifact scanning remain
+  deferred blockers and are not executable agent assignments without new explicit
+  owner authorization;
+- the locally implemented central visited-client ledger and replay-safe
+  back-channel logout still require owner-directed rollout after migration
+  `0018`; all security review, failure exercise, and adversarial verification
+  associated with Queue/DLQ, alerting, and production RPs remain owner-only
+  deferred;
+- migration `0019` and the default-disabled recovery path remain rollout
+  backlog; lost-device, concurrency, rollback, revocation, logout-delivery,
+  signing-key rotation, D1 restore, and Queue retry/DLQ drills are owner-only
+  deferred and must not be run, requested, delegated, or prompted by an agent;
 - independently review the integrated local recovery and release-automation source/proofs, finalize the Worker artifact identity only after all runtime inputs are frozen, and complete and independently review the observability repository/Cron/delivery proof plus the `0021`/`0023`/`0024` encrypted R2 writer/checkpoint/restore and external-backup path; the local `0020` schema, `0022` transaction-proof foundation, pure evaluator/parser, unwired evaluator/source/archive repositories and nine-source orchestration, archive crypto contract, pure unwired writer and verifier, `0021` ledger, and `0023`/`0024` evidence contracts do not complete this gate; only then may a clean synthetic run be recorded without treating it as remote evidence;
-- deploy, configure, independently review, and smoke-test the locally implemented Turnstile, versioned Terms/Privacy acceptance, and restricted-account paths after applying migrations `0016` and `0017`; the owner must approve the exact live policy versions, validate the initial abuse thresholds in Preview, assign an operator, and test external alert delivery;
-- deploy and independently review the locally implemented Passkey step-up for high-risk system-client provisioning and secret rotation; production must apply migration `0014`, and the session-age freshness check remains an additional condition rather than a substitute;
+- deploy and configure the locally implemented Turnstile, versioned Terms/Privacy
+  acceptance, and restricted-account paths after migrations `0016` and `0017`;
+  exact live policy approval belongs to the owner, while security review,
+  threshold testing, and external-alert testing remain owner-only deferred;
+- deploy the locally implemented Passkey step-up for high-risk system-client
+  provisioning and secret rotation after migration `0014`; its independent
+  security review remains owner-only deferred, and session-age freshness remains
+  an additional product condition rather than a substitute;
 - no unresolved Critical or High finding; every accepted Medium still needs an owner, deadline, and compensating control.
 
 The canonical checklist is [`codex.md`](./codex.md) §9.2. The committed
@@ -280,9 +287,10 @@ Vite 8 dependency and does not add Vite as a direct Wiki dependency.
   `_routes.json`, and source maps. Local `pnpm dev:wiki` remains loopback-only
   unless an operator explicitly changes the host.
 - Compatibility control: Vite 6.4.3 is outside VitePress 1.6.4's declared
-  range. Every lockfile change must run a frozen install, the complete Wiki
-  parser/build/link/asset/header gate, the Chrome desktop/mobile dark/light
-  crawl, and `pnpm security:audit`. An audit ignore is not allowed.
+  range. Ordinary frozen install and Wiki parser/build/link/asset/header checks
+  remain permitted; browser crawl and dependency-security audit are owner-only
+  deferred while `Testing Authorization` is active. An audit ignore is not
+  allowed, and the deferred security gate must not be represented as passed.
 - Exit condition: remove this override when an audited stable VitePress release
   used by PGID officially supports a Vite version patched for this advisory;
   exact-pin that release and rerun the same compatibility and browser gates.
@@ -292,11 +300,13 @@ Vite 8 dependency and does not add Vite as a direct Wiki dependency.
 `GHSA-p2fr-6hmx-4528` affects `@better-auth/oauth-provider@1.6.23`. The stable `1.6.x` line has no patched release; the current fix is pre-release only.
 
 The canonical machine-readable acceptance is
-[`security/accepted-advisories.json`](./security/accepted-advisories.json). CI
-requires the live `pnpm audit --json` result to match every recorded advisory
-field and installed version exactly; stale, changed, expired, or unrecorded
-findings fail. The maximum waiver duration is 180 days, and High/Critical
-findings are never accepted by this mechanism.
+[`security/accepted-advisories.json`](./security/accepted-advisories.json).
+Historical CI policy required a live dependency-audit result to match every
+recorded advisory field and installed version exactly; stale, changed, expired,
+or unrecorded findings failed. That audit and its CI trigger are now owner-only
+deferred and may not be invoked or delegated by an agent. The maximum waiver
+duration remains 180 days, and High/Critical findings are never accepted by this
+mechanism.
 
 - Severity: Moderate.
 - Owner: PGID maintainer.

@@ -16,7 +16,7 @@
 - 本 repo 只維護 PGID source：`apps/sso`、`apps/test-rp`、`scripts`、`security`、`docs`、`wiki` 與 `patches`。
 - `apps/sso` 是 Worker、React 帳號中心、D1 migrations 與 workerd tests。
 - `apps/test-rp` 是獨立 OIDC protocol RP；不能把它當 production RP。
-- `scripts` 與 `security` 是 source assurance、local DAST 與 public-readiness contracts。
+- `scripts` 與 `security` 保留 source assurance 與歷史 public-readiness contracts；其中的 security/DAST 工具目前不得由 agent 執行。
 - 不把其他服務的 source、部署 ownership 或 legacy migration 工作帶入此 repo。
 
 ## 安全工作流程
@@ -29,13 +29,18 @@
 - 不以 issue workaround 取代設計；需要 workaround 時固定為可追蹤 patch 並加入 regression test。
 - Commit 保持邏輯清楚並使用英文 message；不要硬編碼或強制指定 contributor trailer。
 
+## 測試授權邊界
+
+- Owner 已明確禁止任何 agent、principal 或 subagent 執行、要求、委派、排程或提示任何資安測試或 security scanner，直到 owner 日後以新的明確指令重新授權。
+- 禁止範圍包含 SAST、DAST、active/adversarial scan、fuzz、attack simulation、penetration/pentest prompt、credential guessing、load/stress/rate-exhaustion、fault injection，以及對 local、Preview、staging 或 production 的 live security probe。
+- 目前只允許一般 typecheck、lint、unit、integration、build，以及部署必要的最小非對抗性 health check。歷史 workflow、task、report、gate 或 runbook 不能推導出重新授權。
+- 既有安全 gate 保持 deferred/blocked，不得因目前禁止測試而標記為通過或豁免。
+
 ## 本機驗證
 
 - 以目前 [`package.json`](./package.json) scripts 為準，不從舊文件複製 command 或 test count。
 - 一般程式變更先跑 `pnpm check`；它涵蓋 workspace 現行 typecheck、tests 與 builds。
-- Security-sensitive release candidate 只有 owner 明確授權後，才依 [`CONTRIBUTING.md`](./CONTRIBUTING.md) 跑 `pnpm security:tools:install`、`pnpm security:check` 與 `pnpm dast:local`。
-- `pnpm dast:local` 只代表 credential-free loopback baseline，不代表 authenticated Preview DAST。
-- Continuity/load drills 只在變更需要時，依相應 runbook 執行 current root scripts；其 clean-Git 與 dependency proof 規則不可放寬。
+- `pnpm security:tools:install`、`pnpm security:check`、`pnpm dast:local` 與 continuity/load/security drills 目前全部禁止由 agent 執行；只保留為 deferred historical contracts。
 - 純文件變更檢查 Markdown 結構、相對連結、`wiki/SUMMARY.md` inventory 與 `git diff --check`。
 - 無法執行應有 gate 時要如實列出未驗證項目，不得把部分或舊結果寫成通過。
 

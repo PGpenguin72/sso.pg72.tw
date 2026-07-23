@@ -1,11 +1,23 @@
 # PGID SSO 架構規格
 
 > 狀態：Canonical Architecture Baseline
-> 最後更新：2026-07-18
+> 最後更新：2026-07-23
 > 服務名稱：PGID
 > Issuer：`https://sso.pg72.tw`
 
 ## 0. Phase 0 實作狀態
+
+### 0.1 目前 agent 測試授權
+
+Owner 已明確禁止所有 agent、principal 與 subagent 執行、要求、委派、排程或提示任何資安測試或 security scanner，直到 owner 日後以新的明確指令重新授權。禁止範圍包含 SAST、DAST、active/adversarial scan、fuzz、attack simulation、penetration/pentest prompt、credential guessing、load/stress/rate-exhaustion、fault injection，以及對 local、Preview、staging 或 production 的 live security probe。
+
+目前只允許一般 typecheck、lint、unit、integration、build，以及部署必要的最小非對抗性 health check。下文所有 security testing/scanner/DAST/load 指令一律視為 deferred/blocked backlog，不是 agent 可執行 task；歷史 workflow、task、report、gate 或 runbook 不能推導出重新授權，也不能因禁止測試而把 gate 標記為通過或豁免。
+
+### 0.2 2026-07-23 production deployment record
+
+Owner-authorized Wrangler direct deploy 已將 `pg72-id` Worker version `e5d10339-11f9-43c3-8f9f-762d04355faf` 部署至 `https://sso.pg72.tw`。Production D1 ordered ledger 為 `0001`-`0024`；live configuration 為 `REGISTRATION_MODE=invite`、`RECOVERY_MODE=disabled`；security-events 與 logout-deliveries 的 Queue/DLQ producer/consumer bindings 以及 one-minute Cron 已掛載。部署後只執行一次最小、非對抗性的 `GET /health`，結果為 HTTP `200`；本次沒有執行任何資安測試。
+
+這份 record 只證明上述 Worker、schema、binding、Queue 與 Cron deployment facts。它不表示 public registration 已開啟或通過 GO、不表示任何 production RP receiver 已驗收，也不表示 observability evaluator/alert delivery、encrypted archive runtime、external alert/archive custody 或任何 security gate 已完成。下文提到 production ledger 只到 `0012`、`0018`/Queue 尚未 rollout、或 live mode 尚待重驗的舊 deployment-record 敘述，均已被本段取代；其餘尚未完成的驗收與 wiring 邊界仍有效。
 
 截至 2026-07-18，repository source 包含 SSO Worker、React 帳號中心、ordered D1 migrations `0001`-`0024`（head `0024`）、Google/Passkey、可選社群登入、OAuth 2.1 Provider、四級角色、邀請/停權/audit/client 管理、ID-token central `sid` contract、durable global logout ledger/outbox/Queue delivery、Mail Path A introspection prerequisite、Passkey client-mutation step-up、Telegram verified-email enrollment boundary、全域 provider-identity 唯一 ownership、Turnstile-backed public-registration intent、版本化法律同意紀錄、公開新帳號 restricted access 與 abuse-response runbook、預設關閉且 hash-only 的 recovery-code/Passkey replacement flow、observability `0020` schema、pure alert rule/evaluator/parser、尚未接入 Worker entry point/scheduler 的 evaluator run/runtime、alert lifecycle snapshot/CAS 與 bounded audit/OAuth/fan-out/logout/runtime-health/Queue-DLQ source repositories、`0022` evaluator run/source/decision proof ledger、canonical manifest serializer、相容 run repository、state 同批 applied/no-state decision proof integration，以及尚未接入 entry point/scheduler 的九項 source/decision evaluator orchestration，另有 pure audit-archive record/envelope crypto contract、`0021` archive ledger、`0023` R2 evidence migration、保留現有 immutable legacy receipts 且拒絕新 terminal R2-version evidence 缺少 observed byte count 的 `0024` forward guard、尚未接入 Worker/Queue/Cron 的 D1 repository、只接受 injected R2/envelope verifier 的 pure create-only writer，以及只接受 externally supplied expected manifest、injected R2 read surface 與 custody opener 的 pure non-HTTP one-object restore verifier，並有使用 `oauth4webapi` 的獨立 test RP。這些 local API 與 Workerd integration 可證明受控 D1 transaction、synthetic 同輪 proof、bounded writer decision 與 source-level restore verification；但現有 scheduled handler 只會排程 logout delivery dispatch，沒有 import、invoke 或 await alert/archive orchestration，而 generated bindings/config、Queue/Email/operator wiring、archive runtime binding、real KEK/custody adapter、isolated restore sink/exercise、external backup 與 remote evidence 也都不存在，不能宣稱 production observability 或 encrypted archive 已完成。每個 release candidate 都必須重跑本 repository 的 typecheck、workerd suite、production build 與 test RP protocol gate；本地通過不得寫成遠端已部署。
 
@@ -361,16 +373,14 @@ access:                  standard <-> restricted
 
 切換 production 至 public 前尚未完成的安全 gate：
 
-- [ ] 將 local source 已實作的 Turnstile registration challenge 部署至隔離 Preview，配置 hostname-scoped site/secret key，完成獨立 review、bypass/失效/服務中斷測試與 production smoke；production secret 僅可存 Wrangler secrets / Secrets Store。
+- [ ] 將 local source 已實作的 Turnstile registration challenge 部署至隔離 Preview並配置 hostname-scoped site/secret key；bypass/失效/服務中斷等 security testing 目前 deferred 且不得由 agent 執行。
 - [ ] 由 owner 核准實際 Terms/Privacy 內容與 version identifiers，於隔離 Preview 驗證 `0016` 同意紀錄、rollback 與資料匯出，再部署並 smoke-test；local schema/UI/regression 通過不等同法務核准或 production 啟用。
 - [x] Repository abuse response runbook：以現有 redacted D1 events 提供人工查詢、具體 threshold、triage、restrict/promote/suspend、false-positive 與 rollback；不宣稱外部監控已存在。
-- [ ] 在隔離 Preview 以核准負載驗證/調整 runbook threshold，指定 operator/response channel，並實作及測試外部 aggregation 與 alert delivery。
-- [ ] 獨立安全審查與 OIDC conformance/security testing。
-- [ ] 在隔離 Preview 完成 authenticated DAST，覆蓋 auth、OIDC、admin、gateway 與 logout endpoints；自動 push/pull-request CI 不執行 DAST，repository 現有 `pnpm dast:local` 保留為 owner 明確授權後對 exact candidate 執行的 ephemeral loopback Worker/test RP 無憑證 public/error/header/CSRF baseline。該 evidence 仍是 Production GO 的必要輸入，但受保護的 manual Preview workflow 尚未執行，不能取代完整 gate。
-- [x] Repository source 已有 `pnpm security:check` 自動化 gate：type-aware Worker Promise SAST、checksum-pinned Gitleaks 完整 history、明確枚舉 tracked/untracked/ignored sensitive path，並以 TypeScript compiler AST bounded static evaluator、line/dotenv parser、UTF-8/UTF-16/NUL decode、exact fixture/fallback digest+context contract 與 unsafe-path hash diagnostics 實作 redacted scan。兩個 workflow 在 checkout 後、任何 repository script／Preview authorization／`pnpm install` 前先執行只用 Node standard library 的 identity checker，固定 workflow raw LF bytes/file set、四個 manifest/完整 scripts map、`pnpm-workspace.yaml` lifecycle/build policy、`pnpm-lock.yaml` raw digest 與 `patches/` exact file set/digests，並要求 workspace `.pnpmfile.mjs`／legacy `.pnpmfile.cjs`、各 code-owned package root `.npmrc`／`binding.gyp`／pre-existing `node_modules` 不存在；後段再固定完整 scripts objects、reachable graph，並展開每個 pnpm script 的 `pre*`/`post*` 及全 workspace `preinstall`/`install`/`postinstall`/`prepare`。另以 code-owned SHA-256 固定 deterministic production Wrangler entry whole-file identity，再保留 GitHub Action SHA、workflow/job/step structural validation、artifact upload、environment scope、Wrangler source/generated typed binding/resource contract、exact advisory reconciliation、production artifact source-map/private-path/secret/size scan，以及 dependency/license inventory。Artifact build 前另要求四個 code-owned package 的 `node_modules` 是 checkout 內實體目錄，並遞迴拒絕 realpath 離開 repo 的 dependency symlink，防止 Rolldown module-provenance comment 與 chunk hash 綁到另一 worktree；identity 仍涵蓋 raw unminified deployed bytes，不忽略 runtime/provenance section 或 source-map reference。任何 runtime/dependency/bundler/build-chain 變更都必須經人工 review 與兩個各自 frozen install 的 byte-identical clean build/dry-run 後才可明確更新 entry digest，不可從 policy 或目前產物自動學習；目前 local candidate 的 entry 與全部十一個 Worker chunks 已在兩個不同 local checkout path byte-identical，但 later runtime inputs 尚未 freeze、code-owned digest 未在本 slice 更新，Linux equality 也尚未實測，不能宣稱 final 或跨平台一致。每個 release candidate 仍必須先安裝 pinned tools、實際跑完並保存結果。
-- [ ] 負載測試、備份還原演練、key rotation 與 Queue retry/DLQ 演練。
-- [x] Source-local fail-closed continuity/load tooling：固定 literal-loopback target、clean Git commit attribution、fresh D1 migration/export/restore、完整 ordered migration ledger、synthetic Passkey/session/consent/JWK overlap-retirement、固定六 scenario／每項 16 request 的 bounded profile、mode-`0600` redacted schema-v2 report 與 cleanup regression；命令與報告格式見 [`docs/runbooks/continuity.md`](./docs/runbooks/continuity.md) 與 [`docs/runbooks/load-failure-drills.md`](./docs/runbooks/load-failure-drills.md)。這只代表工具已進 source，不代表 dependency 或演練已通過。
-- [x] Recovery `0019` 與 release automation 已整合進 local candidate；兩個 local command 會在同一 process 內分別要求 exact recovery 4-suite/20-test proof 與 exact release 9-file/90-test proof，才可把其 dependency 從 `source_present_unverified` 升為 `verified`。這只記錄 candidate source 與可重跑 proof，尚不代表 final independent integration review、final Worker artifact identity 或 Preview gate 已完成。
+- [ ] 負載驗證、獨立安全審查、OIDC security testing 與 authenticated/local DAST 目前全部 deferred；未有 owner 新的明確授權前不得由 agent 執行。
+- [ ] Owner-only deferred source-assurance gate（repository 保留歷史 tooling source）：既有能力曾涵蓋 type-aware Worker Promise SAST、checksum-pinned Gitleaks history、tracked/untracked/ignored sensitive-path redacted scan、compiler-AST bounded evaluation、workflow/package identity、Wrangler binding/resource contract、dependency/advisory/license inventory，以及 production artifact 的 source-map/private-path/secret/size 檢查。歷史 workflow 亦曾固定 manifests、lockfile、patches、scripts graph、dependency realpath 與 raw Worker artifact identity；local candidate 曾在兩個 checkout path 觀察到 entry 與十一個 chunks byte-identical，但 later runtime inputs、code-owned digest 與 Linux equality 尚未完成。這些只保留 source 與 provenance 資訊，不是已通過 gate；agent 不得安裝 scanner tooling、呼叫相關 entry point、以 push/PR/manual dispatch 觸發 workflow、要求或委派執行，也不得更新或從產物學習 digest。只有 owner 日後新的明確授權才能產生 candidate-specific evidence。
+- [ ] 負載測試目前 deferred 且不得由 agent 執行；備份還原、key rotation 與 Queue retry/DLQ 的非對抗性操作由 owner 另行安排。
+- [ ] Owner-only deferred continuity/load gate（歷史 tooling source 已存在）：其 source contract 固定 literal-loopback、clean Git attribution、fresh D1 migration/export/restore、ordered ledger、synthetic Passkey/session/consent/JWK overlap-retirement、bounded profile、mode-`0600` redacted report 與 cleanup 行為。相關 runbook 只作歷史 owner material；agent 不得依其指令執行、要求、委派或提示演練。Source presence 不代表 dependency 或 gate 通過。
+- [ ] Owner-only deferred recovery/release proof gate（`0019` 與歷史 automation source 已存在）：其 source contract 曾要求同一 process 的 fixed recovery/release proof 才能把 dependency 從 `source_present_unverified` 升為 `verified`。目前不得由 agent 執行或產生新 proof，且 source presence 不代表 independent integration review、final Worker artifact identity 或 Preview gate 完成。
 - [x] Ordered local migrations 已至 head `0024`；observability `0020` schema、`0022` proof ledger、pure evaluator/source repositories、unwired 九來源 orchestration、archive crypto/`0021` ledger/`0023` evidence/`0024` forward guard、unwired D1 archive repository、pure create-only writer 與 pure non-HTTP one-object restore verifier 都已在 local source。`0024` 保留現有 immutable legacy receipts，並拒絕新 terminal R2-version evidence 缺少 observed byte count。Writer 擁有 30/120/480/900 秒 retry schedule 並提供 `nextAttemptAt`，repository 驗證/持久化；只有 transient error 或 lease expiry 在第五次耗盡時成為 `dead`，integrity failure、object conflict 與 readback mismatch 維持 `corrupt`。啟動可接受 exact still-live current lease；只有 changed lease 或 ambiguous renewal recovery 才要求 same-fence live strict-descendant adoption。Restore verifier 在 R2 read 前驗證 external exact manifest/key，並驗證 object metadata/size/digests 後回傳 detached records。現有 scheduled handler 只排程 logout dispatch，沒有 import/invoke/await alert/archive orchestration。Authenticated retained manifest provenance、KEK custody、runtime R2 integration、restore sink/exercise、external backup/retention 與 remote proof 仍不存在，所以 observability 必須維持 `source_present_unverified`，`encrypted_r2_archive` 必須維持 `dependency_missing`。
 - [ ] 完成並獨立 review observability repository/Cron/delivery proof，以及 encrypted R2 archive 的 fingerprint derivation/real KEK-custody adapter、create-only writer 與 restore runtime integration、remote proof、isolated restore sink/exercise、Queue/Cron 與 external-backup contract；兩個 local report 對任何非 `verified` dependency 都必須維持 blocked + nonzero，全部五項到位後才可記錄 synthetic local pass。
 - [ ] 建立並獨立 review authenticated、independently retained trusted-manifest provenance adapter/evidence source；不得由待 restore 的 R2 object custom metadata 自行派生 authority。
@@ -717,7 +727,7 @@ Better Auth 曾出現 OAuth/OIDC 與 account linking 相關安全公告。因此
 - 只使用當下已修補的 stable 版本，不使用 beta/RC 作 production auth core。
 - `better-auth` 與所有 `@better-auth/*` 套件必須同步更新及分別檢查 advisory。
 - Lockfile 納入版本控制，CI 執行 dependency audit。
-- 公開註冊前執行獨立安全審查與 OIDC conformance/security testing。
+- 公開註冊所需的獨立安全審查與 OIDC security testing 目前保持 deferred；未有 owner 新授權前不得由 agent 執行。
 - 不假設 library default 永遠符合本專案 threat model；所有敏感 default 必須顯式設定並測試。
 
 ## 16. 備份與復原
@@ -882,6 +892,11 @@ Repository source 選定的 Mail Path A 使用 Dovecot introspection + XOAUTH2�
 
 ### 19.4 Security tests
 
+本節以下內容全部受 §0.1 覆寫，只保留為 deferred backlog。任何 agent
+都不得執行、要求、委派或提示其中的 scanner、DAST、fuzz、attack、load、
+rate-exhaustion、fault-injection 或其他 security test；普通 workerd unit/
+integration tests 不在禁令內。
+
 - Cookie、CSRF、CORS、open redirect、header spoofing 與 session fixation。
 - OAuth mix-up、authorization code interception、redirect URI manipulation。
 - Account linking 與相同 Email takeover scenarios。
@@ -898,27 +913,17 @@ Repository source 選定的 Mail Path A 使用 Dovecot introspection + XOAUTH2�
 
 ### 19.5 Local continuity and bounded drills
 
-- `pnpm public-readiness:continuity:local` 只從 exact clean Git commit、只在
-  policy-owned `http://127.0.0.1:5183` 建立 fresh source/restore D1，驗證完整
-  ordered migration ledger（逐筆 source/D1 比對及 count/head/digest）、
-  schema/row-count/D1 `quick_check`/FK 等價、synthetic consent/session/Passkey、
-  discovery issuer、JWK decrypt/overlap/retirement，並刪除所有 ephemeral
-  SQL、secret 與 state。
-- `pnpm public-readiness:drills:local` 只在 policy-owned
-  `http://127.0.0.1:5185` 以固定 96 requests、concurrency 4、12 rps、10 秒
-  hard deadline 跑 workerd/global-logout regression；live profile 固定為六個
-  ordered scenario、每項 16 requests，report 必須精確符合 ID、count、status、
-  latency ordering 與 throughput contract；不可接受 caller target/budget。
-- 兩者都必須拒絕 Cloudflare credentials、remote/Preview/production target，
-  也必須拒絕 dirty/untracked/unavailable Git source，只寫 mode-`0600`
-  allowlisted schema-v2 aggregate report。Dependency 的 exact source content
-  與同輪 execution proof 必須同時成立才是 `verified`；Global Logout 與
-  Recovery proof 另在執行前、執行後及 promotion 時重算完整 tracked
-  `apps/sso` path/bytes 加 root manifest/lock/workspace/patch inputs，任何
-  runtime、test、config 或 dependency input 漂移都使 opaque proof 失效；cleanup failure、local
-  invariant failure或 recovery `0019`／observability `0020`／encrypted R2／
-  release automation 未 verified 皆 nonzero。
-- Synthetic local pass 只證明 source-local contract；不取代 Preview D1
+- 本節只記錄歷史 tooling source，精確執行指令刻意不列出。它過去以
+  clean Git attribution、literal loopback、fresh source/restore D1、ordered
+  migration ledger、schema/row/FK equivalence、synthetic consent/session/
+  Passkey/JWK lifecycle 與 ephemeral cleanup 表示 continuity contract。
+- 歷史 bounded-drill source 使用固定 scenario、固定 request budget、hard
+  deadline 與 schema-versioned aggregate report，並拒絕 caller-provided target
+  或 budget、Cloudflare credentials、remote/Preview/production target，以及
+  dirty/untracked/unavailable Git source。
+- 以上 tooling、runbook 與 proof promotion 全部是 owner-only deferred；agent
+  不得執行、要求、委派、排程或提示。既有 source/proof 只能維持歷史
+  provenance，不能被提升為 current `verified`，也不能取代 Preview D1
   restore、live Queue/DLQ/R2、external alert、production smoke、獨立 review
   或 owner GO。
 
@@ -961,7 +966,7 @@ Repository source 選定的 Mail Path A 使用 Dovecot introspection + XOAUTH2�
 `REGISTRATION_MODE = public` 的程式路徑已具備 verified-email 強制（含未綁定 Telegram 不可建帳）、per-IP 註冊限流、suspended/deleted 管制、audit、Turnstile-backed 一次性 intent、版本化法律同意紀錄、persistent restricted access 與 manual abuse-response runbook，但 committed production target 仍是 `invite`；live mode 需獨立重新驗證。切換前必須完成 §9.2 gate：
 
 - 核准實際 Terms/Privacy versions，部署、配置、獨立 review 並 smoke-test local Turnstile/legal/restricted slice；在隔離 Preview 驗證 threshold，指定 operator 並測試外部 alert delivery。
-- 獨立安全審查、DAST、負載測試、備份還原與事故演練。
+- 獨立安全審查、DAST 與負載測試保持 deferred/blocked，未有 owner 新授權前不得執行；備份還原與非對抗性事故演練由 owner 另行安排。
 - 所有 high/critical findings 修正後，經 owner 明確核准與部署，才可宣稱公開註冊已啟用。
 
 ## 21. Repository 目錄結構

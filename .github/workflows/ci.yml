@@ -1,12 +1,7 @@
 name: CI
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -27,9 +22,6 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Verify release identities before setup
-        run: node scripts/security/release-identity.mjs
-
       - name: Set up pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
@@ -46,12 +38,6 @@ jobs:
 
       - name: Run repository gate
         run: pnpm check
-
-      - name: Install checksum-pinned security tools
-        run: pnpm security:tools:install
-
-      - name: Run release security gate
-        run: pnpm security:check
 
       - name: Upload release assurance inventories
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0

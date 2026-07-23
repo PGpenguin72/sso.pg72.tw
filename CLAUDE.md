@@ -10,8 +10,8 @@
 - 不 push、不 deploy、不執行 remote D1/Queue/R2/secret mutation，也不改 production/Preview 狀態。
 - Live、isolated Preview、remote smoke/restore/rotation/drill 只有 owner 事前明確授權才能執行。
 - 無授權時只用 local loopback、synthetic data 且不載入 Cloudflare credentials。
-- 一般驗證以目前 [`package.json`](./package.json) scripts 為準：程式變更跑 `pnpm check`；其他 security/release checks 只有 owner 明確授權後才依 [`CONTRIBUTING.md`](./CONTRIBUTING.md) 執行。
-- Local DAST、continuity 或 drill 只證明該次 source-local contract，不等於 Preview/production evidence。
+- 一般驗證只允許 typecheck、lint、unit、integration、build，以及部署必要的最小非對抗性 health check。
+- Owner 已禁止所有 agent 執行、要求、委派、排程或提示任何 security test/scanner，包括 SAST、DAST、fuzz、對抗/攻擊模擬、pentest、load/stress/rate-exhaustion、fault injection 與任何環境的 live security probe。歷史 security/release workflow 目前全部 deferred，只有 owner 日後新的明確指令可以重新授權。
 - 不硬編碼 test count、commit SHA、artifact digest、npm 查詢日期、部署快照或指定 co-author trailer。
 
 ## 產品與 Registration

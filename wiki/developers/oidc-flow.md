@@ -42,7 +42,17 @@ url.searchParams.set("nonce", nonce);
 // 302 導向 url.href
 ```
 
-使用者接著在 PGID 完成 Google 或 Passkey 登入，並在 consent 畫面授權。
+### 帳號選擇、身分驗證與 consent
+
+這三件事是不同階段：
+
+1. **帳號選擇**：一般互動式請求若在目前瀏覽器有 live remembered PGID 帳號，PGID 會先顯示帳號選擇器。即使選定使用者先前已給過足夠的 consent，也不會略過這一步。
+2. **身分驗證**：沒有可選帳號、使用者選「使用其他帳號」，或 `prompt=login` 要求重新驗證時，進入目前可用的登入方式。「使用其他帳號」不會移除其他 remembered accounts。
+3. **Consent**：選定使用者首次授權此 client 或要求新增 scope 時才出現。選擇帳號本身不會授權 client，另一個使用者的 consent 也不能沿用。
+
+`prompt=none` 絕不顯示 PGID UI；若這次需要帳號選擇，authorization response 會回 `account_selection_required`，不會默選目前帳號。`prompt=login` 要求重新驗證。`prompt=select_account` 在有 live account 時要求顯示選擇器，即使只有一個；沒有時進入既有身分驗證流程。
+
+選擇器的帳號只來自目前瀏覽器中仍有效的 PGID device sessions；RP 不能列舉或讀取這份清單。PGID 選擇器與 Google 自己的帳號選擇器不同。選定帳號後，RP 仍接收原本的 authorization callback，不需要新增 callback route 或另一套 state / nonce / PKCE 處理。
 
 ## 步驟 3：Callback——驗 state、換 token、驗 ID token
 

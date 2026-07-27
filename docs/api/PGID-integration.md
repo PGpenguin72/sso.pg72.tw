@@ -109,7 +109,10 @@ PGID 在建立帳號時已強制 Google 回傳 `email_verified`（否則拒絕�
 - **issuer / audience 驗證**：驗 ID token 的 `iss` 必為 `https://sso.pg72.tw`，`aud` 必為你的 `client_id`。
 - **`iss` 回傳參數**：authorization response 會帶 `iss`（`authorization_response_iss_parameter_supported: true`），client library 應驗證它以防 mix-up。
 - **Authorization code 單次使用**：60 秒過期、重放會被拒絕。
+- **帳號選擇、身分驗證與 consent 是三個階段**：一般互動式授權請求若在目前瀏覽器有 live remembered PGID 帳號，PGID 會先顯示帳號選擇器；即使該使用者已給過足夠的 consent，也不會略過這個選擇。選擇既有帳號只是決定這次使用哪個 PGID 身分。「使用其他帳號」會進入目前可用的登入方式，而且不會移除其他 remembered accounts。
+- **OIDC `prompt` 行為**：`prompt=none` 絕不顯示 PGID UI；需要帳號選擇時回 `account_selection_required`，不得默選目前帳號。`prompt=login` 要求重新驗證，不能靜默沿用 session；`prompt=select_account` 明確要求帳號選擇器，即使只有一個可選帳號也一樣，沒有 live account 時則進入既有身分驗證流程。
 - **Consent 不可略過**：每個 client（含第一方）首次授權或請求新 scope 時，使用者一定會看到 PGID consent 畫面，無法跳過。
+- **選擇器只顯示 live PGID 帳號**：可選帳號只來自目前瀏覽器中仍有效的 PGID device sessions；已失效的登入不會成為可選項目，RP 也不能列舉或讀取這份清單。這是 PGID 自己的帳號選擇，與 Google 的帳號選擇器不同；RP 的 authorization callback 流程不因選擇器而改變。
 - **RFC 8707 `resource` 參數被拒絕**：Worker 邊界會拒絕 `/oauth2/authorize` 與 `/oauth2/token` 的所有 `resource` 參數（補償控制，見 [`SECURITY.md`](../../SECURITY.md)），回 `invalid_target`。不要送 `resource`。
 
 ### 4.2 Token 壽命（對照 `auth.ts`）
@@ -348,16 +351,20 @@ rollback。完整驗收與 rollback 見
 2. RP 把 state / nonce / code_verifier 存在 server 端（D1 / session），瀏覽器只拿到 HttpOnly 交易 cookie
 3. 導向 authorization_endpoint，帶 client_id / redirect_uri / response_type=code
    / scope / code_challenge / code_challenge_method=S256 / state / nonce
-4. 使用者在 PGID 完成 Google 或 Passkey 登入，並在 consent 畫面核准
-5. PGID 302 回 redirect_uri，帶 code / state / iss
-6. RP 驗 state 與 iss，取回對應交易，標記交易已消耗（防重放）
-7. RP 在後端呼叫 token_endpoint：grant_type=authorization_code、code、
+4. 一般互動式請求若有 live remembered PGID 帳號，先由使用者選擇這次使用的帳號
+5. 沒有可選帳號、使用者選「使用其他帳號」，或 `prompt=login` 要求重新驗證時，以目前可用的登入方式完成身分驗證
+6. 選定使用者尚未授權此 client 或要求新 scope 時，才顯示 consent 畫面
+7. PGID 302 回 redirect_uri，帶 code / state / iss
+8. RP 驗 state 與 iss，取回對應交易，標記交易已消耗（防重放）
+9. RP 在後端呼叫 token_endpoint：grant_type=authorization_code、code、
    redirect_uri、code_verifier，並以 client_secret_post 帶 client 認證（confidential）
-8. RP 驗 ID token 簽章（JWKS/EdDSA）、iss、aud、exp、nonce
-9. RP 用 access token 呼叫 userinfo_endpoint，檢查 email_verified
-10. RP 以 sub 對應本機帳號，建立自己的 server-side session（保存 sid、sub），
+10. RP 驗 ID token 簽章（JWKS/EdDSA）、iss、aud、exp、nonce
+11. RP 用 access token 呼叫 userinfo_endpoint，檢查 email_verified
+12. RP 以 sub 對應本機帳號，建立自己的 server-side session（保存 sid、sub），
     token 不進 localStorage
 ```
+
+選擇既有帳號本身不是重新驗證，也不會建立 consent；consent 永遠依選定使用者與這次要求的 scopes 判斷。`prompt=none` 若需要選擇帳號，PGID 會直接回 `account_selection_required`，不會顯示選擇器或代替使用者選擇。
 
 授權請求範例（換行僅為易讀）：
 
@@ -469,6 +476,14 @@ authUrl.searchParams.set("state", state);
 authUrl.searchParams.set("nonce", nonce);
 return Response.redirect(authUrl.href, 302);
 ```
+
+一般互動式請求在目前瀏覽器有 live remembered PGID 帳號時，會先進入 PGID 帳號選擇器。RP 仍使用相同的 authorization callback；選擇器不會增加新的 RP callback 步驟。若 RP 使用 `prompt`：
+
+- `none`：不允許任何 UI；需要帳號選擇時回 `account_selection_required`。
+- `login`：要求使用者重新驗證，不可靜默沿用目前 session。
+- `select_account`：有 live account 時要求顯示帳號選擇器，即使只有一個；沒有時進入既有身分驗證流程。
+
+選擇既有 live account 後會繼續同一筆 authorization request。「使用其他帳號」會進入既有登入方式但保留 remembered accounts；之後是否出現 consent，仍取決於選定使用者對 client 與這次 scopes 的既有授權。
 
 ### 8.3 Callback：驗 state、換 token、驗 ID token、取 UserInfo
 

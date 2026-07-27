@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import { app } from "../worker/index";
 import {
+  continueCurrentAccountSelection,
   createAuthenticatedUser,
   createBootstrapAdmin,
   createSessionFor,
@@ -280,11 +281,15 @@ describe("restricted account runtime policy", () => {
       state: "S".repeat(43),
       nonce: "N".repeat(43),
     });
-    const authorize = await exports.default.fetch(
-      new Request(`${BASE_URL}/oauth2/authorize?${query}`, {
-        headers: restricted.headers,
-        redirect: "manual",
-      }),
+    const authorize = await continueCurrentAccountSelection(
+      await exports.default.fetch(
+        new Request(`${BASE_URL}/oauth2/authorize?${query}`, {
+          headers: restricted.headers,
+          redirect: "manual",
+        }),
+      ),
+      restricted.headers,
+      BASE_URL,
     );
     expect(authorize.status).toBe(302);
     const consentLocation = new URL(

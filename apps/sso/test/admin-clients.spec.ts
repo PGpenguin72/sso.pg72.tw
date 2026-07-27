@@ -4,7 +4,11 @@ import { describe, expect, it } from "vitest";
 
 import { app } from "../worker/index";
 import { validRedirectUri } from "../worker/admin-clients";
-import { createAuthenticatedUser, sha256Base64Url } from "./helpers";
+import {
+  continueCurrentAccountSelection,
+  createAuthenticatedUser,
+  sha256Base64Url,
+} from "./helpers";
 
 const CLIENTS_URL = "http://localhost:5173/api/admin/clients";
 
@@ -121,11 +125,14 @@ async function mintAuthorizationCode(
     state: "B".repeat(43),
     nonce: "C".repeat(43),
   });
-  const authorizeResponse = await exports.default.fetch(
-    new Request(`http://localhost:5173/oauth2/authorize?${query}`, {
-      headers: userHeaders,
-      redirect: "manual",
-    }),
+  const authorizeResponse = await continueCurrentAccountSelection(
+    await exports.default.fetch(
+      new Request(`http://localhost:5173/oauth2/authorize?${query}`, {
+        headers: userHeaders,
+        redirect: "manual",
+      }),
+    ),
+    userHeaders,
   );
   expect(authorizeResponse.status).toBe(302);
   const consentLocation = new URL(

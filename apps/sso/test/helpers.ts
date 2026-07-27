@@ -1,4 +1,4 @@
-import { env } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { makeSignature } from "better-auth/crypto";
 
 export function interposeAfterD1First(
@@ -188,6 +188,54 @@ export async function createAuthenticatedUser(
     await grantPasskeyStepUpForTest(userId, session.sessionId);
   }
   return { ...session, accessLevel, googleAccountId };
+}
+
+export async function continueCurrentAccountSelection(
+  authorizeResponse: Response,
+  sessionHeaders: Headers,
+  baseURL = "http://localhost:5173",
+): Promise<Response> {
+  if (authorizeResponse.status !== 302) return authorizeResponse;
+  const location = new URL(
+    authorizeResponse.headers.get("location") ?? "",
+    baseURL,
+  );
+  if (location.pathname !== "/select-account") return authorizeResponse;
+
+  const headers = new Headers(sessionHeaders);
+  headers.set("Accept", "application/json");
+  headers.set("Content-Type", "application/json");
+  headers.set("Sec-Fetch-Mode", "cors");
+  const continued = await exports.default.fetch(
+    new Request(`${baseURL}/oauth2/continue`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        selected: true,
+        oauth_query: location.search.slice(1),
+      }),
+    }),
+  );
+  if (!continued.ok) return continued;
+
+  let payload: { redirect?: unknown; url?: unknown };
+  try {
+    payload = (await continued.clone().json()) as {
+      redirect?: unknown;
+      url?: unknown;
+    };
+  } catch {
+    return continued;
+  }
+  if (payload.redirect !== true || typeof payload.url !== "string") {
+    return continued;
+  }
+
+  const responseHeaders = new Headers(continued.headers);
+  responseHeaders.delete("Content-Length");
+  responseHeaders.delete("Content-Type");
+  responseHeaders.set("Location", new URL(payload.url, baseURL).toString());
+  return new Response(null, { status: 302, headers: responseHeaders });
 }
 
 /**

@@ -2,6 +2,7 @@ import { env, exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  continueCurrentAccountSelection,
   createAuthenticatedUser,
   sha256Base64Url,
 } from "./helpers";
@@ -122,11 +123,15 @@ async function authorize(
     state: crypto.randomUUID(),
     nonce,
   });
-  const authorizeResponse = await exports.default.fetch(
-    new Request(`${BASE_URL}/oauth2/authorize?${query}`, {
-      headers: user.headers,
-      redirect: "manual",
-    }),
+  const authorizeResponse = await continueCurrentAccountSelection(
+    await exports.default.fetch(
+      new Request(`${BASE_URL}/oauth2/authorize?${query}`, {
+        headers: user.headers,
+        redirect: "manual",
+      }),
+    ),
+    user.headers,
+    BASE_URL,
   );
   expect(authorizeResponse.status).toBe(302);
   const consentLocation = new URL(

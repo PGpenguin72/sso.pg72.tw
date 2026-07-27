@@ -2,6 +2,7 @@ import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 
 import {
+  continueCurrentAccountSelection,
   createAuthenticatedUser,
   createBootstrapAdmin,
   grantPasskeyStepUpForTest,
@@ -998,11 +999,15 @@ describe("Role claims in issued ID tokens", () => {
       state: "B".repeat(43),
       nonce: "C".repeat(43),
     });
-    const authorizeResponse = await exports.default.fetch(
-      new Request(`${BASE_URL}/oauth2/authorize?${query}`, {
-        headers: bootstrap.headers,
-        redirect: "manual",
-      }),
+    const authorizeResponse = await continueCurrentAccountSelection(
+      await exports.default.fetch(
+        new Request(`${BASE_URL}/oauth2/authorize?${query}`, {
+          headers: bootstrap.headers,
+          redirect: "manual",
+        }),
+      ),
+      bootstrap.headers,
+      BASE_URL,
     );
     expect(authorizeResponse.status).toBe(302);
     const consentLocation = new URL(

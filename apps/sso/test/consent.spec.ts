@@ -1,7 +1,10 @@
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 
-import { createAuthenticatedUser } from "./helpers";
+import {
+  continueCurrentAccountSelection,
+  createAuthenticatedUser,
+} from "./helpers";
 
 interface ConsentClientInfo {
   clientId: string;
@@ -228,15 +231,18 @@ describe("OAuth consent surface", () => {
     );
     await insertClient({ clientId, redirectUris: [redirectUri] });
 
-    const authorizeResponse = await exports.default.fetch(
-      new Request(
-        `http://localhost:5173/oauth2/authorize?${authorizeQuery(
-          clientId,
-          redirectUri,
-          "openid profile email",
-        )}`,
-        { headers, redirect: "manual" },
+    const authorizeResponse = await continueCurrentAccountSelection(
+      await exports.default.fetch(
+        new Request(
+          `http://localhost:5173/oauth2/authorize?${authorizeQuery(
+            clientId,
+            redirectUri,
+            "openid profile email",
+          )}`,
+          { headers, redirect: "manual" },
+        ),
       ),
+      headers,
     );
     expect(authorizeResponse.status).toBe(302);
     const consentLocation = new URL(
@@ -289,15 +295,18 @@ describe("OAuth consent surface", () => {
     await insertClient({ clientId, redirectUris: [redirectUri] });
     await insertClient({ clientId: otherClientId, redirectUris: [redirectUri] });
 
-    const authorizeResponse = await exports.default.fetch(
-      new Request(
-        `http://localhost:5173/oauth2/authorize?${authorizeQuery(
-          clientId,
-          redirectUri,
-          "openid profile email",
-        )}`,
-        { headers, redirect: "manual" },
+    const authorizeResponse = await continueCurrentAccountSelection(
+      await exports.default.fetch(
+        new Request(
+          `http://localhost:5173/oauth2/authorize?${authorizeQuery(
+            clientId,
+            redirectUri,
+            "openid profile email",
+          )}`,
+          { headers, redirect: "manual" },
+        ),
       ),
+      headers,
     );
     const consentLocation = new URL(
       authorizeResponse.headers.get("location") ?? "",

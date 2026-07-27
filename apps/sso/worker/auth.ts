@@ -1,6 +1,12 @@
-import { APIError, getOAuthState } from "better-auth/api";
-import { betterAuth } from "better-auth";
-import { jwt } from "better-auth/plugins";
+import {
+  APIError,
+  createAuthEndpoint,
+  getOAuthState,
+  sessionMiddleware,
+} from "better-auth/api";
+import { betterAuth, type BetterAuthPlugin } from "better-auth";
+import { expireCookie, setSessionCookie } from "better-auth/cookies";
+import { jwt, multiSession } from "better-auth/plugins";
 import { oauthProvider } from "@better-auth/oauth-provider";
 import { passkey } from "@better-auth/passkey";
 
@@ -38,6 +44,42 @@ import { recordLoginAudit, type AuthHookContext } from "./security-activity";
 
 type AuthDatabase = NonNullable<Parameters<typeof betterAuth>[0]["database"]>;
 
+interface CreateAuthRuntimeOptions {
+  multiSession?: boolean;
+}
+
+const accountChooserSessionPlugin = {
+  id: "pgid-account-chooser-session",
+  endpoints: {
+    adoptActiveAccountSession: createAuthEndpoint.serverOnly(
+      {
+        method: "POST",
+        requireHeaders: true,
+        use: [sessionMiddleware],
+      },
+      async (ctx) => {
+        await setSessionCookie(ctx, ctx.context.session);
+        return ctx.json({ adopted: true });
+      },
+    ),
+    forgetCurrentAccountSession: createAuthEndpoint.serverOnly(
+      {
+        method: "POST",
+        requireHeaders: true,
+        use: [sessionMiddleware],
+      },
+      async (ctx) => {
+        const session = ctx.context.session.session;
+        expireCookie(ctx, {
+          name: `${ctx.context.authCookies.sessionToken.name}_multi-${session.token.toLowerCase()}`,
+          attributes: ctx.context.authCookies.sessionToken.attributes,
+        });
+        return ctx.json({ forgotten: true });
+      },
+    ),
+  },
+} satisfies BetterAuthPlugin;
+
 function socialCallbackProvider(request: Request | undefined): string | undefined {
   if (!request) return undefined;
   const match = /^\/callback\/([^/]+)$/.exec(new URL(request.url).pathname);
@@ -48,6 +90,7 @@ export function createAuth(
   env: Env,
   executionCtx?: WaitUntilContext,
   database: AuthDatabase = env.PG72_ID_DB,
+  runtimeOptions: CreateAuthRuntimeOptions = {},
 ) {
   const config = readRuntimeConfig(env);
   let committedAccountDeletion: SecurityEvent | null = null;
@@ -419,6 +462,10 @@ export function createAuth(
       oauthProvider({
         loginPage: "/sign-in",
         consentPage: "/consent",
+        selectAccount: {
+          page: "/select-account",
+          shouldRedirect: () => true,
+        },
         allowDynamicClientRegistration: false,
         allowUnauthenticatedClientRegistration: false,
         allowPublicClientPrelogin: true,
@@ -521,6 +568,10 @@ export function createAuth(
           ],
         },
       }),
+      ...(runtimeOptions.multiSession === false
+        ? []
+        : [multiSession({ maximumSessions: 5 })]),
+      accountChooserSessionPlugin,
     ],
   });
 }

@@ -12,7 +12,11 @@ import {
   MAIL_INTROSPECTION_CLIENT_ID,
   WEBMAIL_CLIENT_ID,
 } from "../worker/config";
-import { createAuthenticatedUser, sha256Base64Url } from "./helpers";
+import {
+  continueCurrentAccountSelection,
+  createAuthenticatedUser,
+  sha256Base64Url,
+} from "./helpers";
 
 const BASE_URL = "http://localhost:5173";
 const PROVISION_URL =
@@ -202,11 +206,15 @@ async function issueTokens(
     state: "S".repeat(43),
     nonce: "N".repeat(43),
   });
-  const authorizeResponse = await exports.default.fetch(
-    new Request(`${BASE_URL}/oauth2/authorize?${query}`, {
-      headers: user.headers,
-      redirect: "manual",
-    }),
+  const authorizeResponse = await continueCurrentAccountSelection(
+    await exports.default.fetch(
+      new Request(`${BASE_URL}/oauth2/authorize?${query}`, {
+        headers: user.headers,
+        redirect: "manual",
+      }),
+    ),
+    user.headers,
+    BASE_URL,
   );
   expect(authorizeResponse.status).toBe(302);
   const consentLocation = new URL(

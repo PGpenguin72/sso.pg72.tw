@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { makeSignature } from "better-auth/crypto";
 
 import { accountRoutes } from "./account";
 import {
@@ -121,6 +122,26 @@ interface AuthRedirectPayload {
   url: string;
 }
 
+interface AccountChooserSelectInput {
+  choiceId?: unknown;
+  oauth_query?: unknown;
+}
+
+interface AccountChooserUser {
+  id: string;
+  email: string;
+  image?: string | null;
+  name: string;
+  status?: unknown;
+}
+
+interface AccountChooserSession {
+  session: {
+    token: string;
+  };
+  user: AccountChooserUser;
+}
+
 interface RegistrationSocialStartInput {
   callbackURL?: unknown;
   intentId?: unknown;
@@ -188,6 +209,16 @@ const OAUTH_METADATA_PATHS = new Set([
 const DEV_CSP_NONCE = "cGc3Mi12aXRlLWRldg==";
 const PASSKEY_NAME_MAX_LENGTH = 64;
 const OAUTH_CLIENT_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{2,63}$/;
+const ACCOUNT_CHOICE_DOMAIN = "pgid-account-choice:v1:";
+const ACCOUNT_CHOICE_PATTERN = /^[A-Za-z0-9_-]{32,128}$/;
+const OAUTH_QUERY_MAX_LENGTH = 16 * 1024;
+
+async function accountChoiceId(token: string, secret: string): Promise<string> {
+  return (await makeSignature(`${ACCOUNT_CHOICE_DOMAIN}${token}`, secret))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
 
 function introspectionJson(
   payload: Record<string, unknown>,
@@ -418,6 +449,203 @@ async function normalizeOAuthNavigationRedirect(
   headers.delete("Content-Type");
   headers.set("Location", target.toString());
   return new Response(null, { status: 302, headers });
+}
+
+function appendSetCookieHeaders(target: Headers, source: Headers): void {
+  for (const value of source.getSetCookie()) {
+    target.append("Set-Cookie", value);
+  }
+}
+
+function jsonWithSetCookies(
+  payload: unknown,
+  status: number,
+  ...cookieSources: Array<Headers | null>
+): Response {
+  const headers = new Headers({
+    "Cache-Control": "no-store",
+    "Content-Type": "application/json",
+    Pragma: "no-cache",
+  });
+  for (const source of cookieSources) {
+    if (source) appendSetCookieHeaders(headers, source);
+  }
+  return new Response(JSON.stringify(payload), { status, headers });
+}
+
+function responseWithSetCookies(response: Response, source: Headers | null): Response {
+  if (!source) return response;
+  const headers = new Headers(response.headers);
+  appendSetCookieHeaders(headers, source);
+  return new Response(response.body, {
+    headers,
+    status: response.status,
+    statusText: response.statusText,
+  });
+}
+
+function boundedAccountImage(value: string | null | undefined, baseURL: string): string | null {
+  if (!value || value.length > 2_048) return null;
+  if (value.startsWith("/") && !value.startsWith("//")) return value;
+  try {
+    const image = new URL(value);
+    const base = new URL(baseURL);
+    if (
+      image.protocol === "https:" &&
+      !image.username &&
+      !image.password &&
+      (image.origin === base.origin || image.hostname === "lh3.googleusercontent.com")
+    ) {
+      return image.toString();
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function accountChoiceDisplay(
+  account: AccountChooserSession,
+  activeToken: string | null,
+  choiceId: string,
+  baseURL: string,
+) {
+  return {
+    active: account.session.token === activeToken,
+    choiceId,
+    email: account.user.email.trim().slice(0, 254),
+    image: boundedAccountImage(account.user.image, baseURL),
+    name: account.user.name.trim().slice(0, 120) || "PGID 使用者",
+  };
+}
+
+function activeAccountSessions(
+  sessions: AccountChooserSession[],
+): AccountChooserSession[] {
+  const seen = new Set<string>();
+  return sessions.filter((session) => {
+    if (session.user.status !== "active" || seen.has(session.user.id)) return false;
+    seen.add(session.user.id);
+    return true;
+  });
+}
+
+function safeOAuthRedirect(value: string, requestURL: string): string | null {
+  try {
+    const target = new URL(value, requestURL);
+    const isLocalHttp =
+      target.protocol === "http:" &&
+      (target.hostname === "localhost" ||
+        target.hostname === "127.0.0.1" ||
+        target.hostname === "[::1]");
+    return (target.protocol === "https:" || isLocalHttp) &&
+      !target.username &&
+      !target.password
+      ? target.toString()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function rewriteDormantAccountSignIn(
+  auth: ReturnType<typeof createAuth>,
+  request: Request,
+  response: Response,
+): Promise<Response> {
+  let target: URL;
+  const location = response.headers.get("location");
+  const redirectsWithLocation =
+    response.status >= 300 && response.status < 400 && location !== null;
+  if (redirectsWithLocation) {
+    try {
+      target = new URL(location, request.url);
+    } catch {
+      return response;
+    }
+  } else {
+    if (
+      !response.ok ||
+      !response.headers.get("content-type")?.toLowerCase().startsWith("application/json")
+    ) {
+      return response;
+    }
+    let payload: Partial<AuthRedirectPayload>;
+    try {
+      payload = (await response.clone().json()) as Partial<AuthRedirectPayload>;
+    } catch {
+      return response;
+    }
+    if (payload.redirect !== true || typeof payload.url !== "string") return response;
+    try {
+      target = new URL(payload.url, request.url);
+    } catch {
+      return response;
+    }
+  }
+  const requestURL = new URL(request.url);
+  const requestPrompt = new Set(
+    (requestURL.searchParams.get("prompt") ?? "")
+      .split(/\s+/)
+      .filter(Boolean),
+  );
+  const exactAuthorizeRequest =
+    request.method === "GET" && requestURL.pathname === "/oauth2/authorize";
+  const silentAccountSelection =
+    exactAuthorizeRequest &&
+    requestPrompt.size === 1 &&
+    requestPrompt.has("none") &&
+    target.searchParams.get("error") === "login_required";
+  const targetPrompt = new Set(
+    (target.searchParams.get("prompt") ?? "").split(/\s+/).filter(Boolean),
+  );
+  const interactiveAccountSelection =
+    exactAuthorizeRequest &&
+    target.origin === requestURL.origin &&
+    target.pathname === "/sign-in" &&
+    Boolean(target.searchParams.get("sig")) &&
+    !requestPrompt.has("none") &&
+    !requestPrompt.has("login") &&
+    !requestPrompt.has("create") &&
+    !targetPrompt.has("none") &&
+    !targetPrompt.has("login") &&
+    !targetPrompt.has("create");
+  if (!silentAccountSelection && !interactiveAccountSelection) {
+    return response;
+  }
+
+  if (silentAccountSelection) {
+    const current = await auth.api.getSession({ headers: request.headers });
+    if (current) return response;
+  }
+  const remembered = (await auth.api.listDeviceSessions({
+    headers: request.headers,
+  })) as AccountChooserSession[];
+  if (activeAccountSessions(remembered).length === 0) return response;
+
+  if (silentAccountSelection) {
+    target.searchParams.set("error", "account_selection_required");
+    target.searchParams.set(
+      "error_description",
+      "End-User account selection is required",
+    );
+  } else {
+    target.pathname = "/select-account";
+  }
+  const headers = new Headers(response.headers);
+  headers.delete("Content-Length");
+  if (redirectsWithLocation) {
+    headers.set("Location", target.toString());
+    return new Response(response.body, {
+      headers,
+      status: response.status,
+      statusText: response.statusText,
+    });
+  }
+  return new Response(
+    JSON.stringify({ redirect: true, url: target.toString() } satisfies AuthRedirectPayload),
+    { status: response.status, headers },
+  );
 }
 
 async function advertiseManagedClientAuthMethods(
@@ -903,6 +1131,146 @@ app.get("/api/auth/social-config", (c) => {
   if (c.env.FACEBOOK_CLIENT_ID && c.env.FACEBOOK_CLIENT_SECRET) enabled.push("facebook");
   if (c.env.APPLE_CLIENT_ID && c.env.APPLE_CLIENT_SECRET) enabled.push("apple");
   return c.json({ enabled }, 200, { "Cache-Control": "no-store" });
+});
+
+app.use(
+  "/api/account-chooser/select",
+  bodyLimit({
+    maxSize: OAUTH_QUERY_MAX_LENGTH + 1_024,
+    onError: (c) => c.json({ error: "request_too_large" }, 413),
+  }),
+);
+
+app.get("/api/account-chooser", async (c) => {
+  const config = readRuntimeConfig(c.env);
+  const origin = c.req.header("origin");
+  if (origin !== undefined && origin !== config.authBaseUrl) {
+    return c.json({ error: "invalid_origin" }, 403);
+  }
+
+  const auth = createAuth(c.env, c.executionCtx);
+  const current = await auth.api.getSession({ headers: c.req.raw.headers });
+  let adoptionHeaders: Headers | null = null;
+  if (current?.user.status === "active") {
+    const adopted = await auth.api.adoptActiveAccountSession({
+      headers: c.req.raw.headers,
+      method: "POST",
+      returnHeaders: true,
+    });
+    adoptionHeaders = adopted.headers;
+  }
+
+  const remembered = (await auth.api.listDeviceSessions({
+    headers: c.req.raw.headers,
+  })) as AccountChooserSession[];
+  const candidates = activeAccountSessions([
+    ...(current?.user.status === "active"
+      ? [current as AccountChooserSession]
+      : []),
+    ...remembered,
+  ]);
+  const choices = await Promise.all(
+    candidates.map(async (account) =>
+      accountChoiceDisplay(
+        account,
+        current?.session.token ?? null,
+        await accountChoiceId(account.session.token, c.env.BETTER_AUTH_SECRET),
+        config.authBaseUrl,
+      ),
+    ),
+  );
+
+  return jsonWithSetCookies({ accounts: choices }, 200, adoptionHeaders);
+});
+
+app.post("/api/account-chooser/select", async (c) => {
+  const config = readRuntimeConfig(c.env);
+  if (c.req.header("origin") !== config.authBaseUrl) {
+    return c.json({ error: "invalid_origin" }, 403);
+  }
+  const input = await readJson<AccountChooserSelectInput>(c.req.raw);
+  if (
+    typeof input?.choiceId !== "string" ||
+    !ACCOUNT_CHOICE_PATTERN.test(input.choiceId) ||
+    typeof input.oauth_query !== "string" ||
+    input.oauth_query.length === 0 ||
+    input.oauth_query.length > OAUTH_QUERY_MAX_LENGTH
+  ) {
+    return c.json({ error: "invalid_account_choice" }, 400);
+  }
+
+  const auth = createAuth(c.env, c.executionCtx);
+  const remembered = (await auth.api.listDeviceSessions({
+    headers: c.req.raw.headers,
+  })) as AccountChooserSession[];
+  const candidates = activeAccountSessions(remembered);
+  let selected: AccountChooserSession | null = null;
+  for (const candidate of candidates) {
+    const candidateId = await accountChoiceId(
+      candidate.session.token,
+      c.env.BETTER_AUTH_SECRET,
+    );
+    if (candidateId === input.choiceId) {
+      selected = candidate;
+      break;
+    }
+  }
+  if (!selected) {
+    return c.json({ error: "account_choice_expired" }, 409);
+  }
+
+  const setActiveBody = {
+    sessionToken: selected.session.token,
+    oauth_query: input.oauth_query,
+  };
+  const selectionHeaders = new Headers(c.req.raw.headers);
+  selectionHeaders.set("Accept", "application/json");
+  selectionHeaders.set("Content-Type", "application/json");
+  selectionHeaders.set("Sec-Fetch-Mode", "cors");
+  const continuation = await auth.handler(
+    new Request(`${config.authBaseUrl}/multi-session/set-active`, {
+      method: "POST",
+      headers: selectionHeaders,
+      body: JSON.stringify(setActiveBody),
+    }),
+  );
+  if (continuation.status === 400) {
+    return c.json({ error: "invalid_authorization_request" }, 400);
+  }
+  if (continuation.status === 401 || continuation.status === 403) {
+    return c.json({ error: "account_choice_expired" }, 409);
+  }
+
+  let redirectValue: string | null = null;
+  const location = continuation.headers.get("location");
+  if (
+    continuation.status >= 300 &&
+    continuation.status < 400 &&
+    location !== null
+  ) {
+    redirectValue = location;
+  } else if (continuation.ok) {
+    try {
+      const payload = (await continuation.clone().json()) as Partial<AuthRedirectPayload>;
+      if (payload.redirect === true && typeof payload.url === "string") {
+        redirectValue = payload.url;
+      }
+    } catch {
+      redirectValue = null;
+    }
+  }
+  const url = redirectValue
+    ? safeOAuthRedirect(redirectValue, c.req.url)
+    : null;
+  if (!url) {
+    return c.json({ error: "account_continuation_unavailable" }, 503);
+  }
+
+  return jsonWithSetCookies(
+    { redirect: true, url } satisfies AuthRedirectPayload,
+    200,
+    continuation.headers,
+  );
 });
 
 app.post("/passkey/update-passkey", async (c) => {
@@ -1482,9 +1850,22 @@ app.all("*", async (c) => {
       const current = await auth.api.getSession({
         headers: c.req.raw.headers,
       });
-      if (!current) return auth.handler(c.req.raw);
 
       const isSignOut = pathname === "/sign-out";
+      const currentOnlyAuth = isSignOut
+        ? createAuth(c.env, c.executionCtx, c.env.PG72_ID_DB, {
+            multiSession: false,
+          })
+        : auth;
+      if (!current) return currentOnlyAuth.handler(c.req.raw);
+
+      const forgotten = isSignOut
+        ? await auth.api.forgetCurrentAccountSession({
+            headers: c.req.raw.headers,
+            method: "POST",
+            returnHeaders: true,
+          })
+        : null;
       const freshAfter = new Date(
         Date.now() - FRESH_SESSION_MAX_AGE_MS,
       ).toISOString();
@@ -1561,8 +1942,18 @@ app.all("*", async (c) => {
         },
         c.executionCtx,
       );
-      if (!revoked.committed) return auth.handler(c.req.raw);
-      if (isSignOut) return auth.handler(c.req.raw);
+      if (!revoked.committed) {
+        return responseWithSetCookies(
+          await currentOnlyAuth.handler(c.req.raw),
+          forgotten?.headers ?? null,
+        );
+      }
+      if (isSignOut) {
+        return responseWithSetCookies(
+          await currentOnlyAuth.handler(c.req.raw),
+          forgotten?.headers ?? null,
+        );
+      }
       return c.json({ status: true });
     }
 
@@ -1611,7 +2002,11 @@ app.all("*", async (c) => {
       }
     }
 
-    const response = await auth.handler(c.req.raw);
+    let response = await auth.handler(c.req.raw);
+
+    if (pathname === "/oauth2/authorize") {
+      response = await rewriteDormantAccountSignIn(auth, c.req.raw, response);
+    }
 
     if (activityUserId) {
       // Audit is a source-of-truth write, so it completes before responding.

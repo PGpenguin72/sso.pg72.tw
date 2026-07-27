@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { createAuth } from "../worker/auth";
 import { readRuntimeConfig } from "../worker/config";
 import {
+  continueCurrentAccountSelection,
   createAuthenticatedUser,
   createBootstrapAdmin,
   createSessionFor,
@@ -559,11 +560,14 @@ describe("PGID Worker", () => {
       state: "B".repeat(43),
       nonce: "C".repeat(43),
     });
-    const authorizeResponse = await exports.default.fetch(
-      new Request(`http://localhost:5173/oauth2/authorize?${query}`, {
-        headers,
-        redirect: "manual",
-      }),
+    const authorizeResponse = await continueCurrentAccountSelection(
+      await exports.default.fetch(
+        new Request(`http://localhost:5173/oauth2/authorize?${query}`, {
+          headers,
+          redirect: "manual",
+        }),
+      ),
+      headers,
     );
     expect(authorizeResponse.status).toBe(302);
     const consentLocation = new URL(
@@ -642,11 +646,14 @@ describe("PGID Worker", () => {
       state: "D".repeat(43),
       nonce: "E".repeat(43),
     });
-    const authorizeResponse = await exports.default.fetch(
-      new Request(`http://localhost:5173/oauth2/authorize?${query}`, {
-        headers,
-        redirect: "manual",
-      }),
+    const authorizeResponse = await continueCurrentAccountSelection(
+      await exports.default.fetch(
+        new Request(`http://localhost:5173/oauth2/authorize?${query}`, {
+          headers,
+          redirect: "manual",
+        }),
+      ),
+      headers,
     );
     const consentLocation = new URL(
       authorizeResponse.headers.get("location") ?? "",
@@ -743,11 +750,14 @@ describe("PGID Worker", () => {
       state: "H".repeat(43),
       nonce: "J".repeat(43),
     });
-    const authorizeResponse = await exports.default.fetch(
-      new Request(`http://localhost:5173/oauth2/authorize?${query}`, {
-        headers,
-        redirect: "manual",
-      }),
+    const authorizeResponse = await continueCurrentAccountSelection(
+      await exports.default.fetch(
+        new Request(`http://localhost:5173/oauth2/authorize?${query}`, {
+          headers,
+          redirect: "manual",
+        }),
+      ),
+      headers,
     );
     expect(authorizeResponse.status).toBe(302);
     const consentLocation = new URL(
@@ -892,11 +902,14 @@ describe("PGID Worker", () => {
       state: "F".repeat(43),
       nonce: "G".repeat(43),
     });
-    const authorizeResponse = await exports.default.fetch(
-      new Request(`http://localhost:5173/oauth2/authorize?${query}`, {
-        headers,
-        redirect: "manual",
-      }),
+    const authorizeResponse = await continueCurrentAccountSelection(
+      await exports.default.fetch(
+        new Request(`http://localhost:5173/oauth2/authorize?${query}`, {
+          headers,
+          redirect: "manual",
+        }),
+      ),
+      headers,
     );
     expect(authorizeResponse.status).toBe(302);
     const consentLocation = new URL(

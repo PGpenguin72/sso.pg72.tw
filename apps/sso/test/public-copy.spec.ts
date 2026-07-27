@@ -36,7 +36,25 @@ interface PublicViews {
     fallback: string,
     onFailure: (message: string) => void,
   ) => Promise<boolean>;
-  SignInView: ComponentType<{ pending: boolean }>;
+  requestAccountChoiceContinuation: <T>(
+    account: { active: boolean; choiceId: string },
+    actions: {
+      continueCurrent: () => Promise<T>;
+      selectRemembered: (choiceId: string) => Promise<T>;
+    },
+  ) => Promise<T>;
+  signInIntentCapabilities: (
+    intent: "add-account" | "default" | "reauth",
+  ) => {
+    accountChooserBack: boolean;
+    passkey: boolean;
+    telegram: boolean;
+  };
+  SignInView: ComponentType<{
+    intent?: "add-account" | "default" | "reauth";
+    onBack?: () => void;
+    pending: boolean;
+  }>;
 }
 
 let publicViews: PublicViews;
@@ -112,6 +130,74 @@ describe("rendered public product copy", () => {
     expect(about).toContain("若帳號中心顯示復原碼");
     expect(`${signIn} ${terms} ${about}`).not.toContain("PG72 ID");
     expect(`${signIn} ${terms} ${about}`).not.toContain("所有服務");
+  });
+
+  it("renders bounded account-addition and reauthentication methods", () => {
+    const addAccount = renderToStaticMarkup(
+      createElement(publicViews.SignInView, {
+        intent: "add-account",
+        onBack: () => undefined,
+        pending: false,
+      }),
+    );
+    const reauthenticate = renderToStaticMarkup(
+      createElement(publicViews.SignInView, {
+        intent: "reauth",
+        pending: false,
+      }),
+    );
+
+    expect(addAccount).toContain("使用 Google 繼續");
+    expect(addAccount).toContain("返回帳戶選擇");
+    expect(addAccount).not.toContain("使用 Passkey");
+    expect(addAccount).not.toContain("Telegram");
+    expect(reauthenticate).toContain("使用 Google 繼續");
+    expect(reauthenticate).toContain("使用 Passkey");
+    expect(reauthenticate).not.toContain("Telegram");
+    expect(reauthenticate).not.toContain("返回帳戶選擇");
+  });
+
+  it("applies the complete sign-in intent capability matrix", () => {
+    expect(publicViews.signInIntentCapabilities("default")).toEqual({
+      accountChooserBack: false,
+      passkey: true,
+      telegram: true,
+    });
+    expect(publicViews.signInIntentCapabilities("add-account")).toEqual({
+      accountChooserBack: true,
+      passkey: false,
+      telegram: false,
+    });
+    expect(publicViews.signInIntentCapabilities("reauth")).toEqual({
+      accountChooserBack: false,
+      passkey: true,
+      telegram: false,
+    });
+  });
+
+  it("uses exactly one browser operation for each account choice", async () => {
+    const continueCurrent = vi.fn(async () => "continued");
+    const selectRemembered = vi.fn(async () => "selected");
+
+    await expect(
+      publicViews.requestAccountChoiceContinuation(
+        { active: true, choiceId: "current" },
+        { continueCurrent, selectRemembered },
+      ),
+    ).resolves.toBe("continued");
+    expect(continueCurrent).toHaveBeenCalledOnce();
+    expect(selectRemembered).not.toHaveBeenCalled();
+
+    continueCurrent.mockClear();
+    await expect(
+      publicViews.requestAccountChoiceContinuation(
+        { active: false, choiceId: "remembered" },
+        { continueCurrent, selectRemembered },
+      ),
+    ).resolves.toBe("selected");
+    expect(continueCurrent).not.toHaveBeenCalled();
+    expect(selectRemembered).toHaveBeenCalledOnce();
+    expect(selectRemembered).toHaveBeenCalledWith("remembered");
   });
 
   it("limits About's centralized-management claim to PGID-owned data", () => {

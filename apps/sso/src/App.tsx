@@ -1202,7 +1202,224 @@ export function RecoveryView() {
   );
 }
 
-export function SignInView({ pending }: { pending: boolean }) {
+interface AccountChoice {
+  active: boolean;
+  choiceId: string;
+  email: string;
+  image: string | null;
+  name: string;
+}
+
+interface AccountChoicesResponse {
+  accounts?: unknown;
+}
+
+interface AccountChoiceActions<T> {
+  continueCurrent: () => Promise<T>;
+  selectRemembered: (choiceId: string) => Promise<T>;
+}
+
+export async function requestAccountChoiceContinuation<T>(
+  account: Pick<AccountChoice, "active" | "choiceId">,
+  actions: AccountChoiceActions<T>,
+): Promise<T> {
+  return account.active
+    ? actions.continueCurrent()
+    : actions.selectRemembered(account.choiceId);
+}
+
+function isAccountChoice(value: unknown): value is AccountChoice {
+  if (!value || typeof value !== "object") return false;
+  const account = value as Partial<AccountChoice>;
+  return (
+    typeof account.active === "boolean" &&
+    typeof account.choiceId === "string" &&
+    typeof account.email === "string" &&
+    (account.image === null || typeof account.image === "string") &&
+    typeof account.name === "string"
+  );
+}
+
+export function AccountChooserView() {
+  const [accounts, setAccounts] = useState<AccountChoice[] | null>(null);
+  const [addingAccount, setAddingAccount] = useState(false);
+  const [busyChoice, setBusyChoice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadAccounts = useCallback(async () => {
+    setError(null);
+    try {
+      const response = await fetch("/api/account-chooser", {
+        cache: "no-store",
+        credentials: "include",
+        headers: { Accept: "application/json" },
+      });
+      const payload = (await response.json()) as AccountChoicesResponse;
+      if (!response.ok || !Array.isArray(payload.accounts)) {
+        throw new Error("Invalid account chooser response");
+      }
+      setAccounts(payload.accounts.filter(isAccountChoice));
+    } catch {
+      setAccounts([]);
+      setError("無法載入已登入的帳戶，請重新整理後再試。");
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadAccounts();
+  }, [loadAccounts]);
+
+  const followContinuation = (payload: Partial<SocialRedirectPayload> | null) => {
+    const target =
+      payload?.redirect === true && typeof payload.url === "string"
+        ? safeOAuthRedirect(payload.url)
+        : null;
+    if (!target) {
+      setError("無法繼續登入，請重新選擇帳戶。");
+      setBusyChoice(null);
+      return;
+    }
+    window.location.replace(target);
+  };
+
+  const chooseAccount = async (account: AccountChoice) => {
+    setBusyChoice(account.choiceId);
+    setError(null);
+    const result = await requestAccountChoiceContinuation(account, {
+      continueCurrent: () => authClient.oauth2.continue({ selected: true }),
+      selectRemembered: (choiceId) =>
+        authClient.$fetch<SocialRedirectPayload>(
+          "/api/account-chooser/select",
+          {
+            method: "POST",
+            body: { choiceId },
+          },
+        ),
+    });
+    if (result.error) {
+      if (!account.active) {
+        await loadAccounts();
+      }
+      setError(
+        account.active
+          ? "授權資料已失效，請返回應用程式後重新登入。"
+          : "這個帳戶已失效，請重新選擇。",
+      );
+      setBusyChoice(null);
+      return;
+    }
+    followContinuation(result.data as Partial<SocialRedirectPayload> | null);
+  };
+
+  if (addingAccount) {
+    return (
+      <SignInView
+        intent="add-account"
+        onBack={() => setAddingAccount(false)}
+        pending={false}
+      />
+    );
+  }
+
+  return (
+    <>
+      <ThemeToggle floating />
+      <main className="consent-shell account-chooser-shell" aria-busy={accounts === null}>
+        <Brand />
+        <section className="account-chooser-panel" aria-labelledby="account-chooser-title">
+          <div className="account-chooser-heading">
+            <span className="item-icon" aria-hidden="true">
+              <Users />
+            </span>
+            <div>
+              <span className="eyebrow">Choose account</span>
+              <h1 id="account-chooser-title">選擇要使用的帳戶</h1>
+              <p>確認身分後繼續前往應用程式。</p>
+            </div>
+          </div>
+
+          {accounts === null ? (
+            <div className="account-choice-loading" aria-live="polite">
+              <span className="loading-line" />
+              正在載入帳戶...
+            </div>
+          ) : (
+            <div className="account-choice-list">
+              {accounts.map((account) => (
+                <button
+                  className="account-choice"
+                  disabled={busyChoice !== null}
+                  key={account.choiceId}
+                  onClick={() => void chooseAccount(account)}
+                  type="button"
+                >
+                  {account.image ? (
+                    <img alt="" className="account-choice-avatar" src={account.image} />
+                  ) : (
+                    <span className="account-choice-avatar avatar-fallback" aria-hidden="true">
+                      <UserRound />
+                    </span>
+                  )}
+                  <span className="account-choice-meta">
+                    <strong>{account.name}</strong>
+                    <span>{account.email}</span>
+                    {account.active ? (
+                      <span className="account-choice-current">
+                        <Check aria-hidden="true" />目前使用中
+                      </span>
+                    ) : null}
+                  </span>
+                  <ArrowRight aria-hidden="true" />
+                </button>
+              ))}
+              <button
+                className="account-choice account-choice-add"
+                disabled={busyChoice !== null}
+                onClick={() => setAddingAccount(true)}
+                type="button"
+              >
+                <span className="account-choice-avatar avatar-fallback" aria-hidden="true">
+                  <Plus />
+                </span>
+                <span className="account-choice-meta">
+                  <strong>使用其他帳戶</strong>
+                  <span>新增另一個 PGID 登入</span>
+                </span>
+                <ArrowRight aria-hidden="true" />
+              </button>
+            </div>
+          )}
+
+          {error ? (
+            <div className="notice notice-error" role="alert">
+              {error}
+            </div>
+          ) : null}
+        </section>
+      </main>
+    </>
+  );
+}
+
+type SignInIntent = "add-account" | "default" | "reauth";
+
+export function signInIntentCapabilities(intent: SignInIntent) {
+  return {
+    accountChooserBack: intent === "add-account",
+    passkey: intent !== "add-account",
+    telegram: intent === "default",
+  };
+}
+
+export function SignInView({
+  pending,
+  intent = "default",
+  onBack,
+}: {
+  pending: boolean;
+  intent?: SignInIntent;
+  onBack?: () => void;
+}) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [entryMode, setEntryMode] = useState<"register" | "sign-in">(
@@ -1220,6 +1437,8 @@ export function SignInView({ pending }: { pending: boolean }) {
   );
   const query = new URLSearchParams(window.location.search);
   const oauthQuery = query.has("client_id") && query.has("sig");
+  const specialIntent = intent !== "default";
+  const intentCapabilities = signInIntentCapabilities(intent);
 
   useEffect(() => {
     let cancelled = false;
@@ -1302,7 +1521,7 @@ export function SignInView({ pending }: { pending: boolean }) {
   const showSocialSection =
     socialConfigReady &&
     !registering &&
-    (visibleSocial.length > 0 || telegramEnabled);
+    (visibleSocial.length > 0 || (intentCapabilities.telegram && telegramEnabled));
 
   const resetRegistrationChallenge = () => {
     setTurnstileToken(null);
@@ -1417,18 +1636,36 @@ export function SignInView({ pending }: { pending: boolean }) {
     <>
       <ThemeToggle floating />
       <main className="sign-in-shell">
+        {intentCapabilities.accountChooserBack && onBack ? (
+          <button className="button button-secondary sign-in-back" type="button" onClick={onBack}>
+            <ArrowLeft aria-hidden="true" />
+            返回帳戶選擇
+          </button>
+        ) : null}
         <div className="sign-in-heading">
           <Brand />
           <span className="eyebrow">Secure account</span>
-          <h1>{oauthQuery ? "繼續登入" : "登入 PGID"}</h1>
+          <h1>
+            {intent === "add-account"
+              ? "使用其他帳戶"
+              : intent === "reauth"
+                ? "再次驗證身分"
+                : oauthQuery
+                  ? "繼續登入"
+                  : "登入 PGID"}
+          </h1>
           <p>
-            {publicRegistration
+            {intent === "add-account"
+              ? "登入另一個 PGID 帳戶，完成後會繼續目前的授權流程。"
+              : intent === "reauth"
+                ? "請重新驗證目前要使用的 PGID 帳戶。"
+                : publicRegistration
               ? PUBLIC_PRODUCT_COPY.publicRegistration
               : PUBLIC_PRODUCT_COPY.signIn}
           </p>
         </div>
 
-        {publicRegistration ? (
+        {publicRegistration && !specialIntent ? (
           <div className="auth-mode-switch" role="group" aria-label="帳號流程">
             <button
               type="button"
@@ -1476,7 +1713,7 @@ export function SignInView({ pending }: { pending: boolean }) {
                 ? "使用 Google 建立帳號"
                 : "使用 Google 繼續"}
           </button>
-          {!registering ? (
+          {!registering && intentCapabilities.passkey ? (
             <button
               className="button button-secondary button-wide"
               type="button"
@@ -1507,7 +1744,7 @@ export function SignInView({ pending }: { pending: boolean }) {
                   {busy === provider.id ? "正在連線..." : provider.label}
                 </button>
               ))}
-              {!registering && telegramEnabled && telegramConfig ? (
+              {!registering && intentCapabilities.telegram && telegramEnabled && telegramConfig ? (
                 <TelegramLogin
                   config={telegramConfig}
                   disabled={pending || busy !== null}
@@ -1518,7 +1755,7 @@ export function SignInView({ pending }: { pending: boolean }) {
         ) : null}
 
         {error ? <div className="notice notice-error">{error}</div> : null}
-        {!registering && registrationConfig?.recoveryEnabled ? (
+        {!registering && !specialIntent && registrationConfig?.recoveryEnabled ? (
           <a className="recovery-back-link" href="/recover">
             <KeyRound aria-hidden="true" />
             使用復原碼
@@ -2881,6 +3118,11 @@ function PasskeyList({
 
 export function App() {
   const sessionQuery = authClient.useSession();
+  const pathname = window.location.pathname;
+  const query = new URLSearchParams(window.location.search);
+  const isConsent = pathname === "/consent";
+  const clientId = query.get("client_id");
+  const prompts = new Set((query.get("prompt") ?? "").split(/\s+/).filter(Boolean));
   const [tab, setTab] = useState<Tab>("account");
   const [navOpen, setNavOpen] = useState(false);
   const [sessions, setSessions] = useState<DeviceSession[]>([]);
@@ -3234,7 +3476,7 @@ export function App() {
   const canManageClients = canManageUsers || sessionRole === "developer";
 
   useEffect(() => {
-    if (session) {
+    if (session && pathname === "/") {
       void loadSessions();
       void loadSecurityActivity();
       void loadAuthorizations();
@@ -3259,12 +3501,9 @@ export function App() {
     loadRecoveryCodeStatus,
     loadProfile,
     loadSessions,
+    pathname,
     session,
   ]);
-
-  const pathname = window.location.pathname;
-  const isConsent = pathname === "/consent";
-  const clientId = new URLSearchParams(window.location.search).get("client_id");
 
   // Per-route document title. Public/consent routes are keyed off the path;
   // the root route depends on whether a session resolved (account center vs.
@@ -3276,10 +3515,12 @@ export function App() {
     else if (pathname === "/tos") title = "服務條款 — PGID";
     else if (pathname === "/pp") title = "隱私權政策 — PGID";
     else if (pathname === "/consent") title = "授權 — PGID";
+    else if (pathname === "/select-account") title = "選擇帳戶 — PGID";
+    else if (pathname === "/sign-in" && prompts.has("login")) title = "再次驗證 — PGID";
     else if (session) title = "PGID 帳號中心";
     else title = "PGID — PG72 單一登入";
     document.title = title;
-  }, [pathname, session]);
+  }, [pathname, prompts, session]);
 
   // Public informational pages render without a session so they are linkable
   // from consent, sign-in and third-party sites.
@@ -3287,6 +3528,15 @@ export function App() {
   if (pathname === "/pp") return <LegalPage kind="pp" />;
   if (pathname === "/about") return <AboutPage />;
   if (pathname === "/recover") return <RecoveryView />;
+  if (pathname === "/select-account") return <AccountChooserView />;
+  if (pathname === "/sign-in") {
+    return (
+      <SignInView
+        intent={prompts.has("login") ? "reauth" : "default"}
+        pending={sessionQuery.isPending}
+      />
+    );
+  }
 
   if (sessionQuery.isPending) {
     return (

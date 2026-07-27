@@ -5,7 +5,11 @@ import {
   sessionMiddleware,
 } from "better-auth/api";
 import { betterAuth, type BetterAuthPlugin } from "better-auth";
-import { expireCookie, setSessionCookie } from "better-auth/cookies";
+import {
+  expireCookie,
+  parseCookies,
+  setSessionCookie,
+} from "better-auth/cookies";
 import { jwt, multiSession } from "better-auth/plugins";
 import { oauthProvider } from "@better-auth/oauth-provider";
 import { passkey } from "@better-auth/passkey";
@@ -48,6 +52,9 @@ interface CreateAuthRuntimeOptions {
   multiSession?: boolean;
 }
 
+const MAXIMUM_ACCOUNT_SESSIONS = 5;
+const MAXIMUM_ACCOUNT_COOKIE_CLEANUPS = MAXIMUM_ACCOUNT_SESSIONS + 1;
+
 const accountChooserSessionPlugin = {
   id: "pgid-account-chooser-session",
   endpoints: {
@@ -58,8 +65,125 @@ const accountChooserSessionPlugin = {
         use: [sessionMiddleware],
       },
       async (ctx) => {
+        const session = ctx.context.session;
+        const cookieHeader = ctx.headers?.get("cookie") ?? "";
+        const cookies = parseCookies(cookieHeader);
+        const multiSessionPrefix =
+          `${ctx.context.authCookies.sessionToken.name}_multi-`;
+        const cleanupCookieNames: string[] = [];
+        const staleCookieNames = new Set<string>();
+        for (const [cookieName] of [...cookies.entries()]
+          .filter(([name]) => name.startsWith(multiSessionPrefix))
+          .slice(0, MAXIMUM_ACCOUNT_COOKIE_CLEANUPS)) {
+          const token = await ctx.getSignedCookie(
+            cookieName,
+            ctx.context.secret,
+          );
+          if (typeof token !== "string") {
+            staleCookieNames.add(cookieName);
+            cleanupCookieNames.push(cookieName);
+            continue;
+          }
+          const remembered = await ctx.context.internalAdapter.findSession(token);
+          if (!remembered) {
+            staleCookieNames.add(cookieName);
+            cleanupCookieNames.push(cookieName);
+          } else if (
+            remembered.user.id === session.user.id &&
+            token !== session.session.token
+          ) {
+            cleanupCookieNames.push(cookieName);
+          }
+        }
+
+        if (staleCookieNames.size > 0 && ctx.headers) {
+          ctx.headers.set(
+            "cookie",
+            [...cookies.entries()]
+              .filter(([name]) => !staleCookieNames.has(name))
+              .map(([name, value]) => `${name}=${value}`)
+              .join("; "),
+          );
+        }
         await setSessionCookie(ctx, ctx.context.session);
-        return ctx.json({ adopted: true });
+        return ctx.json({ adopted: true, cleanupCookieNames });
+      },
+    ),
+    expireRememberedAccountCookies: createAuthEndpoint.serverOnly(
+      {
+        method: "POST",
+        requireHeaders: true,
+        metadata: {
+          $Infer: {} as { body: { cookieNames: string[] } },
+        },
+      },
+      async (ctx) => {
+        const prefix = `${ctx.context.authCookies.sessionToken.name}_multi-`;
+        const cookieNames = Array.isArray(ctx.body.cookieNames)
+          ? ctx.body.cookieNames
+              .filter(
+                (name): name is string =>
+                  typeof name === "string" && name.length <= 512,
+              )
+              .slice(0, MAXIMUM_ACCOUNT_COOKIE_CLEANUPS)
+          : [];
+        for (const cookieName of new Set(cookieNames)) {
+          const suffix = cookieName.slice(prefix.length);
+          if (
+            !cookieName.startsWith(prefix) ||
+            !/^[A-Za-z0-9_-]{1,128}$/.test(suffix)
+          ) {
+            continue;
+          }
+          expireCookie(ctx, {
+            name: cookieName,
+            attributes: ctx.context.authCookies.sessionToken.attributes,
+          });
+        }
+        return ctx.json({ expired: true });
+      },
+    ),
+    completeTelegramAccountSignIn: createAuthEndpoint(
+      "/complete-telegram-account-sign-in",
+      {
+        method: "POST",
+        requireHeaders: true,
+        metadata: {
+          SERVER_ONLY: true,
+          $Infer: {} as {
+            body: { oauth_query?: string; userId: string };
+          },
+        },
+      },
+      async (ctx) => {
+        if (
+          typeof ctx.body.userId !== "string" ||
+          ctx.body.userId.length === 0 ||
+          ctx.body.userId.length > 128 ||
+          (ctx.body.oauth_query !== undefined &&
+            (typeof ctx.body.oauth_query !== "string" ||
+              ctx.body.oauth_query.length === 0 ||
+              ctx.body.oauth_query.length > 16 * 1024))
+        ) {
+          throw new APIError("BAD_REQUEST", { code: "INVALID_LOGIN_INPUT" });
+        }
+        const user = await ctx.context.internalAdapter.findUserById(
+          ctx.body.userId,
+        );
+        if (
+          !user ||
+          (user as typeof user & { status?: unknown }).status !== "active"
+        ) {
+          throw new APIError("FORBIDDEN", { code: "ACCOUNT_UNAVAILABLE" });
+        }
+        const session = await ctx.context.internalAdapter.createSession(user.id);
+        if (!session) {
+          throw new APIError("INTERNAL_SERVER_ERROR", {
+            code: "SESSION_CREATION_FAILED",
+          });
+        }
+        await setSessionCookie(ctx, { session, user });
+        return ctx.json({ signedIn: true });
       },
     ),
     forgetCurrentAccountSession: createAuthEndpoint.serverOnly(
@@ -570,7 +694,7 @@ export function createAuth(
       }),
       ...(runtimeOptions.multiSession === false
         ? []
-        : [multiSession({ maximumSessions: 5 })]),
+        : [multiSession({ maximumSessions: MAXIMUM_ACCOUNT_SESSIONS })]),
       accountChooserSessionPlugin,
     ],
   });

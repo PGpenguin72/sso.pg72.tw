@@ -159,6 +159,55 @@ async function tableCount(table: "account" | "session" | "user"): Promise<number
   return row?.count ?? 0;
 }
 
+async function insertOAuthClient(
+  clientId: string,
+  redirectUri: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await env.PG72_ID_DB.prepare(
+    `INSERT INTO oauthClient (
+      id, clientId, disabled, skipConsent, scopes, createdAt, updatedAt, name,
+      redirectUris, tokenEndpointAuthMethod, grantTypes, responseTypes,
+      public, requirePKCE
+    ) VALUES (?, ?, 0, 0, ?, ?, ?, ?, ?, 'none', ?, '["code"]', 1, 1)`,
+  )
+    .bind(
+      crypto.randomUUID(),
+      clientId,
+      '["openid","profile","email"]',
+      now,
+      now,
+      "Telegram Continuation Test",
+      JSON.stringify([redirectUri]),
+      '["authorization_code"]',
+    )
+    .run();
+}
+
+async function telegramAuthorizationQuery(
+  clientId: string,
+  redirectUri: string,
+): Promise<string> {
+  const query = new URLSearchParams({
+    client_id: clientId,
+    code_challenge: "A".repeat(43),
+    code_challenge_method: "S256",
+    nonce: "C".repeat(43),
+    redirect_uri: redirectUri,
+    response_type: "code",
+    scope: "openid profile email",
+    state: "B".repeat(43),
+  });
+  const response = await exports.default.fetch(
+    new Request(`${BASE_URL}/oauth2/authorize?${query}`, {
+      redirect: "manual",
+    }),
+  );
+  const location = new URL(response.headers.get("location") ?? "", BASE_URL);
+  expect(location.pathname).toBe("/sign-in");
+  return location.search.slice(1);
+}
+
 describe("telegram config endpoint", () => {
   it("reports enabled with the bot username when configured", async () => {
     // The ambient test env injects a deterministic TELEGRAM_BOT_TOKEN; the
@@ -201,14 +250,52 @@ describe("telegram login endpoint", () => {
     expect(body.created).toBeUndefined();
     expect(signedIn.headers.get("set-cookie")).toContain("session_token=");
 
-    const login = await env.PG72_ID_DB.prepare(
+    const logins = await env.PG72_ID_DB.prepare(
       `SELECT metadata_json FROM audit_event
         WHERE subject_id = ? AND event_type = 'user.login_succeeded'
-        ORDER BY occurred_at DESC LIMIT 1`,
+        ORDER BY occurred_at DESC`,
     )
       .bind(userId)
-      .first<{ metadata_json: string }>();
-    expect(login?.metadata_json).toContain('"provider":"telegram"');
+      .all<{ metadata_json: string }>();
+    expect(logins.results).toHaveLength(1);
+    expect(logins.results[0]?.metadata_json).toContain('"provider":"telegram"');
+  });
+
+  it("continues a signed authorization once after Telegram login", async () => {
+    const telegramId = randomTelegramId();
+    const userId = await seedTelegramAccount(telegramId);
+    const clientId = `telegram-continuation-${crypto.randomUUID()}`;
+    const redirectUri = "https://telegram-continuation.example/callback";
+    await insertOAuthClient(clientId, redirectUri);
+    const oauthQuery = await telegramAuthorizationQuery(clientId, redirectUri);
+    const payload = await telegramPayload({ id: telegramId });
+
+    const response = await exports.default.fetch(
+      new Request(`${BASE_URL}/api/auth/telegram`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: BASE_URL },
+        body: JSON.stringify({ ...payload, oauth_query: oauthQuery }),
+      }),
+    );
+
+    expect(response.status, await response.clone().text()).toBe(200);
+    const continuation = (await response.json()) as {
+      redirect?: boolean;
+      url?: string;
+    };
+    expect(continuation.redirect).toBe(true);
+    expect(new URL(continuation.url ?? "", BASE_URL).pathname).toBe("/consent");
+    expect(response.headers.getSetCookie().some((cookie) =>
+      cookie.startsWith("pg72_id.session_token="),
+    )).toBe(true);
+    const logins = await env.PG72_ID_DB.prepare(
+      `SELECT metadata_json FROM audit_event
+        WHERE subject_id = ? AND event_type = 'user.login_succeeded'`,
+    )
+      .bind(userId)
+      .all<{ metadata_json: string }>();
+    expect(logins.results).toHaveLength(1);
+    expect(logins.results[0]?.metadata_json).toContain('"provider":"telegram"');
   });
 
   it("signs in a legacy linked Telegram account in public mode", async () => {

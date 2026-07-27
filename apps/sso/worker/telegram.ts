@@ -1,6 +1,5 @@
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
-import { makeSignature } from "better-auth/crypto";
 
 import { recordAudit } from "./audit";
 import { createAuth } from "./auth";
@@ -8,8 +7,7 @@ import {
   readAccountAccessState,
   recordRestrictedActionDenied,
 } from "./account-access";
-import { readRuntimeConfig, type RuntimeConfig } from "./config";
-import { recordLoginAudit } from "./security-activity";
+import { readRuntimeConfig } from "./config";
 
 type AppEnv = { Bindings: Env };
 
@@ -42,7 +40,7 @@ const TELEGRAM_PROVIDER_ID = "telegram";
 const TELEGRAM_AUTH_MAX_AGE_SECONDS = 300;
 /** Small allowance for clock skew when the payload is "from the future". */
 const TELEGRAM_AUTH_FUTURE_SKEW_SECONDS = 60;
-const SESSION_LIFETIME_MS = 60 * 60 * 24 * 30 * 1000;
+const OAUTH_QUERY_MAX_LENGTH = 16 * 1024;
 
 export interface TelegramUser {
   id: string;
@@ -140,54 +138,6 @@ export async function verifyTelegramAuth(
   };
 }
 
-/**
- * Mints a Better Auth-compatible session for the user and returns the cookie
- * strings to set. This mirrors the exact session-token shape Better Auth reads
- * (a `session` row plus a `<token>.<hmac>` signed cookie); it is the same
- * representation the test helpers construct.
- */
-async function mintSessionCookies(
-  env: Env,
-  config: RuntimeConfig,
-  userId: string,
-  headers: Headers,
-): Promise<string[]> {
-  const sessionId = crypto.randomUUID();
-  const token = crypto.randomUUID();
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + SESSION_LIFETIME_MS);
-
-  await env.PG72_ID_DB.prepare(
-    `INSERT INTO session
-      (id, expiresAt, token, createdAt, updatedAt, ipAddress, userAgent, userId)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(
-      sessionId,
-      expiresAt.toISOString(),
-      token,
-      now.toISOString(),
-      now.toISOString(),
-      headers.get("cf-connecting-ip") ?? null,
-      headers.get("user-agent") ?? null,
-      userId,
-    )
-    .run();
-
-  const signed = `${token}.${await makeSignature(token, env.BETTER_AUTH_SECRET)}`;
-  const secure = config.environment !== "development";
-  const cookieName = `${secure ? "__Secure-" : ""}pg72_id.session_token`;
-  const attributes = [
-    `${cookieName}=${signed}`,
-    "Path=/",
-    "HttpOnly",
-    "SameSite=Lax",
-    `Max-Age=${Math.floor(SESSION_LIFETIME_MS / 1000)}`,
-    ...(secure ? ["Secure"] : []),
-  ];
-  return [attributes.join("; ")];
-}
-
 async function readJson<T>(request: Request): Promise<T | null> {
   const contentType = request.headers.get("content-type") ?? "";
   if (!contentType.toLowerCase().startsWith("application/json")) {
@@ -213,16 +163,6 @@ function toStringMap(input: unknown): Record<string, string> | null {
   return map;
 }
 
-function telegramCookieResponse(
-  body: Record<string, unknown>,
-  status: 200,
-  cookies: string[],
-): Response {
-  const headers = new Headers({ "Content-Type": "application/json" });
-  for (const cookie of cookies) headers.append("Set-Cookie", cookie);
-  return new Response(JSON.stringify(body), { status, headers });
-}
-
 export const telegramRoutes = new Hono<AppEnv>();
 
 // Public, unauthenticated config for the sign-in page's Telegram Login Widget.
@@ -239,14 +179,22 @@ telegramRoutes.get("/api/auth/telegram/config", (c) => {
   );
 });
 
+telegramRoutes.use(
+  "/api/auth/telegram",
+  bodyLimit({
+    maxSize: OAUTH_QUERY_MAX_LENGTH + 4 * 1024,
+    onError: (c) => c.json({ error: "request_too_large" }, 413),
+  }),
+);
+telegramRoutes.use(
+  "/api/auth/telegram/link",
+  bodyLimit({
+    maxSize: 4 * 1024,
+    onError: (c) => c.json({ error: "request_too_large" }, 413),
+  }),
+);
+
 for (const path of ["/api/auth/telegram", "/api/auth/telegram/link"]) {
-  telegramRoutes.use(
-    path,
-    bodyLimit({
-      maxSize: 4 * 1024,
-      onError: (c) => c.json({ error: "request_too_large" }, 413),
-    }),
-  );
   telegramRoutes.use(path, async (c, next) => {
     const config = readRuntimeConfig(c.env);
     if (c.req.header("origin") !== config.authBaseUrl) {
@@ -268,8 +216,22 @@ for (const path of ["/api/auth/telegram", "/api/auth/telegram/link"]) {
 
 async function verifiedTelegramUser(
   c: Context<AppEnv>,
-): Promise<TelegramUser | Response> {
+  allowOAuthQuery = false,
+): Promise<{ oauthQuery?: string; user: TelegramUser } | Response> {
   const payload = await readJson<Record<string, unknown>>(c.req.raw);
+  let oauthQuery: string | undefined;
+  if (payload && "oauth_query" in payload) {
+    if (
+      !allowOAuthQuery ||
+      typeof payload.oauth_query !== "string" ||
+      payload.oauth_query.length === 0 ||
+      payload.oauth_query.length > OAUTH_QUERY_MAX_LENGTH
+    ) {
+      return c.json({ error: "invalid_authorization_request" }, 400);
+    }
+    oauthQuery = payload.oauth_query;
+    delete payload.oauth_query;
+  }
   const data = payload ? toStringMap(payload) : null;
   if (!data) {
     return c.json({ error: "invalid_telegram_auth" }, 400);
@@ -282,7 +244,7 @@ async function verifiedTelegramUser(
   if (!verification.ok) {
     return c.json({ error: verification.error }, 400);
   }
-  return verification.user;
+  return { oauthQuery, user: verification.user };
 }
 
 /**
@@ -292,9 +254,9 @@ async function verifiedTelegramUser(
  * either registration mode.
  */
 telegramRoutes.post("/api/auth/telegram", async (c) => {
-  const verified = await verifiedTelegramUser(c);
-  if (verified instanceof Response) return verified;
-  const config = readRuntimeConfig(c.env);
+  const result = await verifiedTelegramUser(c, true);
+  if (result instanceof Response) return result;
+  const { oauthQuery, user: verified } = result;
 
   const existing = await c.env.PG72_ID_DB.prepare(
     `SELECT userId FROM account WHERE providerId = ? AND accountId = ? LIMIT 1`,
@@ -311,19 +273,19 @@ telegramRoutes.post("/api/auth/telegram", async (c) => {
     if (!user || user.status !== "active") {
       return c.json({ error: "account_unavailable" }, 403);
     }
-    const cookies = await mintSessionCookies(
-      c.env,
-      config,
-      user.id,
-      c.req.raw.headers,
-    );
-    await recordLoginAudit(
-      c.env,
-      user.id,
-      { path: "/callback/telegram", request: { headers: c.req.raw.headers } },
-      c.executionCtx,
-    );
-    return telegramCookieResponse({ signedIn: true }, 200, cookies);
+    const auth = createAuth(c.env, c.executionCtx);
+    const response = await auth.api.completeTelegramAccountSignIn({
+      asResponse: true,
+      body: {
+        ...(oauthQuery ? { oauth_query: oauthQuery } : {}),
+        userId: user.id,
+      },
+      headers: c.req.raw.headers,
+      method: "POST",
+      request: c.req.raw,
+    });
+    if (!response.ok) return response;
+    return response;
   }
 
   // Unmatched Telegram identities cannot satisfy the verified-email enrollment
@@ -390,8 +352,9 @@ telegramRoutes.post("/api/auth/telegram/link", async (c) => {
     return c.json({ error: "forbidden" }, 403);
   }
 
-  const verified = await verifiedTelegramUser(c);
-  if (verified instanceof Response) return verified;
+  const result = await verifiedTelegramUser(c);
+  if (result instanceof Response) return result;
+  const verified = result.user;
 
   const now = new Date().toISOString();
   const inserted = await c.env.PG72_ID_DB.prepare(

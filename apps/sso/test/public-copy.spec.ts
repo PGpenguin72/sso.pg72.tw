@@ -10,6 +10,17 @@ import llmsText from "../public/llms.txt?raw";
 
 interface PublicViews {
   AboutPage: ComponentType;
+  accountChooserClientActions: {
+    continueCurrent: () => Promise<unknown>;
+    selectRemembered: (choiceId: string) => Promise<unknown>;
+  };
+  createAccountChooserClientActions: (
+    customFetchImpl: typeof fetch,
+  ) => {
+    continueCurrent: () => Promise<unknown>;
+    selectRemembered: (choiceId: string) => Promise<unknown>;
+  };
+  accountChoiceContinuationError: (payload: unknown) => string | null;
   adminUserErrorMessage: (code: unknown, fallback: string) => string;
   DeletePasskeyDialog: ComponentType<{
     busy: boolean;
@@ -43,6 +54,7 @@ interface PublicViews {
       selectRemembered: (choiceId: string) => Promise<T>;
     },
   ) => Promise<T>;
+  isOAuthContinuation: (payload: unknown) => boolean;
   signInIntentCapabilities: (
     intent: "add-account" | "default" | "reauth",
   ) => {
@@ -50,6 +62,9 @@ interface PublicViews {
     passkey: boolean;
     telegram: boolean;
   };
+  telegramLoginSuccessAction: (
+    payload: unknown,
+  ) => "redirect" | "reload" | "invalid";
   SignInView: ComponentType<{
     intent?: "add-account" | "default" | "reauth";
     onBack?: () => void;
@@ -198,6 +213,122 @@ describe("rendered public product copy", () => {
     expect(continueCurrent).not.toHaveBeenCalled();
     expect(selectRemembered).toHaveBeenCalledOnce();
     expect(selectRemembered).toHaveBeenCalledWith("remembered");
+  });
+
+  it("classifies chooser and Telegram success payloads without owning navigation", () => {
+    const continuation = {
+      redirect: true,
+      url: "https://rp.example/callback",
+    };
+    expect(publicViews.isOAuthContinuation(continuation)).toBe(true);
+    expect(publicViews.isOAuthContinuation({ url: continuation.url })).toBe(false);
+    expect(publicViews.isOAuthContinuation({
+      redirect: false,
+      url: continuation.url,
+    })).toBe(false);
+    expect(publicViews.isOAuthContinuation({
+      redirect: true,
+      url: "mailto:user@example.com",
+    })).toBe(false);
+    expect(publicViews.accountChoiceContinuationError(continuation)).toBeNull();
+    expect(publicViews.accountChoiceContinuationError({ signedIn: true })).toBe(
+      "無法繼續登入，請重新選擇帳戶。",
+    );
+    expect(publicViews.telegramLoginSuccessAction(continuation)).toBe(
+      "redirect",
+    );
+    expect(publicViews.telegramLoginSuccessAction({ signedIn: true })).toBe(
+      "reload",
+    );
+    expect(publicViews.telegramLoginSuccessAction({
+      signedIn: true,
+      unexpected: true,
+    })).toBe("invalid");
+    expect(publicViews.telegramLoginSuccessAction({
+      redirect: true,
+      url: "not-a-url",
+    })).toBe("invalid");
+  });
+
+  it("uses the shared client for one redirect and signed-query injection", async () => {
+    const runtimeWindow = globalThis as unknown as {
+      window: {
+        location: {
+          href: string;
+          origin: string;
+          search: string;
+        };
+      };
+    };
+    const location = runtimeWindow.window.location;
+    const originalHref = location.href;
+    const originalSearch = location.search;
+    let href = originalHref;
+    const hrefAssignments = vi.fn((value: string) => {
+      href = value;
+    });
+    Object.defineProperty(location, "href", {
+      configurable: true,
+      get: () => href,
+      set: hrefAssignments,
+    });
+    const signedQuery = new URLSearchParams({
+      ba_iat: String(Date.now()),
+      client_id: "client",
+      exp: String(Math.floor(Date.now() / 1_000) + 60),
+      noise: "not-signed",
+      sig: "signed-value",
+    });
+    for (const name of ["ba_iat", "ba_param", "client_id", "exp"]) {
+      signedQuery.append("ba_param", name);
+    }
+    location.search = `?${signedQuery}`;
+    const requestBodies: Record<string, unknown>[] = [];
+    const isolatedFetch = vi.fn<typeof fetch>().mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const text = input instanceof Request
+          ? await input.clone().text()
+          : typeof init?.body === "string"
+            ? init.body
+            : "{}";
+        requestBodies.push(JSON.parse(text || "{}") as Record<string, unknown>);
+        return Response.json({
+          redirect: true,
+          url: "https://rp.example/callback",
+        });
+      },
+    );
+    const isolatedActions = publicViews.createAccountChooserClientActions(
+      isolatedFetch,
+    );
+
+    try {
+      await isolatedActions.selectRemembered("opaque-choice");
+      expect(hrefAssignments).toHaveBeenCalledOnce();
+      expect(hrefAssignments).toHaveBeenLastCalledWith(
+        "https://rp.example/callback",
+      );
+      const projected = new URLSearchParams(
+        String(requestBodies[0]?.oauth_query ?? ""),
+      );
+      expect(requestBodies[0]?.choiceId).toBe("opaque-choice");
+      expect(projected.get("client_id")).toBe("client");
+      expect(projected.get("noise")).toBeNull();
+      expect(projected.get("sig")).toBe("signed-value");
+
+      hrefAssignments.mockClear();
+      await isolatedActions.continueCurrent();
+      expect(hrefAssignments).toHaveBeenCalledOnce();
+      expect(requestBodies[1]?.selected).toBe(true);
+      expect(requestBodies[1]?.oauth_query).toBe(requestBodies[0]?.oauth_query);
+    } finally {
+      location.search = originalSearch;
+      Object.defineProperty(location, "href", {
+        configurable: true,
+        value: originalHref,
+        writable: true,
+      });
+    }
   });
 
   it("limits About's centralized-management claim to PGID-owned data", () => {

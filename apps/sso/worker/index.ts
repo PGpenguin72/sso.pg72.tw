@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
-import { makeSignature } from "better-auth/crypto";
+import { constantTimeEqual, makeSignature } from "better-auth/crypto";
 
 import { accountRoutes } from "./account";
 import {
@@ -140,6 +140,11 @@ interface AccountChooserSession {
     token: string;
   };
   user: AccountChooserUser;
+}
+
+interface AccountSessionAdoption {
+  adopted: boolean;
+  cleanupCookieNames?: unknown;
 }
 
 interface RegistrationSocialStartInput {
@@ -548,10 +553,63 @@ function safeOAuthRedirect(value: string, requestURL: string): string | null {
   }
 }
 
+function canonicalizeOAuthQuery(params: URLSearchParams): string {
+  const entries = [...params.entries()].sort(([keyA, valueA], [keyB, valueB]) => {
+    if (keyA < keyB) return -1;
+    if (keyA > keyB) return 1;
+    if (valueA < valueB) return -1;
+    if (valueA > valueB) return 1;
+    return 0;
+  });
+  const canonical = new URLSearchParams();
+  for (const [key, value] of entries) canonical.append(key, value);
+  return canonical.toString();
+}
+
+async function isVerifiedProviderOAuthQuery(
+  params: URLSearchParams,
+  secret: string,
+): Promise<boolean> {
+  const signatures = params.getAll("sig");
+  const expiresAt = Number(params.get("exp"));
+  const issuedAt = Number(params.get("ba_iat"));
+  if (
+    signatures.length !== 1 ||
+    !signatures[0] ||
+    !Number.isFinite(expiresAt) ||
+    expiresAt * 1_000 < Date.now() ||
+    !Number.isFinite(issuedAt) ||
+    issuedAt <= 0
+  ) {
+    return false;
+  }
+
+  const unsigned = new URLSearchParams(params);
+  unsigned.delete("sig");
+  const markerNames = params.getAll("ba_param");
+  const expectedMarkerNames = [...new Set(unsigned.keys())].sort();
+  if (
+    markerNames.length !== expectedMarkerNames.length ||
+    markerNames.some((name, index) => name !== expectedMarkerNames[index]) ||
+    !expectedMarkerNames.includes("ba_iat") ||
+    !expectedMarkerNames.includes("ba_param") ||
+    !expectedMarkerNames.includes("exp")
+  ) {
+    return false;
+  }
+
+  const expectedSignature = await makeSignature(
+    canonicalizeOAuthQuery(unsigned),
+    secret,
+  );
+  return constantTimeEqual(signatures[0], expectedSignature);
+}
+
 export async function rewriteDormantAccountSignIn(
   auth: ReturnType<typeof createAuth>,
   request: Request,
   response: Response,
+  oauthQuerySecret: string,
 ): Promise<Response> {
   let target: URL;
   const location = response.headers.get("location");
@@ -599,11 +657,17 @@ export async function rewriteDormantAccountSignIn(
   const targetPrompt = new Set(
     (target.searchParams.get("prompt") ?? "").split(/\s+/).filter(Boolean),
   );
-  const interactiveAccountSelection =
+  const verifiedProviderPrompt =
     exactAuthorizeRequest &&
     target.origin === requestURL.origin &&
-    target.pathname === "/sign-in" &&
-    Boolean(target.searchParams.get("sig")) &&
+    target.pathname === "/sign-in"
+      ? await isVerifiedProviderOAuthQuery(
+          target.searchParams,
+          oauthQuerySecret,
+        )
+      : false;
+  const interactiveAccountSelection =
+    verifiedProviderPrompt &&
     !requestPrompt.has("none") &&
     !requestPrompt.has("login") &&
     !requestPrompt.has("create") &&
@@ -1151,6 +1215,7 @@ app.get("/api/account-chooser", async (c) => {
   const auth = createAuth(c.env, c.executionCtx);
   const current = await auth.api.getSession({ headers: c.req.raw.headers });
   let adoptionHeaders: Headers | null = null;
+  let cleanupHeaders: Headers | null = null;
   if (current?.user.status === "active") {
     const adopted = await auth.api.adoptActiveAccountSession({
       headers: c.req.raw.headers,
@@ -1158,6 +1223,21 @@ app.get("/api/account-chooser", async (c) => {
       returnHeaders: true,
     });
     adoptionHeaders = adopted.headers;
+    const adoption = adopted.response as AccountSessionAdoption;
+    const cookieNames = Array.isArray(adoption.cleanupCookieNames)
+      ? adoption.cleanupCookieNames.filter(
+          (name): name is string => typeof name === "string",
+        )
+      : [];
+    if (cookieNames.length > 0) {
+      const cleanup = await auth.api.expireRememberedAccountCookies({
+        body: { cookieNames },
+        headers: c.req.raw.headers,
+        method: "POST",
+        returnHeaders: true,
+      });
+      cleanupHeaders = cleanup.headers;
+    }
   }
 
   const remembered = (await auth.api.listDeviceSessions({
@@ -1180,7 +1260,12 @@ app.get("/api/account-chooser", async (c) => {
     ),
   );
 
-  return jsonWithSetCookies({ accounts: choices }, 200, adoptionHeaders);
+  return jsonWithSetCookies(
+    { accounts: choices },
+    200,
+    adoptionHeaders,
+    cleanupHeaders,
+  );
 });
 
 app.post("/api/account-chooser/select", async (c) => {
@@ -2005,7 +2090,12 @@ app.all("*", async (c) => {
     let response = await auth.handler(c.req.raw);
 
     if (pathname === "/oauth2/authorize") {
-      response = await rewriteDormantAccountSignIn(auth, c.req.raw, response);
+      response = await rewriteDormantAccountSignIn(
+        auth,
+        c.req.raw,
+        response,
+        c.env.BETTER_AUTH_SECRET,
+      );
     }
 
     if (activityUserId) {

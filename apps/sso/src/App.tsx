@@ -51,7 +51,7 @@ import {
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { authClient } from "./auth-client";
+import { authClient, createPg72AuthClient } from "./auth-client";
 import { PUBLIC_PRODUCT_COPY } from "./public-copy";
 
 interface DeviceSession {
@@ -113,6 +113,39 @@ interface RecoveryPasskeyOptions {
 interface SocialRedirectPayload {
   redirect: boolean;
   url: string;
+}
+
+export function isOAuthContinuation(
+  payload: unknown,
+): payload is SocialRedirectPayload {
+  if (!payload || typeof payload !== "object") return false;
+  const candidate = payload as Partial<SocialRedirectPayload>;
+  return (
+    candidate.redirect === true &&
+    typeof candidate.url === "string" &&
+    safeOAuthRedirect(candidate.url) !== null
+  );
+}
+
+export function telegramLoginSuccessAction(
+  payload: unknown,
+): "redirect" | "reload" | "invalid" {
+  if (isOAuthContinuation(payload)) return "redirect";
+  if (
+    payload &&
+    typeof payload === "object" &&
+    Object.keys(payload).length === 1 &&
+    (payload as { signedIn?: unknown }).signedIn === true
+  ) {
+    return "reload";
+  }
+  return "invalid";
+}
+
+export function accountChoiceContinuationError(payload: unknown): string | null {
+  return isOAuthContinuation(payload)
+    ? null
+    : "無法繼續登入，請重新選擇帳戶。";
 }
 
 interface TurnstileApi {
@@ -834,15 +867,17 @@ function TelegramLogin({
     ) => {
       setError(null);
       try {
-        const res = await fetch("/api/auth/telegram", {
+        const result = await authClient.$fetch<
+          SocialRedirectPayload & { signedIn?: boolean }
+        >("/api/auth/telegram", {
           method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(user),
+          body: user,
         });
-        if (res.ok) {
-          window.location.reload();
-        } else {
+        const action = telegramLoginSuccessAction(result.data);
+        if (result.error || action === "invalid") {
           setError("Telegram 登入失敗，請稍後再試。");
+        } else if (action === "reload") {
+          window.location.reload();
         }
       } catch {
         setError("Telegram 登入失敗，請稍後再試。");
@@ -1228,6 +1263,27 @@ export async function requestAccountChoiceContinuation<T>(
     : actions.selectRemembered(account.choiceId);
 }
 
+export function createAccountChooserClientActions(
+  customFetchImpl?: typeof fetch,
+) {
+  const client = customFetchImpl
+    ? createPg72AuthClient({
+        baseURL: window.location.origin,
+        customFetchImpl,
+      })
+    : authClient;
+  return {
+    continueCurrent: () => client.oauth2.continue({ selected: true }),
+    selectRemembered: (choiceId: string) =>
+      client.$fetch<SocialRedirectPayload>("/api/account-chooser/select", {
+        method: "POST",
+        body: { choiceId },
+      }),
+  };
+}
+
+export const accountChooserClientActions = createAccountChooserClientActions();
+
 function isAccountChoice(value: unknown): value is AccountChoice {
   if (!value || typeof value !== "object") return false;
   const account = value as Partial<AccountChoice>;
@@ -1269,33 +1325,13 @@ export function AccountChooserView() {
     void loadAccounts();
   }, [loadAccounts]);
 
-  const followContinuation = (payload: Partial<SocialRedirectPayload> | null) => {
-    const target =
-      payload?.redirect === true && typeof payload.url === "string"
-        ? safeOAuthRedirect(payload.url)
-        : null;
-    if (!target) {
-      setError("無法繼續登入，請重新選擇帳戶。");
-      setBusyChoice(null);
-      return;
-    }
-    window.location.replace(target);
-  };
-
   const chooseAccount = async (account: AccountChoice) => {
     setBusyChoice(account.choiceId);
     setError(null);
-    const result = await requestAccountChoiceContinuation(account, {
-      continueCurrent: () => authClient.oauth2.continue({ selected: true }),
-      selectRemembered: (choiceId) =>
-        authClient.$fetch<SocialRedirectPayload>(
-          "/api/account-chooser/select",
-          {
-            method: "POST",
-            body: { choiceId },
-          },
-        ),
-    });
+    const result = await requestAccountChoiceContinuation(
+      account,
+      accountChooserClientActions,
+    );
     if (result.error) {
       if (!account.active) {
         await loadAccounts();
@@ -1308,7 +1344,11 @@ export function AccountChooserView() {
       setBusyChoice(null);
       return;
     }
-    followContinuation(result.data as Partial<SocialRedirectPayload> | null);
+    const continuationError = accountChoiceContinuationError(result.data);
+    if (continuationError) {
+      setError(continuationError);
+      setBusyChoice(null);
+    }
   };
 
   if (addingAccount) {

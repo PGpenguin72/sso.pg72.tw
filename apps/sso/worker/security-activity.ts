@@ -78,6 +78,7 @@ export function providerFromAuthContext(
   context: AuthHookContext | undefined,
 ): string | null {
   const path = typeof context?.path === "string" ? context.path : "";
+  if (path === "/complete-telegram-account-sign-in") return "telegram";
   if (path.startsWith("/callback/") || path.startsWith("/oauth2/callback/")) {
     return context?.params?.id ?? path.split("/").pop() ?? null;
   }

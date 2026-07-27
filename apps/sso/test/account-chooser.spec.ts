@@ -516,6 +516,12 @@ describe("PGID account chooser", () => {
     expect(new Set(relisted.accounts.map((account) => account.email))).toEqual(
       new Set([currentEmail, ...live.map((account) => account.email)]),
     );
+    expect(relisted.accounts.filter((account) => account.active)).toEqual([
+      expect.objectContaining({ email: live[0]?.email }),
+    ]);
+    expect(
+      relisted.accounts.find((account) => account.email === currentEmail)?.active,
+    ).toBe(false);
     expect(relisted.accounts.some((account) => account.email === expiredEmail)).toBe(
       false,
     );

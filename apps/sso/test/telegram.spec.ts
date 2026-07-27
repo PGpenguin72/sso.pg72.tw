@@ -187,6 +187,7 @@ async function insertOAuthClient(
 async function telegramAuthorizationQuery(
   clientId: string,
   redirectUri: string,
+  prompt?: string,
 ): Promise<string> {
   const query = new URLSearchParams({
     client_id: clientId,
@@ -198,6 +199,7 @@ async function telegramAuthorizationQuery(
     scope: "openid profile email",
     state: "B".repeat(43),
   });
+  if (prompt) query.set("prompt", prompt);
   const response = await exports.default.fetch(
     new Request(`${BASE_URL}/oauth2/authorize?${query}`, {
       redirect: "manual",
@@ -288,6 +290,57 @@ describe("telegram login endpoint", () => {
     expect(response.headers.getSetCookie().some((cookie) =>
       cookie.startsWith("pg72_id.session_token="),
     )).toBe(true);
+    const logins = await env.PG72_ID_DB.prepare(
+      `SELECT metadata_json FROM audit_event
+        WHERE subject_id = ? AND event_type = 'user.login_succeeded'`,
+    )
+      .bind(userId)
+      .all<{ metadata_json: string }>();
+    expect(logins.results).toHaveLength(1);
+    expect(logins.results[0]?.metadata_json).toContain('"provider":"telegram"');
+  });
+
+  it("completes prompt select_account once after Telegram login", async () => {
+    const telegramId = randomTelegramId();
+    const userId = await seedTelegramAccount(telegramId);
+    const clientId = `telegram-selection-${crypto.randomUUID()}`;
+    const redirectUri = "https://telegram-selection.example/callback";
+    await insertOAuthClient(clientId, redirectUri);
+    const oauthQuery = await telegramAuthorizationQuery(
+      clientId,
+      redirectUri,
+      "select_account",
+    );
+
+    const response = await exports.default.fetch(
+      new Request(`${BASE_URL}/api/auth/telegram`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: BASE_URL },
+        body: JSON.stringify({
+          ...await telegramPayload({ id: telegramId }),
+          oauth_query: oauthQuery,
+        }),
+      }),
+    );
+
+    expect(response.status, await response.clone().text()).toBe(200);
+    const continuation = (await response.json()) as {
+      redirect?: boolean;
+      url?: string;
+    };
+    expect(continuation.redirect).toBe(true);
+    const continuationTarget = new URL(continuation.url ?? "", BASE_URL);
+    expect(continuationTarget.pathname).toBe("/consent");
+    expect(continuationTarget.pathname).not.toBe("/select-account");
+    expect(response.headers.getSetCookie().filter((cookie) =>
+      cookie.startsWith("pg72_id.session_token="),
+    )).toHaveLength(1);
+    const sessions = await env.PG72_ID_DB.prepare(
+      "SELECT COUNT(*) AS count FROM session WHERE userId = ?",
+    )
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(sessions?.count).toBe(1);
     const logins = await env.PG72_ID_DB.prepare(
       `SELECT metadata_json FROM audit_event
         WHERE subject_id = ? AND event_type = 'user.login_succeeded'`,

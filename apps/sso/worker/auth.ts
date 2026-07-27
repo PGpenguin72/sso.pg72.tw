@@ -70,6 +70,9 @@ const accountChooserSessionPlugin = {
         const cookies = parseCookies(cookieHeader);
         const multiSessionPrefix =
           `${ctx.context.authCookies.sessionToken.name}_multi-`;
+        const currentCookieName =
+          `${multiSessionPrefix}${session.session.token.toLowerCase()}`;
+        const now = new Date();
         const cleanupCookieNames: string[] = [];
         const staleCookieNames = new Set<string>();
         for (const [cookieName] of [...cookies.entries()]
@@ -81,13 +84,22 @@ const accountChooserSessionPlugin = {
           );
           if (typeof token !== "string") {
             staleCookieNames.add(cookieName);
-            cleanupCookieNames.push(cookieName);
+            if (cookieName !== currentCookieName) {
+              cleanupCookieNames.push(cookieName);
+            }
             continue;
           }
           const remembered = await ctx.context.internalAdapter.findSession(token);
-          if (!remembered) {
+          if (
+            !remembered ||
+            remembered.session.expiresAt <= now ||
+            (remembered.user as typeof remembered.user & { status?: unknown })
+              .status !== "active"
+          ) {
             staleCookieNames.add(cookieName);
-            cleanupCookieNames.push(cookieName);
+            if (cookieName !== currentCookieName) {
+              cleanupCookieNames.push(cookieName);
+            }
           } else if (
             remembered.user.id === session.user.id &&
             token !== session.session.token

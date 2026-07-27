@@ -413,6 +413,155 @@ describe("PGID account chooser", () => {
     }
   });
 
+  it("expires unusable remembered sessions before adopting the current session", async () => {
+    const currentEmail = `${crypto.randomUUID()}@example.com`;
+    const current = await createAuthenticatedUser(currentEmail);
+    const currentPrimary = requestCookiePairs(current.headers).filter(
+      (cookie) => !cookie.includes("_multi-"),
+    );
+    const live: Array<{
+      cookie: string;
+      email: string;
+      token: string;
+    }> = [];
+    for (let index = 0; index < 4; index += 1) {
+      const email = `${crypto.randomUUID()}@example.com`;
+      const account = await createAuthenticatedUser(email);
+      const listed = await listAccounts(account.headers);
+      const remembered = multiCookies(listed.response.headers);
+      expect(remembered).toHaveLength(1);
+      live.push({ cookie: remembered[0] ?? "", email, token: account.token });
+    }
+    const expiredEmail = `${crypto.randomUUID()}@example.com`;
+    const expired = await createAuthenticatedUser(expiredEmail);
+    const expiredList = await listAccounts(expired.headers);
+    const expiredCookie = multiCookies(expiredList.response.headers)[0] ?? "";
+    const inactiveEmail = `${crypto.randomUUID()}@example.com`;
+    const inactive = await createAuthenticatedUser(inactiveEmail);
+    const inactiveList = await listAccounts(inactive.headers);
+    const inactiveCookie = multiCookies(inactiveList.response.headers)[0] ?? "";
+    await env.PG72_ID_DB.batch([
+      env.PG72_ID_DB.prepare(
+        "UPDATE session SET expiresAt = ? WHERE id = ?",
+      ).bind(new Date(0).toISOString(), expired.sessionId),
+      env.PG72_ID_DB.prepare(
+        "UPDATE user SET status = 'suspended' WHERE id = ?",
+      ).bind(inactive.userId),
+    ]);
+    // Six aux cookies exercise the full cleanup scan bound.
+    const browserHeaders = withCookies(current.headers, [
+      ...currentPrimary,
+      ...live.map((account) => account.cookie),
+      expiredCookie,
+      inactiveCookie,
+    ]);
+
+    const adopted = await listAccounts(browserHeaders);
+    expect(adopted.response.status).toBe(200);
+    expect(adopted.accounts).toHaveLength(5);
+    expect(new Set(adopted.accounts.map((account) => account.email))).toEqual(
+      new Set([currentEmail, ...live.map((account) => account.email)]),
+    );
+    const setCookies = adopted.response.headers.getSetCookie();
+    for (const stale of [expired, inactive]) {
+      expect(setCookies.some((cookie) =>
+        cookie.includes(`_multi-${stale.token.toLowerCase()}=`) &&
+        /Max-Age=0/i.test(cookie),
+      )).toBe(true);
+    }
+    for (const account of live) {
+      expect(setCookies.some((cookie) =>
+        cookie.includes(`_multi-${account.token.toLowerCase()}=`) &&
+        /Max-Age=0/i.test(cookie),
+      )).toBe(false);
+    }
+    const currentCookies = setCookies.filter((cookie) =>
+      cookie.includes(`_multi-${current.token.toLowerCase()}=`),
+    );
+    expect(
+      currentCookies.filter((cookie) => !/Max-Age=0/i.test(cookie)),
+    ).toHaveLength(1);
+    expect(currentCookies.some((cookie) => /Max-Age=0/i.test(cookie))).toBe(
+      false,
+    );
+
+    const reapplied = withResponseCookies(browserHeaders, adopted.response.headers);
+    const clientId = `chooser-cleanup-${crypto.randomUUID()}`;
+    const redirectUri = "https://chooser-cleanup.example/callback";
+    await insertClient(clientId, redirectUri);
+    const start = await authorize(clientId, redirectUri, reapplied);
+    const chooserLocation = new URL(
+      start.headers.get("location") ?? "",
+      BASE_URL,
+    );
+    expect(chooserLocation.pathname).toBe("/select-account");
+    const peerChoice = adopted.accounts.find(
+      (account) => account.email === live[0]?.email,
+    );
+    const selectionHeaders = new Headers(reapplied);
+    selectionHeaders.set("Content-Type", "application/json");
+    const selected = await exports.default.fetch(
+      new Request(`${BASE_URL}/api/account-chooser/select`, {
+        method: "POST",
+        headers: selectionHeaders,
+        body: JSON.stringify({
+          choiceId: peerChoice?.choiceId,
+          oauth_query: chooserLocation.search.slice(1),
+        }),
+      }),
+    );
+    expect(selected.status).toBe(200);
+    const afterSelection = withResponseCookies(reapplied, selected.headers);
+    const relisted = await listAccounts(afterSelection);
+    expect(new Set(relisted.accounts.map((account) => account.email))).toEqual(
+      new Set([currentEmail, ...live.map((account) => account.email)]),
+    );
+    expect(relisted.accounts.some((account) => account.email === expiredEmail)).toBe(
+      false,
+    );
+    expect(relisted.accounts.some((account) => account.email === inactiveEmail)).toBe(
+      false,
+    );
+  });
+
+  it("replaces a corrupt current remembered cookie without expiring its replacement", async () => {
+    const email = `${crypto.randomUUID()}@example.com`;
+    const current = await createAuthenticatedUser(email);
+    const currentPrimary = requestCookiePairs(current.headers).filter(
+      (cookie) => !cookie.includes("_multi-"),
+    );
+    const currentCookieName =
+      `pg72_id.session_token_multi-${current.token.toLowerCase()}`;
+    const browserHeaders = withCookies(current.headers, [
+      ...currentPrimary,
+      `${currentCookieName}=${current.token}.invalid`,
+    ]);
+
+    const adopted = await listAccounts(browserHeaders);
+    expect(adopted.accounts).toEqual([
+      expect.objectContaining({ active: true, email }),
+    ]);
+    const replacements = adopted.response.headers
+      .getSetCookie()
+      .filter((cookie) => cookie.startsWith(`${currentCookieName}=`));
+    expect(
+      replacements.filter((cookie) => !/Max-Age=0/i.test(cookie)),
+    ).toHaveLength(1);
+    expect(replacements.some((cookie) => /Max-Age=0/i.test(cookie))).toBe(false);
+
+    const reapplied = withResponseCookies(browserHeaders, adopted.response.headers);
+    const replacement = requestCookiePairs(reapplied).find((cookie) =>
+      cookie.startsWith(`${currentCookieName}=`),
+    );
+    expect(decodeURIComponent(replacement?.split("=", 2)[1] ?? "")).toBe(
+      await signedSessionCookie(current.token),
+    );
+    const relisted = await listAccounts(reapplied);
+    expect(relisted.accounts).toEqual([
+      expect.objectContaining({ active: true, email }),
+    ]);
+  });
+
   it("projects standard-base64 HMAC output to an accepted base64url choice", async () => {
     const email = `${crypto.randomUUID()}@example.com`;
     const current = await createAuthenticatedUser(email);
@@ -506,6 +655,43 @@ describe("PGID account chooser", () => {
     );
     expect(new URL(forceLogin.headers.get("location") ?? "", BASE_URL).pathname).toBe(
       "/sign-in",
+    );
+
+    const emptySelection = await authorize(
+      clientId,
+      redirectUri,
+      new Headers(),
+      "select_account",
+    );
+    const emptySelectionTarget = new URL(
+      emptySelection.headers.get("location") ?? "",
+      BASE_URL,
+    );
+    expect(emptySelectionTarget.pathname).toBe("/sign-in");
+    expect(emptySelectionTarget.searchParams.get("prompt")).toBe(
+      "select_account",
+    );
+    expect(emptySelectionTarget.searchParams.get("state")).toBe("B".repeat(43));
+
+    const oneRememberedHeaders = withCookies(remembered.browserHeaders, [
+      ...remembered.firstRemembered,
+    ]);
+    const rememberedSelection = await authorize(
+      clientId,
+      redirectUri,
+      oneRememberedHeaders,
+      "select_account",
+    );
+    const rememberedSelectionTarget = new URL(
+      rememberedSelection.headers.get("location") ?? "",
+      BASE_URL,
+    );
+    expect(rememberedSelectionTarget.pathname).toBe("/select-account");
+    expect(rememberedSelectionTarget.searchParams.get("prompt")).toBe(
+      "select_account",
+    );
+    expect(rememberedSelectionTarget.searchParams.get("state")).toBe(
+      "B".repeat(43),
     );
 
     const silent = await authorize(

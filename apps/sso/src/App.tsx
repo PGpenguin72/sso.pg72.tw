@@ -467,11 +467,11 @@ interface TelegramConfig {
 }
 
 /**
- * Telegram Login Widget button. Telegram authenticates via its own widget, which
- * posts a signed payload; we forward it to the Worker's `/api/auth/telegram`
- * endpoint (which verifies the HMAC server-side). The bot username comes from
- * the public config endpoint, fetched once by the parent so the whole social
- * section can be hidden when Telegram is not configured.
+ * Telegram Login Widget button. Telegram authenticates via its own official
+ * embed, which posts a signed payload; we forward it to the Worker's
+ * `/api/auth/telegram` endpoint (which verifies the HMAC server-side). Using
+ * the embed directly avoids the widget script's currentScript race when the
+ * script is injected after React has mounted.
  */
 function TelegramLogin({
   config,
@@ -490,40 +490,46 @@ function TelegramLogin({
   useEffect(() => {
     if (!config.enabled || !config.botUsername || !containerRef.current) return;
     const container = containerRef.current;
-    // Telegram invokes this global with the signed auth payload.
-    const cbName = "onTelegramAuth";
-    (window as unknown as Record<string, unknown>)[cbName] = async (
-      user: Record<string, unknown>,
-    ) => {
-      setError(null);
+    const iframe = document.createElement("iframe");
+    const widgetOrigin = "https://oauth.telegram.org";
+    const widgetUrl = `${widgetOrigin}/embed/${encodeURIComponent(config.botUsername)}?origin=${encodeURIComponent(window.location.origin)}&return_to=${encodeURIComponent(window.location.href)}&size=large&radius=8`;
+    iframe.src = widgetUrl;
+    iframe.title = "使用 Telegram 登入";
+    iframe.setAttribute("frameborder", "0");
+    iframe.setAttribute("scrolling", "no");
+    iframe.style.width = "238px";
+    iframe.style.height = "48px";
+    iframe.style.border = "0";
+    container.appendChild(iframe);
+
+    const handleMessage = (event: MessageEvent) => {
+      if (event.origin !== widgetOrigin || event.source !== iframe.contentWindow) {
+        return;
+      }
+      let data: { event?: string; auth_data?: Record<string, unknown> };
       try {
-        const res = await fetch(endpoint, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(user),
-        });
-        if (res.ok) {
+        data = typeof event.data === "string" ? JSON.parse(event.data) : event.data;
+      } catch {
+        return;
+      }
+      if (data?.event !== "auth_user" || !data.auth_data) return;
+      setError(null);
+      void fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(data.auth_data),
+      })
+        .then((res) => {
+          if (!res.ok) throw new Error("telegram_login_failed");
           if (onSuccess) onSuccess();
           else window.location.reload();
-        } else {
-          setError("Telegram 登入失敗，請稍後再試。");
-        }
-      } catch {
-        setError("Telegram 登入失敗，請稍後再試。");
-      }
+        })
+        .catch(() => setError("Telegram 登入失敗，請稍後再試。"));
     };
-    const script = document.createElement("script");
-    script.src = "https://telegram.org/js/telegram-widget.js?22";
-    script.async = true;
-    script.setAttribute("data-telegram-login", config.botUsername);
-    script.setAttribute("data-size", "large");
-    script.setAttribute("data-radius", "8");
-    script.setAttribute("data-onauth", `${cbName}(user)`);
-    // Sign-in needs identity only — do not request write (message-sending) access.
-    container.appendChild(script);
+    window.addEventListener("message", handleMessage);
     return () => {
+      window.removeEventListener("message", handleMessage);
       container.replaceChildren();
-      delete (window as unknown as Record<string, unknown>)[cbName];
     };
   }, [config, endpoint, onSuccess]);
 

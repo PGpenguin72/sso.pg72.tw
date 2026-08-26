@@ -168,7 +168,10 @@ export function createAuth(
         enabled: true,
         disableImplicitLinking: true,
         trustedProviders: [],
-        allowDifferentEmails: false,
+        // Explicit linking is initiated from an authenticated PGID session;
+        // the provider identity belongs to that session's user even when its
+        // email differs. Implicit linking remains disabled above.
+        allowDifferentEmails: true,
         allowUnlinkingAll: false,
       },
     },

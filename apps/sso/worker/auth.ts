@@ -29,6 +29,16 @@ export function createAuth(
   database: AuthDatabase = env.PG72_ID_DB,
 ) {
   const config = readRuntimeConfig(env);
+  const trustedSocialProviders = [
+    "google",
+    ...(env.DISCORD_CLIENT_ID && env.DISCORD_CLIENT_SECRET
+      ? ["discord"]
+      : []),
+    ...(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET ? ["github"] : []),
+    ...(env.FACEBOOK_CLIENT_ID && env.FACEBOOK_CLIENT_SECRET
+      ? ["facebook"]
+      : []),
+  ];
 
   return betterAuth({
     appName: "PGID",
@@ -167,7 +177,7 @@ export function createAuth(
       accountLinking: {
         enabled: true,
         disableImplicitLinking: true,
-        trustedProviders: [],
+        trustedProviders: trustedSocialProviders,
         // Explicit linking is initiated from an authenticated PGID session;
         // the provider identity belongs to that session's user even when its
         // email differs. Implicit linking remains disabled above.

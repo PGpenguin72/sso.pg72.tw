@@ -75,6 +75,24 @@ type AvatarMode = "google" | "identicon" | "upload";
  */
 export const LINKABLE_PROVIDERS: readonly string[] = ["google"];
 
+/** Providers that can be explicitly linked from an authenticated account. */
+export function linkableProviders(env: Env): string[] {
+  const providers = [...LINKABLE_PROVIDERS];
+  if (env.DISCORD_CLIENT_ID && env.DISCORD_CLIENT_SECRET) {
+    providers.push("discord");
+  }
+  if (env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET) {
+    providers.push("github");
+  }
+  if (env.FACEBOOK_CLIENT_ID && env.FACEBOOK_CLIENT_SECRET) {
+    providers.push("facebook");
+  }
+  if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_BOT_USERNAME) {
+    providers.push("telegram");
+  }
+  return providers;
+}
+
 export function normalizeDisplayName(value: unknown): string | null {
   if (typeof value !== "string" || value.length > DISPLAY_NAME_MAX_INPUT_LENGTH) {
     return null;
@@ -432,7 +450,7 @@ accountRoutes.get("/api/account/login-methods", async (c) => {
       canUnlink: totalMethods > 1,
     })),
     passkeyCount: counts.passkeys,
-    linkable: LINKABLE_PROVIDERS.filter(
+    linkable: linkableProviders(c.env).filter(
       (provider) => !linkedProviders.has(provider),
     ),
   });

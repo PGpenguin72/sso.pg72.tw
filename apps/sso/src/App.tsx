@@ -241,6 +241,10 @@ interface LoginMethodsResponse {
  */
 const LINKABLE_PROVIDER_DETAILS = {
   google: { label: "Google" },
+  discord: { label: "Discord" },
+  github: { label: "GitHub" },
+  facebook: { label: "Facebook" },
+  telegram: { label: "Telegram" },
 } as const;
 
 type LinkableProviderId = keyof typeof LINKABLE_PROVIDER_DETAILS;
@@ -472,9 +476,13 @@ interface TelegramConfig {
 function TelegramLogin({
   config,
   disabled,
+  endpoint = "/api/auth/telegram",
+  onSuccess,
 }: {
   config: TelegramConfig;
   disabled: boolean;
+  endpoint?: string;
+  onSuccess?: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -489,13 +497,14 @@ function TelegramLogin({
     ) => {
       setError(null);
       try {
-        const res = await fetch("/api/auth/telegram", {
+        const res = await fetch(endpoint, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(user),
         });
         if (res.ok) {
-          window.location.reload();
+          if (onSuccess) onSuccess();
+          else window.location.reload();
         } else {
           setError("Telegram 登入失敗，請稍後再試。");
         }
@@ -516,7 +525,7 @@ function TelegramLogin({
       container.replaceChildren();
       delete (window as unknown as Record<string, unknown>)[cbName];
     };
-  }, [config]);
+  }, [config, endpoint, onSuccess]);
 
   // The parent only mounts this when Telegram is configured; render nothing
   // otherwise so a stray disabled button never appears.
@@ -2070,6 +2079,9 @@ export function App() {
   const [loginMethods, setLoginMethods] = useState<LoginMethodsResponse | null>(null);
   const [loginMethodsState, setLoginMethodsState] = useState<LoadState>("loading");
   const [loginMethodsError, setLoginMethodsError] = useState<string | null>(null);
+  const [telegramConfig, setTelegramConfig] = useState<TelegramConfig | null>(
+    null,
+  );
   const [unlinkPendingId, setUnlinkPendingId] = useState<string | null>(null);
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<PlatformRole>("user");
@@ -2116,6 +2128,36 @@ export function App() {
   }, []);
 
   const session = sessionQuery.data;
+
+  useEffect(() => {
+    if (!session) {
+      setTelegramConfig(null);
+      return;
+    }
+    let cancelled = false;
+    fetch("/api/auth/telegram/config", {
+      headers: { accept: "application/json" },
+    })
+      .then((response) =>
+        response.ok
+          ? response.json()
+          : { enabled: false, botUsername: null },
+      )
+      .then((config: TelegramConfig) => {
+        if (!cancelled) {
+          setTelegramConfig({
+            enabled: config.enabled === true,
+            botUsername: config.botUsername ?? null,
+          });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setTelegramConfig({ enabled: false, botUsername: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.user.id]);
 
   const loadSessions = useCallback(async () => {
     setSessionsState("loading");
@@ -4650,17 +4692,29 @@ export function App() {
                             <strong>{providerLabel(provider)}</strong>
                             <span>尚未連結</span>
                           </div>
-                          <button
-                            type="button"
-                            className="button button-primary button-compact"
-                            disabled={busy === `link:${provider}`}
-                            onClick={() => void linkLoginMethod(provider)}
-                          >
-                            <LogIn aria-hidden="true" />
-                            {busy === `link:${provider}`
-                              ? "前往連結..."
-                              : `連結 ${providerLabel(provider)}`}
-                          </button>
+                          {provider === "telegram" && telegramConfig?.enabled ? (
+                            <TelegramLogin
+                              config={telegramConfig}
+                              disabled={busy !== null}
+                              endpoint="/api/auth/telegram/link"
+                              onSuccess={() => {
+                                setNotice("Telegram 已連結。");
+                                void loadLoginMethods();
+                              }}
+                            />
+                          ) : (
+                            <button
+                              type="button"
+                              className="button button-primary button-compact"
+                              disabled={busy === `link:${provider}`}
+                              onClick={() => void linkLoginMethod(provider)}
+                            >
+                              <LogIn aria-hidden="true" />
+                              {busy === `link:${provider}`
+                                ? "前往連結..."
+                                : `連結 ${providerLabel(provider)}`}
+                            </button>
+                          )}
                         </div>
                       ))
                   : null}

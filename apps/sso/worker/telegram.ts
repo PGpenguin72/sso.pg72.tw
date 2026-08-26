@@ -25,12 +25,9 @@ type AppEnv = { Bindings: Env };
  * numeric user id is the immutable identity (mapped to provider `telegram`,
  * accountId = telegram id); the display name is derived from the profile.
  *
- * Design decision — no email: Telegram never provides an email, so it cannot
- * satisfy PGID's verified-email enrollment boundary. A Telegram identity may
- * sign in only after it has been explicitly linked from an authenticated PGID
- * session. An unmatched identity is rate-limited, audited without PII, and
- * rejected in both invite and public registration modes; no placeholder account
- * is created.
+ * Design decision — no email: Telegram never provides an email, so a new
+ * Telegram identity starts as a restricted pending PGID. It must explicitly
+ * link a trusted verified-email provider before the account becomes active.
  */
 
 const TELEGRAM_PROVIDER_ID = "telegram";
@@ -39,6 +36,7 @@ const TELEGRAM_AUTH_MAX_AGE_SECONDS = 300;
 /** Small allowance for clock skew when the payload is "from the future". */
 const TELEGRAM_AUTH_FUTURE_SKEW_SECONDS = 60;
 const SESSION_LIFETIME_MS = 60 * 60 * 24 * 30 * 1000;
+const TELEGRAM_PENDING_EMAIL_DOMAIN = "pending.pgid.invalid";
 
 export interface TelegramUser {
   id: string;
@@ -46,6 +44,18 @@ export interface TelegramUser {
   lastName: string | null;
   username: string | null;
   photoUrl: string | null;
+}
+
+function pendingTelegramEmail(telegramId: string): string {
+  return `telegram-${telegramId}@${TELEGRAM_PENDING_EMAIL_DOMAIN}`;
+}
+
+function telegramDisplayName(user: TelegramUser): string {
+  const name = [user.firstName, user.lastName]
+    .filter((part): part is string => Boolean(part?.trim()))
+    .join(" ")
+    .trim();
+  return name || user.username || "Telegram user";
 }
 
 export type TelegramVerification =
@@ -282,10 +292,9 @@ async function verifiedTelegramUser(
 }
 
 /**
- * Login / sign-up via the Telegram Login Widget. No session is required: an
- * existing Telegram-linked account signs in. Telegram does not provide a
- * verified email, so an unmatched identity cannot create a PGID account in
- * either registration mode.
+ * Login / sign-up via the Telegram Login Widget. An unmatched identity gets a
+ * pending PGID account with no usable email until a verified-email provider is
+ * explicitly linked from the authenticated pending session.
  */
 telegramRoutes.post("/api/auth/telegram", async (c) => {
   const verified = await verifiedTelegramUser(c);
@@ -304,7 +313,7 @@ telegramRoutes.post("/api/auth/telegram", async (c) => {
     )
       .bind(existing.userId)
       .first<{ id: string; status: string }>();
-    if (!user || user.status !== "active") {
+    if (!user || (user.status !== "active" && user.status !== "pending_telegram")) {
       return c.json({ error: "account_unavailable" }, 403);
     }
     const cookies = await mintSessionCookies(
@@ -319,12 +328,18 @@ telegramRoutes.post("/api/auth/telegram", async (c) => {
       { path: "/callback/telegram", request: { headers: c.req.raw.headers } },
       c.executionCtx,
     );
-    return telegramCookieResponse({ signedIn: true }, 200, cookies);
+    return telegramCookieResponse(
+      user.status === "pending_telegram"
+        ? { signedIn: true, pendingBinding: true }
+        : { signedIn: true },
+      200,
+      cookies,
+    );
   }
 
-  // Unmatched Telegram identities cannot satisfy the verified-email enrollment
-  // boundary. Consume the dedicated registration budget before writing the
-  // denial audit so this unauthenticated path cannot amplify D1 writes.
+  // A Telegram-only account is intentionally restricted until a verified
+  // email provider is linked. Consume the dedicated registration budget before
+  // writing the account so this unauthenticated path cannot amplify D1 writes.
   const registrationLimit = await c.env.REGISTRATION_RATE_LIMITER.limit({
     key: c.req.header("cf-connecting-ip") ?? "local",
   });
@@ -337,19 +352,49 @@ telegramRoutes.post("/api/auth/telegram", async (c) => {
     return c.json({ error: "rate_limited" }, 429);
   }
 
+  const userId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const pendingEmail = pendingTelegramEmail(verified.id);
+  try {
+    await c.env.PG72_ID_DB.batch([
+      c.env.PG72_ID_DB.prepare(
+        `INSERT INTO user
+          (id, name, email, emailVerified, image, createdAt, updatedAt, role, status)
+         VALUES (?, ?, ?, 0, ?, ?, ?, 'user', 'pending_telegram')`,
+      ).bind(
+        userId,
+        telegramDisplayName(verified),
+        pendingEmail,
+        verified.photoUrl,
+        now,
+        now,
+      ),
+      c.env.PG72_ID_DB.prepare(
+        `INSERT INTO account
+          (id, accountId, providerId, userId, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).bind(crypto.randomUUID(), verified.id, TELEGRAM_PROVIDER_ID, userId, now, now),
+    ]);
+  } catch {
+    return c.json({ error: "telegram_registration_unavailable" }, 503);
+  }
+
+  const cookies = await mintSessionCookies(c.env, config, userId, c.req.raw.headers);
   await recordAudit(
     c.env,
     {
-      eventType: "registration.denied",
-      outcome: "denied",
-      metadata: {
-        provider: TELEGRAM_PROVIDER_ID,
-        reason: "verified_email_required",
-      },
+      eventType: "account.telegram_pending_created",
+      outcome: "success",
+      subjectId: userId,
+      metadata: { provider: TELEGRAM_PROVIDER_ID },
     },
     c.executionCtx,
   );
-  return c.json({ error: "registration_closed" }, 403);
+  return telegramCookieResponse(
+    { signedIn: true, pendingBinding: true },
+    200,
+    cookies,
+  );
 });
 
 /**
@@ -409,4 +454,58 @@ telegramRoutes.post("/api/auth/telegram/link", async (c) => {
   );
 
   return c.json({ linked: true, provider: TELEGRAM_PROVIDER_ID });
+});
+
+/**
+ * Activates a Telegram-created pending account after Better Auth has linked a
+ * verified-email social provider to the same user. This endpoint is limited
+ * to the pending session and never chooses a user by email.
+ */
+telegramRoutes.post("/api/auth/telegram/complete", async (c) => {
+  const auth = createAuth(c.env, c.executionCtx);
+  const session = await auth.api.getSession({ headers: c.req.raw.headers });
+  if (!session || session.user.status !== "pending_telegram") {
+    return c.json({ error: "not_pending_telegram" }, 409);
+  }
+
+  const user = await c.env.PG72_ID_DB.prepare(
+    `SELECT email, emailVerified, status
+       FROM user
+      WHERE id = ?
+      LIMIT 1`,
+  )
+    .bind(session.user.id)
+    .first<{ email: string; emailVerified: number; status: string }>();
+  const linkedProvider = await c.env.PG72_ID_DB.prepare(
+    `SELECT 1 AS linked
+       FROM account
+      WHERE userId = ? AND providerId <> ?
+      LIMIT 1`,
+  )
+    .bind(session.user.id, TELEGRAM_PROVIDER_ID)
+    .first<{ linked: number }>();
+
+  if (!user || user.status !== "pending_telegram" || !linkedProvider) {
+    return c.json({ error: "provider_binding_required" }, 409);
+  }
+  if (!user.emailVerified || user.email.endsWith(`@${TELEGRAM_PENDING_EMAIL_DOMAIN}`)) {
+    return c.json({ error: "verified_email_required" }, 409);
+  }
+
+  await c.env.PG72_ID_DB.prepare(
+    "UPDATE user SET status = 'active', updatedAt = ? WHERE id = ? AND status = 'pending_telegram'",
+  )
+    .bind(new Date().toISOString(), session.user.id)
+    .run();
+  await recordAudit(
+    c.env,
+    {
+      eventType: "account.telegram_pending_completed",
+      outcome: "success",
+      subjectId: session.user.id,
+      metadata: { provider: "verified_email_social" },
+    },
+    c.executionCtx,
+  );
+  return c.json({ completed: true });
 });

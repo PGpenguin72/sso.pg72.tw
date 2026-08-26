@@ -110,7 +110,7 @@ interface AdminUserView {
   name: string;
   email: string;
   role: PlatformRole;
-  status: "active" | "suspended";
+  status: "active" | "suspended" | "pending_telegram";
   createdAt: string;
   lastSessionAt: string | null;
   passkeyCount: number;
@@ -687,6 +687,93 @@ export function SignInView({ pending }: { pending: boolean }) {
           <span aria-hidden="true"> · </span>
           <a href="/about">了解 PGID</a>
         </p>
+      </main>
+    </>
+  );
+}
+
+function PendingTelegramView() {
+  const [enabledSocial, setEnabledSocial] = useState<string[]>(["google"]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/auth/telegram/complete", {
+      method: "POST",
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    })
+      .then(async (response) => {
+        if (response.ok) {
+          window.location.reload();
+          return;
+        }
+        if (response.status !== 409) throw new Error("complete_failed");
+        const configResponse = await fetch("/api/auth/social-config", {
+          headers: { accept: "application/json" },
+        });
+        const config = configResponse.ok
+          ? ((await configResponse.json()) as { enabled?: string[] })
+          : {};
+        if (!cancelled) {
+          setEnabledSocial(
+            ["google", ...(Array.isArray(config.enabled) ? config.enabled : [])]
+              .filter((provider, index, all) => all.indexOf(provider) === index),
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setError("無法載入綁定設定，請重新整理。");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const linkProvider = async (provider: string) => {
+    setBusy(provider);
+    setError(null);
+    try {
+      const result = await authClient.linkSocial({
+        provider: provider as SocialProviderId,
+        callbackURL: window.location.origin,
+      });
+      if (result.error) {
+        setError(messageFrom(result.error, "無法完成登入方式綁定。"));
+        setBusy(null);
+      }
+    } catch (linkError: unknown) {
+      setError(messageFrom(linkError, "無法完成登入方式綁定。"));
+      setBusy(null);
+    }
+  };
+
+  return (
+    <>
+      <ThemeToggle floating />
+      <main className="sign-in-shell">
+        <div className="sign-in-heading">
+          <Brand />
+          <span className="eyebrow">Complete your account</span>
+          <h1>完成 PGID 設定</h1>
+          <p>你已使用 Telegram 建立 PGID，請綁定其他登入帳號才能使用。</p>
+        </div>
+        <div className="auth-actions" aria-busy={busy !== null}>
+          {enabledSocial.map((provider) => (
+            <button
+              key={provider}
+              className="button button-secondary button-wide"
+              type="button"
+              disabled={busy !== null}
+              onClick={() => void linkProvider(provider)}
+            >
+              <LogIn aria-hidden="true" />
+              {busy === provider ? "正在連線..." : `綁定 ${provider === "google" ? "Google" : provider}`}
+            </button>
+          ))}
+        </div>
+        {error ? <div className="notice notice-error">{error}</div> : null}
       </main>
     </>
   );
@@ -2414,6 +2501,10 @@ export function App() {
 
   if (!session) {
     return <SignInView pending={sessionQuery.isPending} />;
+  }
+
+  if (session.user.status === "pending_telegram") {
+    return <PendingTelegramView />;
   }
 
   if (isConsent) {

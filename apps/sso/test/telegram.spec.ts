@@ -227,7 +227,7 @@ describe("telegram login endpoint", () => {
   });
 
   it.each(["invite", "public"] as const)(
-    "refuses an unmatched Telegram identity in %s mode without creating auth state",
+    "creates a pending Telegram identity in %s mode",
     async (registrationMode) => {
       const telegramId = randomTelegramId();
       const before = {
@@ -245,33 +245,29 @@ describe("telegram login endpoint", () => {
         },
       );
 
-      expect(response.status).toBe(403);
-      expect(await response.json()).toEqual({ error: "registration_closed" });
-      expect(response.headers.get("set-cookie")).toBeNull();
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        signedIn: true,
+        pendingBinding: true,
+      });
+      expect(response.headers.get("set-cookie")).toContain("session_token=");
       expect(registrationLimitCalls).toBe(1);
-      expect(await tableCount("account")).toBe(before.accounts);
-      expect(await tableCount("session")).toBe(before.sessions);
-      expect(await tableCount("user")).toBe(before.users);
+      expect(await tableCount("account")).toBe(before.accounts + 1);
+      expect(await tableCount("session")).toBe(before.sessions + 1);
+      expect(await tableCount("user")).toBe(before.users + 1);
 
       const linked = await env.PG72_ID_DB.prepare(
         "SELECT id FROM account WHERE providerId = 'telegram' AND accountId = ?",
       )
         .bind(telegramId)
         .first();
-      expect(linked).toBeNull();
-
-      const denial = await env.PG72_ID_DB.prepare(
-        `SELECT subject_id, metadata_json
-           FROM audit_event
-          WHERE event_type = 'registration.denied'
-          ORDER BY occurred_at DESC, id DESC
-          LIMIT 1`,
-      ).first<{ subject_id: string | null; metadata_json: string | null }>();
-      expect(denial?.subject_id).toBeNull();
-      expect(denial?.metadata_json).toBe(
-        '{"provider":"telegram","reason":"verified_email_required"}',
-      );
-      expect(denial?.metadata_json).not.toContain(telegramId);
+      expect(linked).not.toBeNull();
+      const pending = await env.PG72_ID_DB.prepare(
+        `SELECT u.status, u.emailVerified
+           FROM user u JOIN account a ON a.userId = u.id
+          WHERE a.providerId = 'telegram' AND a.accountId = ?`,
+      ).bind(telegramId).first<{ status: string; emailVerified: number }>();
+      expect(pending).toEqual({ status: "pending_telegram", emailVerified: 0 });
     },
   );
 
@@ -321,6 +317,31 @@ describe("telegram login endpoint", () => {
 });
 
 describe("telegram linking", () => {
+  it("activates a pending Telegram account after a verified provider is linked", async () => {
+    const user = await createAuthenticatedUser(`${crypto.randomUUID()}@example.com`);
+    await env.PG72_ID_DB.prepare(
+      "UPDATE user SET status = 'pending_telegram' WHERE id = ?",
+    )
+      .bind(user.userId)
+      .run();
+
+    const response = await exports.default.fetch(
+      new Request(`${BASE_URL}/api/auth/telegram/complete`, {
+        method: "POST",
+        headers: user.headers,
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ completed: true });
+
+    const row = await env.PG72_ID_DB.prepare(
+      "SELECT status FROM user WHERE id = ?",
+    )
+      .bind(user.userId)
+      .first<{ status: string }>();
+    expect(row?.status).toBe("active");
+  });
+
   it("atomically permits only one owner under concurrent links", async () => {
     const telegramId = randomTelegramId();
     const first = await createAuthenticatedUser(

@@ -113,7 +113,7 @@ export function createAuth(
           input: false,
         },
         status: {
-          type: ["active", "suspended"],
+          type: ["active", "suspended", "pending_telegram"],
           required: false,
           defaultValue: "active",
           input: false,

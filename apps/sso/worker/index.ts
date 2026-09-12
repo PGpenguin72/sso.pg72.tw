@@ -474,7 +474,7 @@ async function readJson<T>(request: Request): Promise<T | null> {
 
 export const app = new Hono<AppEnv>();
 
-export const HTML_CACHE_CONTROL =
+const HTML_CACHE_CONTROL =
   "public, no-transform, max-age=0, must-revalidate";
 
 export function isHtmlDocumentResponse(

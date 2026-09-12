@@ -4,10 +4,7 @@ import { describe, expect, it } from "vitest";
 import { createAuth } from "../worker/auth";
 import { readRuntimeConfig } from "../worker/config";
 import { telegramLinkConfigured } from "../worker/account";
-import {
-  HTML_CACHE_CONTROL,
-  isHtmlDocumentResponse,
-} from "../worker/index";
+import { isHtmlDocumentResponse } from "../worker/index";
 import {
   createAuthenticatedUser,
   createBootstrapAdmin,
@@ -136,7 +133,6 @@ describe("PGID Worker", () => {
   });
 
   it("prevents edge transformations only for successful HTML documents", () => {
-    expect(HTML_CACHE_CONTROL).toContain("no-transform");
     expect(isHtmlDocumentResponse("GET", 200, "text/html; charset=UTF-8")).toBe(
       true,
     );

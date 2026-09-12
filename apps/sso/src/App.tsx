@@ -573,6 +573,7 @@ interface LoginMethodsResponse {
  */
 const LINKABLE_PROVIDER_DETAILS = {
   google: { label: "Google" },
+  telegram: { label: "Telegram" },
 } as const;
 
 type LinkableProviderId = keyof typeof LINKABLE_PROVIDER_DETAILS;
@@ -923,9 +924,13 @@ interface TelegramConfig {
 function TelegramLogin({
   config,
   disabled,
+  mode = "sign-in",
+  onLinked,
 }: {
   config: TelegramConfig;
   disabled: boolean;
+  mode?: "sign-in" | "link";
+  onLinked?: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -934,18 +939,26 @@ function TelegramLogin({
     if (!config.enabled || !config.botUsername || !containerRef.current) return;
     const container = containerRef.current;
     // Telegram invokes this global with the signed auth payload.
-    const cbName = "onTelegramAuth";
+    const cbName = mode === "link" ? "onTelegramLinkAuth" : "onTelegramAuth";
     (window as unknown as Record<string, unknown>)[cbName] = async (
       user: Record<string, unknown>,
     ) => {
       setError(null);
       try {
         const result = await authClient.$fetch<
-          SocialRedirectPayload & { signedIn?: boolean }
-        >("/api/auth/telegram", {
+          SocialRedirectPayload & { signedIn?: boolean; linked?: boolean }
+        >(mode === "link" ? "/api/auth/telegram/link" : "/api/auth/telegram", {
           method: "POST",
           body: user,
         });
+        if (mode === "link") {
+          if (result.error || result.data?.linked !== true) {
+            setError("Telegram 連結失敗，請稍後再試。");
+          } else {
+            onLinked?.();
+          }
+          return;
+        }
         const action = telegramLoginSuccessAction(result.data);
         if (result.error || action === "invalid") {
           setError("Telegram 登入失敗，請稍後再試。");
@@ -969,16 +982,77 @@ function TelegramLogin({
       container.replaceChildren();
       delete (window as unknown as Record<string, unknown>)[cbName];
     };
-  }, [config]);
+  }, [config, mode, onLinked]);
 
   // The parent only mounts this when Telegram is configured; render nothing
   // otherwise so a stray disabled button never appears.
   if (!config.enabled) return null;
   return (
-    <div className="telegram-login" aria-disabled={disabled}>
+    <div
+      className={`telegram-login${mode === "link" ? " telegram-login-inline" : ""}`}
+      aria-disabled={disabled}
+    >
       <div ref={containerRef} />
-      {error ? <div className="notice notice-error">{error}</div> : null}
+      {error ? (
+        mode === "link" ? (
+          <span className="telegram-login-error" role="alert">{error}</span>
+        ) : (
+          <div className="notice notice-error">{error}</div>
+        )
+      ) : null}
     </div>
+  );
+}
+
+function TelegramLink({
+  disabled,
+  onLinked,
+}: {
+  disabled: boolean;
+  onLinked: () => void;
+}) {
+  const [config, setConfig] = useState<TelegramConfig | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/auth/telegram/config", {
+      cache: "no-store",
+      headers: { accept: "application/json" },
+    })
+      .then((response) =>
+        response.ok
+          ? response.json()
+          : { enabled: false, botUsername: null },
+      )
+      .then((value: TelegramConfig) => {
+        if (!cancelled) {
+          setConfig({
+            enabled: value.enabled === true,
+            botUsername: value.botUsername?.trim() || null,
+          });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setConfig({ enabled: false, botUsername: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (config === null) {
+    return <span className="telegram-link-status">正在載入...</span>;
+  }
+  if (!config.enabled || !config.botUsername) {
+    return <span className="telegram-link-status">暫時無法連結</span>;
+  }
+  return (
+    <TelegramLogin
+      config={config}
+      disabled={disabled}
+      mode="link"
+      onLinked={onLinked}
+    />
   );
 }
 
@@ -3498,6 +3572,11 @@ export function App() {
       setLoginMethodsState("error");
     }
   }, []);
+
+  const handleTelegramLinked = useCallback(() => {
+    setNotice("Telegram 已連結。");
+    void loadLoginMethods();
+  }, [loadLoginMethods]);
 
   const loadRecoveryCodeStatus = useCallback(async () => {
     setRecoveryCodeState("loading");
@@ -6330,7 +6409,7 @@ export function App() {
                 </div>
               ) : null}
               <div
-                className="item-list"
+                className="item-list login-method-list"
                 aria-busy={loginMethodsState === "loading"}
               >
                 {loginMethodsState === "ready" && loginMethods
@@ -6404,28 +6483,38 @@ export function App() {
                 {loginMethodsState === "ready" && loginMethods
                   ? loginMethods.linkable
                       .filter(isLinkableProviderId)
-                      .map((provider) => (
-                        <div className="list-item" key={`link-${provider}`}>
-                          <span className="item-icon">
-                            <Plus aria-hidden="true" />
-                          </span>
-                          <div className="item-copy">
-                            <strong>{providerLabel(provider)}</strong>
-                            <span>尚未連結</span>
+                      .map((provider) => {
+                        const providerBusy = busy === `link:${provider}`;
+                        return (
+                          <div className="list-item" key={`link-${provider}`}>
+                            <span className="item-icon">
+                              <Plus aria-hidden="true" />
+                            </span>
+                            <div className="item-copy">
+                              <strong>{providerLabel(provider)}</strong>
+                              <span>尚未連結</span>
+                            </div>
+                            {provider === "telegram" ? (
+                              <TelegramLink
+                                disabled={providerBusy}
+                                onLinked={handleTelegramLinked}
+                              />
+                            ) : (
+                              <button
+                                type="button"
+                                className="button button-primary button-compact"
+                                disabled={providerBusy}
+                                onClick={() => void linkLoginMethod(provider)}
+                              >
+                                <LogIn aria-hidden="true" />
+                                {providerBusy
+                                  ? "前往連結..."
+                                  : `連結 ${providerLabel(provider)}`}
+                              </button>
+                            )}
                           </div>
-                          <button
-                            type="button"
-                            className="button button-primary button-compact"
-                            disabled={busy === `link:${provider}`}
-                            onClick={() => void linkLoginMethod(provider)}
-                          >
-                            <LogIn aria-hidden="true" />
-                            {busy === `link:${provider}`
-                              ? "前往連結..."
-                              : `連結 ${providerLabel(provider)}`}
-                          </button>
-                        </div>
-                      ))
+                        );
+                      })
                   : null}
                 {loginMethodsState === "loading" ? (
                   <div className="empty-state">

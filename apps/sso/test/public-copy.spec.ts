@@ -18,6 +18,7 @@ interface PublicViews {
     passkey: Passkey;
   }>;
   LegalPage: ComponentType<{ kind: "pp" | "tos" }>;
+  isFreshSessionRequired: (error: unknown) => boolean;
   SignInView: ComponentType<{ pending: boolean }>;
 }
 
@@ -65,6 +66,19 @@ async function metaContent(
 }
 
 describe("rendered public product copy", () => {
+  it("recognizes both fresh-session error response shapes", () => {
+    expect(
+      publicViews.isFreshSessionRequired({ code: "SESSION_NOT_FRESH" }),
+    ).toBe(true);
+    expect(
+      publicViews.isFreshSessionRequired({ error: "fresh_session_required" }),
+    ).toBe(true);
+    expect(publicViews.isFreshSessionRequired({ error: "invalid_origin" })).toBe(
+      false,
+    );
+    expect(publicViews.isFreshSessionRequired(null)).toBe(false);
+  });
+
   it("renders the invite and Passkey boundaries on login, Terms, and About", () => {
     const signIn = renderToStaticMarkup(
       createElement(publicViews.SignInView, { pending: false }),

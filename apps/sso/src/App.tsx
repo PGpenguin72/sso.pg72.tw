@@ -266,6 +266,7 @@ interface CreatedAdminClientResponse {
 
 interface PasskeyStepUpChallengeResponse {
   challengeId?: string;
+  code?: string;
   error?: string;
   options?: PublicKeyCredentialRequestOptionsJSON;
   verified?: boolean;
@@ -307,6 +308,7 @@ type Tab =
   | "admin";
 type Theme = "dark" | "light";
 type LoadState = "error" | "loading" | "ready";
+type SessionLoadState = LoadState | "fresh-session-required";
 
 // Must not exceed the Worker's stored-avatar ceiling (256 KiB after decode) so
 // the client rejects oversized files before an upload the server would refuse.
@@ -362,6 +364,15 @@ function messageFrom(error: unknown, fallback: string): string {
     return error.message;
   }
   return fallback;
+}
+
+export function isFreshSessionRequired(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { code?: unknown; error?: unknown };
+  return (
+    candidate.code === "SESSION_NOT_FRESH" ||
+    candidate.error === "fresh_session_required"
+  );
 }
 
 function formatDate(value: string | Date): string {
@@ -553,6 +564,10 @@ export function SignInView({ pending }: { pending: boolean }) {
   );
   const query = new URLSearchParams(window.location.search);
   const oauthQuery = query.has("client_id") && query.has("sig");
+  const reauthenticating = query.get("prompt") === "login";
+  const authenticationCallbackURL = reauthenticating
+    ? `${window.location.origin}/`
+    : window.location.href;
 
   useEffect(() => {
     let cancelled = false;
@@ -605,7 +620,7 @@ export function SignInView({ pending }: { pending: boolean }) {
     setError(null);
     const result = await authClient.signIn.social({
       provider: provider as SocialProviderId,
-      callbackURL: window.location.href,
+      callbackURL: authenticationCallbackURL,
     });
     if (result?.error) {
       setError(messageFrom(result.error, `${label} 登入失敗，請稍後再試。`));
@@ -621,6 +636,8 @@ export function SignInView({ pending }: { pending: boolean }) {
     const result = await authClient.signIn.passkey();
     if (result.error) {
       setError(messageFrom(result.error, "Passkey sign-in failed."));
+    } else if (reauthenticating) {
+      window.location.assign("/");
     }
     setBusy(null);
   };
@@ -2133,7 +2150,8 @@ export function App() {
   const [tab, setTab] = useState<Tab>("account");
   const [navOpen, setNavOpen] = useState(false);
   const [sessions, setSessions] = useState<DeviceSession[]>([]);
-  const [sessionsState, setSessionsState] = useState<LoadState>("loading");
+  const [sessionsState, setSessionsState] =
+    useState<SessionLoadState>("loading");
   const [activityEvents, setActivityEvents] = useState<SecurityActivityEvent[]>(
     [],
   );
@@ -2256,7 +2274,11 @@ export function App() {
     setSessionsState("loading");
     const result = await authClient.listSessions();
     if (result.error) {
-      setSessionsState("error");
+      setSessionsState(
+        isFreshSessionRequired(result.error)
+          ? "fresh-session-required"
+          : "error",
+      );
       return;
     }
     setSessions(result.data ?? []);
@@ -2505,7 +2527,7 @@ export function App() {
     );
   }
 
-  if (!session) {
+  if (!session || (pathname === "/sign-in" && query.get("prompt") === "login")) {
     return <SignInView pending={sessionQuery.isPending} />;
   }
 
@@ -3096,6 +3118,10 @@ export function App() {
     const challenge = (await challengeResponse.json().catch(() => ({}))) as
       PasskeyStepUpChallengeResponse;
     if (!challengeResponse.ok) {
+      if (isFreshSessionRequired(challenge)) {
+        window.location.assign("/sign-in?prompt=login");
+        return false;
+      }
       setAdminClientsError(
         adminClientErrorMessage(
           challenge.error,
@@ -3137,6 +3163,10 @@ export function App() {
       .json()
       .catch(() => ({}))) as PasskeyStepUpChallengeResponse;
     if (!verificationResponse.ok || verification.verified !== true) {
+      if (isFreshSessionRequired(verification)) {
+        window.location.assign("/sign-in?prompt=login");
+        return false;
+      }
       setAdminClientsError(
         verification.error === "passkey_step_up_challenge_invalid"
           ? "Passkey 驗證已過期或已使用，請再試一次。"
@@ -4938,6 +4968,19 @@ export function App() {
                       <RefreshCw aria-hidden="true" />
                       重試
                     </button>
+                  </div>
+                ) : null}
+                {sessionsState === "fresh-session-required" ? (
+                  <div className="empty-state empty-state-error" role="alert">
+                    <ShieldAlert aria-hidden="true" />
+                    <span>登入時間已超過 10 分鐘，請再次驗證後查看裝置。</span>
+                    <a
+                      className="button button-secondary button-compact"
+                      href="/sign-in?prompt=login"
+                    >
+                      <LogIn aria-hidden="true" />
+                      再次驗證
+                    </a>
                   </div>
                 ) : null}
                 {sessionsState === "ready" && sessions.length === 0 ? (

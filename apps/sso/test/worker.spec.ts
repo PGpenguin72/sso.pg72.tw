@@ -4,6 +4,10 @@ import { describe, expect, it } from "vitest";
 import { createAuth } from "../worker/auth";
 import { readRuntimeConfig } from "../worker/config";
 import {
+  HTML_CACHE_CONTROL,
+  isHtmlDocumentResponse,
+} from "../worker/index";
+import {
   createAuthenticatedUser,
   createBootstrapAdmin,
   createSessionFor,
@@ -124,6 +128,17 @@ async function createPasskey(userId: string, name: string): Promise<string> {
 }
 
 describe("PGID Worker", () => {
+  it("prevents edge transformations only for successful HTML documents", () => {
+    expect(HTML_CACHE_CONTROL).toContain("no-transform");
+    expect(isHtmlDocumentResponse("GET", 200, "text/html; charset=UTF-8")).toBe(
+      true,
+    );
+    expect(isHtmlDocumentResponse("HEAD", 200, "text/html")).toBe(true);
+    expect(isHtmlDocumentResponse("GET", 200, "text/javascript")).toBe(false);
+    expect(isHtmlDocumentResponse("POST", 200, "text/html")).toBe(false);
+    expect(isHtmlDocumentResponse("GET", 404, "text/html")).toBe(false);
+  });
+
   it("serves health with hardened browser headers", async () => {
     const response = await exports.default.fetch("http://sso.test/health");
 

@@ -56,6 +56,10 @@ interface PublicViews {
   ) => Promise<T>;
   isOAuthContinuation: (payload: unknown) => boolean;
   isFreshSessionRequired: (error: unknown) => boolean;
+  passkeyEnrollmentOptions: (
+    kind: "passkey" | "security-key",
+    dateLabel: string,
+  ) => { authenticatorAttachment?: "cross-platform"; name: string };
   signInIntentCapabilities: (
     intent: "add-account" | "default" | "reauth",
   ) => {
@@ -202,6 +206,18 @@ describe("rendered public product copy", () => {
       false,
     );
     expect(publicViews.isFreshSessionRequired(null)).toBe(false);
+  });
+
+  it("targets roaming authenticators for security-key enrollment", () => {
+    expect(
+      publicViews.passkeyEnrollmentOptions("security-key", "2026/9/12"),
+    ).toEqual({
+      authenticatorAttachment: "cross-platform",
+      name: "安全金鑰 2026/9/12",
+    });
+    expect(publicViews.passkeyEnrollmentOptions("passkey", "2026/9/12")).toEqual(
+      { name: "Passkey 2026/9/12" },
+    );
   });
 
   it("uses exactly one browser operation for each account choice", async () => {

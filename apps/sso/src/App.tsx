@@ -713,6 +713,18 @@ export function isFreshSessionRequired(error: unknown): boolean {
   );
 }
 
+export function passkeyEnrollmentOptions(
+  kind: "passkey" | "security-key",
+  dateLabel: string,
+): { authenticatorAttachment?: "cross-platform"; name: string } {
+  return kind === "security-key"
+    ? {
+        authenticatorAttachment: "cross-platform",
+        name: `安全金鑰 ${dateLabel}`,
+      }
+    : { name: `Passkey ${dateLabel}` };
+}
+
 function downloadRecoveryCodes(codes: string[], generation: number): void {
   const body = [
     "PGID recovery codes",
@@ -3625,21 +3637,34 @@ export function App() {
     );
   }
 
-  const addPasskey = async () => {
-    setBusy("passkey:add");
+  const addPasskey = async (kind: "passkey" | "security-key") => {
+    const pendingState =
+      kind === "security-key" ? "passkey:add-security-key" : "passkey:add";
+    setBusy(pendingState);
     setNotice(null);
     setPasskeyError(null);
     try {
-      const result = await authClient.passkey.addPasskey({
-        name: `Passkey ${new Date().toLocaleDateString("zh-TW")}`,
-      });
+      const result = await authClient.passkey.addPasskey(
+        passkeyEnrollmentOptions(
+          kind,
+          new Date().toLocaleDateString("zh-TW"),
+        ),
+      );
       if (result.error) {
+        if (isFreshSessionRequired(result.error)) {
+          window.location.assign("/sign-in?prompt=login");
+          return;
+        }
         setPasskeyError(messageFrom(result.error, "無法新增 Passkey。"));
         return;
       }
-      setNotice("Passkey 已新增。");
+      setNotice(kind === "security-key" ? "安全金鑰已新增。" : "Passkey 已新增。");
       await loadLoginMethods();
     } catch (addError: unknown) {
+      if (isFreshSessionRequired(addError)) {
+        window.location.assign("/sign-in?prompt=login");
+        return;
+      }
       setPasskeyError(messageFrom(addError, "無法新增 Passkey。"));
     } finally {
       setBusy(null);
@@ -6378,15 +6403,28 @@ export function App() {
                   <span className="eyebrow">Authentication</span>
                   <h2>Passkeys</h2>
                 </div>
-                <button
-                  type="button"
-                  className="button button-primary"
-                  onClick={addPasskey}
-                  disabled={busy === "passkey:add"}
-                >
-                  <Plus aria-hidden="true" />
-                  {busy === "passkey:add" ? "新增中..." : "新增 Passkey"}
-                </button>
+                <div className="passkey-enrollment-actions">
+                  <button
+                    type="button"
+                    className="button button-secondary"
+                    onClick={() => void addPasskey("security-key")}
+                    disabled={busy?.startsWith("passkey:add") === true}
+                  >
+                    <KeyRound aria-hidden="true" />
+                    {busy === "passkey:add-security-key"
+                      ? "新增中..."
+                      : "新增安全金鑰"}
+                  </button>
+                  <button
+                    type="button"
+                    className="button button-primary"
+                    onClick={() => void addPasskey("passkey")}
+                    disabled={busy?.startsWith("passkey:add") === true}
+                  >
+                    <Plus aria-hidden="true" />
+                    {busy === "passkey:add" ? "新增中..." : "新增 Passkey"}
+                  </button>
+                </div>
               </div>
 
               {passkeyError ? (

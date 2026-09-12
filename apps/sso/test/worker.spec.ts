@@ -4,6 +4,10 @@ import { describe, expect, it } from "vitest";
 import { createAuth } from "../worker/auth";
 import { readRuntimeConfig } from "../worker/config";
 import {
+  HTML_CACHE_CONTROL,
+  isHtmlDocumentResponse,
+} from "../worker/index";
+import {
   continueCurrentAccountSelection,
   createAuthenticatedUser,
   createBootstrapAdmin,
@@ -144,6 +148,17 @@ describe("PGID Worker", () => {
     expect(response.headers.get("x-request-id")).toMatch(
       /^[0-9a-f]{8}-[0-9a-f-]{27}$/,
     );
+  });
+
+  it("prevents edge transformations only for successful HTML documents", () => {
+    expect(HTML_CACHE_CONTROL).toContain("no-transform");
+    expect(isHtmlDocumentResponse("GET", 200, "text/html; charset=UTF-8")).toBe(
+      true,
+    );
+    expect(isHtmlDocumentResponse("HEAD", 200, "text/html")).toBe(true);
+    expect(isHtmlDocumentResponse("GET", 200, "text/javascript")).toBe(false);
+    expect(isHtmlDocumentResponse("POST", 200, "text/html")).toBe(false);
+    expect(isHtmlDocumentResponse("GET", 404, "text/html")).toBe(false);
   });
 
   it("publishes root issuer metadata with PKCE S256", async () => {

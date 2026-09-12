@@ -813,6 +813,21 @@ async function readJson<T>(
 
 export const app = new Hono<AppEnv>();
 
+export const HTML_CACHE_CONTROL =
+  "public, no-transform, max-age=0, must-revalidate";
+
+export function isHtmlDocumentResponse(
+  method: string,
+  status: number,
+  contentType: string | null,
+): boolean {
+  return (
+    (method === "GET" || method === "HEAD") &&
+    status === 200 &&
+    (contentType?.toLowerCase().startsWith("text/html") ?? false)
+  );
+}
+
 app.use("*", async (c, next) => {
   const requestId = crypto.randomUUID();
   const startedAt = performance.now();
@@ -863,7 +878,12 @@ app.use("*", async (c, next) => {
   c.header("X-Frame-Options", "DENY");
 
   const pathname = new URL(c.req.url).pathname;
-  if (pathname.startsWith("/.well-known/")) {
+  if (isHtmlDocumentResponse(c.req.method, c.res.status, c.res.headers.get("content-type"))) {
+    // Cloudflare Web Analytics automatic setup rewrites HTML to inject its
+    // beacon. The auth origin intentionally keeps third-party scripts outside
+    // its CSP, so prevent that edge rewrite instead of weakening script-src.
+    c.header("Cache-Control", HTML_CACHE_CONTROL);
+  } else if (pathname.startsWith("/.well-known/")) {
     c.header("Cache-Control", "public, max-age=300, stale-while-revalidate=60");
   } else if (pathname.startsWith("/api/avatar/")) {
     // Generated avatars are deterministic public images; the route sets its

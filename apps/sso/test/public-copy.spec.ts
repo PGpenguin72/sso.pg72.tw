@@ -55,6 +55,11 @@ interface PublicViews {
     },
   ) => Promise<T>;
   isOAuthContinuation: (payload: unknown) => boolean;
+  isFreshSessionRequired: (error: unknown) => boolean;
+  passkeyEnrollmentOptions: (
+    kind: "passkey" | "security-key",
+    dateLabel: string,
+  ) => { authenticatorAttachment?: "cross-platform"; name: string };
   signInIntentCapabilities: (
     intent: "add-account" | "default" | "reauth",
   ) => {
@@ -188,6 +193,31 @@ describe("rendered public product copy", () => {
       passkey: true,
       telegram: false,
     });
+  });
+
+  it("recognizes both fresh-session error response shapes", () => {
+    expect(
+      publicViews.isFreshSessionRequired({ code: "SESSION_NOT_FRESH" }),
+    ).toBe(true);
+    expect(
+      publicViews.isFreshSessionRequired({ error: "fresh_session_required" }),
+    ).toBe(true);
+    expect(publicViews.isFreshSessionRequired({ error: "invalid_origin" })).toBe(
+      false,
+    );
+    expect(publicViews.isFreshSessionRequired(null)).toBe(false);
+  });
+
+  it("targets roaming authenticators for security-key enrollment", () => {
+    expect(
+      publicViews.passkeyEnrollmentOptions("security-key", "2026/9/12"),
+    ).toEqual({
+      authenticatorAttachment: "cross-platform",
+      name: "安全金鑰 2026/9/12",
+    });
+    expect(publicViews.passkeyEnrollmentOptions("passkey", "2026/9/12")).toEqual(
+      { name: "Passkey 2026/9/12" },
+    );
   });
 
   it("uses exactly one browser operation for each account choice", async () => {

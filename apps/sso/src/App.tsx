@@ -594,6 +594,7 @@ interface CreatedAdminClientResponse {
 
 interface PasskeyStepUpChallengeResponse {
   challengeId?: string;
+  code?: string;
   error?: string;
   options?: PublicKeyCredentialRequestOptionsJSON;
   verified?: boolean;
@@ -645,6 +646,7 @@ type Tab =
   | "admin";
 type Theme = "dark" | "light";
 type LoadState = "error" | "loading" | "ready";
+type SessionLoadState = LoadState | "fresh-session-required";
 
 // Must not exceed the Worker's stored-avatar ceiling (256 KiB after decode) so
 // the client rejects oversized files before an upload the server would refuse.
@@ -700,6 +702,27 @@ function messageFrom(error: unknown, fallback: string): string {
     return error.message;
   }
   return fallback;
+}
+
+export function isFreshSessionRequired(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { code?: unknown; error?: unknown };
+  return (
+    candidate.code === "SESSION_NOT_FRESH" ||
+    candidate.error === "fresh_session_required"
+  );
+}
+
+export function passkeyEnrollmentOptions(
+  kind: "passkey" | "security-key",
+  dateLabel: string,
+): { authenticatorAttachment?: "cross-platform"; name: string } {
+  return kind === "security-key"
+    ? {
+        authenticatorAttachment: "cross-platform",
+        name: `安全金鑰 ${dateLabel}`,
+      }
+    : { name: `Passkey ${dateLabel}` };
 }
 
 function downloadRecoveryCodes(codes: string[], generation: number): void {
@@ -1479,6 +1502,8 @@ export function SignInView({
   const oauthQuery = query.has("client_id") && query.has("sig");
   const specialIntent = intent !== "default";
   const intentCapabilities = signInIntentCapabilities(intent);
+  const authenticationCallbackURL =
+    intent === "reauth" ? `${window.location.origin}/` : window.location.href;
 
   useEffect(() => {
     let cancelled = false;
@@ -1633,14 +1658,14 @@ export function SignInView({
               {
                 method: "POST",
                 body: {
-                  callbackURL: window.location.href,
+                  callbackURL: authenticationCallbackURL,
                   intentId: registrationIntentId,
                 },
               },
             )
           : authClient.signIn.social({
               provider: provider as SocialProviderId,
-              callbackURL: window.location.href,
+              callbackURL: authenticationCallbackURL,
             }),
       `${label} 登入失敗，請稍後再試。`,
       (message) => {
@@ -1668,6 +1693,8 @@ export function SignInView({
     const result = await authClient.signIn.passkey();
     if (result.error) {
       setError(messageFrom(result.error, "Passkey sign-in failed."));
+    } else if (intent === "reauth") {
+      window.location.assign("/");
     }
     setBusy(null);
   };
@@ -3166,7 +3193,8 @@ export function App() {
   const [tab, setTab] = useState<Tab>("account");
   const [navOpen, setNavOpen] = useState(false);
   const [sessions, setSessions] = useState<DeviceSession[]>([]);
-  const [sessionsState, setSessionsState] = useState<LoadState>("loading");
+  const [sessionsState, setSessionsState] =
+    useState<SessionLoadState>("loading");
   const [activityEvents, setActivityEvents] = useState<SecurityActivityEvent[]>(
     [],
   );
@@ -3291,7 +3319,11 @@ export function App() {
     setSessionsState("loading");
     const result = await authClient.listSessions();
     if (result.error) {
-      setSessionsState("error");
+      setSessionsState(
+        isFreshSessionRequired(result.error)
+          ? "fresh-session-required"
+          : "error",
+      );
       return;
     }
     setSessions(result.data ?? []);
@@ -3605,21 +3637,34 @@ export function App() {
     );
   }
 
-  const addPasskey = async () => {
-    setBusy("passkey:add");
+  const addPasskey = async (kind: "passkey" | "security-key") => {
+    const pendingState =
+      kind === "security-key" ? "passkey:add-security-key" : "passkey:add";
+    setBusy(pendingState);
     setNotice(null);
     setPasskeyError(null);
     try {
-      const result = await authClient.passkey.addPasskey({
-        name: `Passkey ${new Date().toLocaleDateString("zh-TW")}`,
-      });
+      const result = await authClient.passkey.addPasskey(
+        passkeyEnrollmentOptions(
+          kind,
+          new Date().toLocaleDateString("zh-TW"),
+        ),
+      );
       if (result.error) {
+        if (isFreshSessionRequired(result.error)) {
+          window.location.assign("/sign-in?prompt=login");
+          return;
+        }
         setPasskeyError(messageFrom(result.error, "無法新增 Passkey。"));
         return;
       }
-      setNotice("Passkey 已新增。");
+      setNotice(kind === "security-key" ? "安全金鑰已新增。" : "Passkey 已新增。");
       await loadLoginMethods();
     } catch (addError: unknown) {
+      if (isFreshSessionRequired(addError)) {
+        window.location.assign("/sign-in?prompt=login");
+        return;
+      }
       setPasskeyError(messageFrom(addError, "無法新增 Passkey。"));
     } finally {
       setBusy(null);
@@ -4239,6 +4284,10 @@ export function App() {
     const challenge = (await challengeResponse.json().catch(() => ({}))) as
       PasskeyStepUpChallengeResponse;
     if (!challengeResponse.ok) {
+      if (isFreshSessionRequired(challenge)) {
+        window.location.assign("/sign-in?prompt=login");
+        return false;
+      }
       reportError(
         adminClientErrorMessage(
           challenge.error,
@@ -4280,6 +4329,10 @@ export function App() {
       .json()
       .catch(() => ({}))) as PasskeyStepUpChallengeResponse;
     if (!verificationResponse.ok || verification.verified !== true) {
+      if (isFreshSessionRequired(verification)) {
+        window.location.assign("/sign-in?prompt=login");
+        return false;
+      }
       reportError(
         verification.error === "passkey_step_up_challenge_invalid"
           ? "Passkey 驗證已過期或已使用，請再試一次。"
@@ -6350,15 +6403,28 @@ export function App() {
                   <span className="eyebrow">Authentication</span>
                   <h2>Passkeys</h2>
                 </div>
-                <button
-                  type="button"
-                  className="button button-primary"
-                  onClick={addPasskey}
-                  disabled={busy === "passkey:add"}
-                >
-                  <Plus aria-hidden="true" />
-                  {busy === "passkey:add" ? "新增中..." : "新增 Passkey"}
-                </button>
+                <div className="passkey-enrollment-actions">
+                  <button
+                    type="button"
+                    className="button button-secondary"
+                    onClick={() => void addPasskey("security-key")}
+                    disabled={busy?.startsWith("passkey:add") === true}
+                  >
+                    <KeyRound aria-hidden="true" />
+                    {busy === "passkey:add-security-key"
+                      ? "新增中..."
+                      : "新增安全金鑰"}
+                  </button>
+                  <button
+                    type="button"
+                    className="button button-primary"
+                    onClick={() => void addPasskey("passkey")}
+                    disabled={busy?.startsWith("passkey:add") === true}
+                  >
+                    <Plus aria-hidden="true" />
+                    {busy === "passkey:add" ? "新增中..." : "新增 Passkey"}
+                  </button>
+                </div>
               </div>
 
               {passkeyError ? (
@@ -6621,6 +6687,19 @@ export function App() {
                       <RefreshCw aria-hidden="true" />
                       重試
                     </button>
+                  </div>
+                ) : null}
+                {sessionsState === "fresh-session-required" ? (
+                  <div className="empty-state empty-state-error" role="alert">
+                    <ShieldAlert aria-hidden="true" />
+                    <span>登入時間已超過 10 分鐘，請再次驗證後查看裝置。</span>
+                    <a
+                      className="button button-secondary button-compact"
+                      href="/sign-in?prompt=login"
+                    >
+                      <LogIn aria-hidden="true" />
+                      再次驗證
+                    </a>
                   </div>
                 ) : null}
                 {sessionsState === "ready" && sessions.length === 0 ? (

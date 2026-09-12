@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { createAuth } from "../worker/auth";
 import { readRuntimeConfig } from "../worker/config";
+import { telegramLinkConfigured } from "../worker/account";
 import {
   HTML_CACHE_CONTROL,
   isHtmlDocumentResponse,
@@ -128,6 +129,12 @@ async function createPasskey(userId: string, name: string): Promise<string> {
 }
 
 describe("PGID Worker", () => {
+  it("enables Telegram linking only with complete widget configuration", () => {
+    expect(telegramLinkConfigured()).toBe(false);
+    expect(telegramLinkConfigured("test-token", "   ")).toBe(false);
+    expect(telegramLinkConfigured("test-token", "pgid_test_bot")).toBe(true);
+  });
+
   it("prevents edge transformations only for successful HTML documents", () => {
     expect(HTML_CACHE_CONTROL).toContain("no-transform");
     expect(isHtmlDocumentResponse("GET", 200, "text/html; charset=UTF-8")).toBe(

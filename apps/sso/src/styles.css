@@ -681,6 +681,21 @@ svg {
   pointer-events: none;
 }
 
+.telegram-login-inline {
+  width: min(238px, 100%);
+  justify-self: end;
+}
+
+.telegram-login-inline > div:first-child {
+  width: 100%;
+}
+
+.telegram-login-error {
+  color: var(--danger);
+  font-size: 12px;
+  text-align: right;
+}
+
 .consent-shell {
   min-height: 100vh;
   padding: 70px 0;
@@ -1625,6 +1640,13 @@ svg {
 
   .section-heading > .button {
     width: 100%;
+  }
+
+  .login-method-list .telegram-login-inline {
+    grid-column: 1 / -1;
+    width: 100%;
+    justify-self: stretch;
+    text-align: center;
   }
 
   .passkey-enrollment-actions {

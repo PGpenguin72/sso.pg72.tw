@@ -550,11 +550,13 @@ function TelegramLogin({
   config,
   disabled,
   endpoint = "/api/auth/telegram",
+  inline = false,
   onSuccess,
 }: {
   config: TelegramConfig;
   disabled: boolean;
   endpoint?: string;
+  inline?: boolean;
   onSuccess?: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -610,9 +612,18 @@ function TelegramLogin({
   // otherwise so a stray disabled button never appears.
   if (!config.enabled) return null;
   return (
-    <div className="telegram-login" aria-disabled={disabled}>
+    <div
+      className={`telegram-login${inline ? " telegram-login-inline" : ""}`}
+      aria-disabled={disabled}
+    >
       <div ref={containerRef} />
-      {error ? <div className="notice notice-error">{error}</div> : null}
+      {error ? (
+        inline ? (
+          <span className="telegram-login-error" role="alert">{error}</span>
+        ) : (
+          <div className="notice notice-error">{error}</div>
+        )
+      ) : null}
     </div>
   );
 }
@@ -2465,6 +2476,11 @@ export function App() {
       setLoginMethodsState("error");
     }
   }, []);
+
+  const handleTelegramLinked = useCallback(() => {
+    setNotice("Telegram 已連結。");
+    void loadLoginMethods();
+  }, [loadLoginMethods]);
 
   const loadAdminClients = useCallback(async () => {
     setAdminClientsState("loading");
@@ -4816,7 +4832,7 @@ export function App() {
                 </div>
               ) : null}
               <div
-                className="item-list"
+                className="item-list login-method-list"
                 aria-busy={loginMethodsState === "loading"}
               >
                 {loginMethodsState === "ready" && loginMethods
@@ -4900,10 +4916,8 @@ export function App() {
                               config={telegramConfig}
                               disabled={busy !== null}
                               endpoint="/api/auth/telegram/link"
-                              onSuccess={() => {
-                                setNotice("Telegram 已連結。");
-                                void loadLoginMethods();
-                              }}
+                              inline
+                              onSuccess={handleTelegramLinked}
                             />
                           ) : (
                             <button

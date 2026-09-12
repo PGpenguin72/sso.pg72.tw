@@ -75,6 +75,13 @@ type AvatarMode = "google" | "identicon" | "upload";
  */
 export const LINKABLE_PROVIDERS: readonly string[] = ["google"];
 
+export function telegramLinkConfigured(
+  botToken?: string,
+  botUsername?: string,
+): boolean {
+  return Boolean(botToken && botUsername?.trim());
+}
+
 /** Providers that can be explicitly linked from an authenticated account. */
 export function linkableProviders(env: Env): string[] {
   const providers = [...LINKABLE_PROVIDERS];
@@ -87,7 +94,7 @@ export function linkableProviders(env: Env): string[] {
   if (env.FACEBOOK_CLIENT_ID && env.FACEBOOK_CLIENT_SECRET) {
     providers.push("facebook");
   }
-  if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_BOT_USERNAME) {
+  if (telegramLinkConfigured(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_BOT_USERNAME)) {
     providers.push("telegram");
   }
   return providers;

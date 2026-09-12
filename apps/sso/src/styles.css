@@ -590,12 +590,66 @@ svg {
   grid-column: 1 / -1;
 }
 
+.social-provider-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  fill: currentColor;
+}
+
+.social-button-discord {
+  border-color: #5865f2;
+  background: #5865f2;
+  color: #fff;
+}
+
+.social-button-discord:hover:not(:disabled) {
+  border-color: #4752c4;
+  background: #4752c4;
+}
+
+.social-button-github {
+  border-color: #57606a;
+  background: #24292f;
+  color: #fff;
+}
+
+.social-button-github:hover:not(:disabled) {
+  border-color: #6e7781;
+  background: #30363d;
+}
+
+.social-button-facebook {
+  border-color: #0866ff;
+  background: #0866ff;
+  color: #fff;
+}
+
+.social-button-facebook:hover:not(:disabled) {
+  border-color: #075acc;
+  background: #075acc;
+}
+
 .telegram-login {
-  grid-column: 1 / -1;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
+  align-items: stretch;
+}
+
+.telegram-login > div:first-child {
+  display: flex;
+  min-height: 42px;
   align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: var(--r-control);
+  background: #229ed9;
+}
+
+.telegram-login iframe {
+  max-width: 100%;
 }
 
 .telegram-login[aria-disabled="true"] {

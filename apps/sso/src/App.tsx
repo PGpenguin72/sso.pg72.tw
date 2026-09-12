@@ -507,6 +507,33 @@ function SocialProviderIcon({ provider }: { provider: string }) {
   );
 }
 
+function GoogleBrandIcon() {
+  return (
+    <svg
+      className="google-brand-icon"
+      aria-hidden="true"
+      viewBox="0 0 18 18"
+    >
+      <path
+        fill="#4285f4"
+        d="M17.64 9.205c0-.639-.057-1.252-.164-1.841H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.717v2.258h2.908C16.656 14.252 17.64 11.945 17.64 9.205Z"
+      />
+      <path
+        fill="#34a853"
+        d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.258c-.806.54-1.836.859-3.048.859-2.344 0-4.329-1.585-5.037-3.711H.956v2.333C2.437 15.983 5.482 18 9 18Z"
+      />
+      <path
+        fill="#fbbc05"
+        d="M3.963 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.171.281-1.71V4.957H.956A9 9 0 0 0 0 9c0 1.452.348 2.827.956 4.043l3.007-2.333Z"
+      />
+      <path
+        fill="#ea4335"
+        d="M9 3.58c1.321 0 2.508.454 3.442 1.345l2.581-2.581C13.464.892 11.426 0 9 0 5.482 0 2.437 2.017.956 4.957L3.963 7.29C4.671 5.164 6.656 3.58 9 3.58Z"
+      />
+    </svg>
+  );
+}
+
 interface TelegramConfig {
   enabled: boolean;
   botUsername: string | null;
@@ -690,12 +717,12 @@ export function SignInView({ pending }: { pending: boolean }) {
 
         <div className="auth-actions" aria-busy={pending || busy !== null}>
           <button
-            className="button button-primary button-wide"
+            className="button button-primary button-wide google-sign-in-button"
             type="button"
             onClick={googleSignIn}
             disabled={pending || busy !== null}
           >
-            <LogIn aria-hidden="true" />
+            <GoogleBrandIcon />
             {busy === "google" ? "正在連線..." : "使用 Google 繼續"}
           </button>
           <button

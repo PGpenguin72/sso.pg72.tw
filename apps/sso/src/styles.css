@@ -1339,6 +1339,13 @@ svg {
   margin-top: 58px;
 }
 
+.passkey-enrollment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .danger-row {
   display: flex;
   align-items: center;
@@ -1540,6 +1547,14 @@ svg {
 
   .section-heading > .button {
     width: 100%;
+  }
+
+  .passkey-enrollment-actions {
+    width: 100%;
+  }
+
+  .passkey-enrollment-actions .button {
+    flex: 1 1 220px;
   }
 
   .authorization-heading {

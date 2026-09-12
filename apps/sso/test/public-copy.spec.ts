@@ -19,6 +19,10 @@ interface PublicViews {
   }>;
   LegalPage: ComponentType<{ kind: "pp" | "tos" }>;
   isFreshSessionRequired: (error: unknown) => boolean;
+  passkeyEnrollmentOptions: (
+    kind: "passkey" | "security-key",
+    dateLabel: string,
+  ) => { authenticatorAttachment?: "cross-platform"; name: string };
   SignInView: ComponentType<{ pending: boolean }>;
 }
 
@@ -77,6 +81,18 @@ describe("rendered public product copy", () => {
       false,
     );
     expect(publicViews.isFreshSessionRequired(null)).toBe(false);
+  });
+
+  it("targets roaming authenticators for security-key enrollment", () => {
+    expect(
+      publicViews.passkeyEnrollmentOptions("security-key", "2026/9/12"),
+    ).toEqual({
+      authenticatorAttachment: "cross-platform",
+      name: "安全金鑰 2026/9/12",
+    });
+    expect(publicViews.passkeyEnrollmentOptions("passkey", "2026/9/12")).toEqual(
+      { name: "Passkey 2026/9/12" },
+    );
   });
 
   it("renders the invite and Passkey boundaries on login, Terms, and About", () => {

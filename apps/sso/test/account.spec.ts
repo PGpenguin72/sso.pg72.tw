@@ -1,7 +1,7 @@
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 
-import { normalizeDisplayName } from "../worker/account";
+import { linkableProviders, normalizeDisplayName } from "../worker/account";
 import { sha256Base64Url } from "../worker/recovery-codes";
 import { createAuthenticatedUser } from "./helpers";
 
@@ -347,6 +347,22 @@ describe("avatar selection", () => {
 });
 
 describe("login methods", () => {
+  it("offers Telegram linking only when the complete widget config exists", () => {
+    expect(linkableProviders({})).toEqual(["google"]);
+    expect(
+      linkableProviders({
+        telegramBotToken: "test-token",
+        telegramBotUsername: "pgid_test_bot",
+      }),
+    ).toEqual(["google", "telegram"]);
+    expect(
+      linkableProviders({
+        telegramBotToken: "test-token",
+        telegramBotUsername: "   ",
+      }),
+    ).toEqual(["google"]);
+  });
+
   it("lists linked providers and passkeys for the signed-in user", async () => {
     const { googleAccountId, headers, userId } = await createAuthenticatedUser(
       `${crypto.randomUUID()}@example.com`,

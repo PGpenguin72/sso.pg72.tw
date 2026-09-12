@@ -74,11 +74,22 @@ export type AvatarSource = "google" | "generated" | "upload";
 type AvatarMode = "google" | "identicon" | "upload";
 
 /**
- * Providers a signed-in user may explicitly link. Adding a future provider
- * means registering it here and in the Better Auth `socialProviders` config;
+ * Better Auth providers a signed-in user may explicitly link. Telegram is
+ * appended separately when its complete widget configuration is present;
  * the listing/unlink policy below is provider-agnostic.
  */
 export const LINKABLE_PROVIDERS: readonly string[] = ["google"];
+
+export function linkableProviders(config: {
+  telegramBotToken?: string;
+  telegramBotUsername?: string;
+}): string[] {
+  const providers = [...LINKABLE_PROVIDERS];
+  if (config.telegramBotToken && config.telegramBotUsername?.trim()) {
+    providers.push("telegram");
+  }
+  return providers;
+}
 
 export function normalizeDisplayName(value: unknown): string | null {
   if (typeof value !== "string" || value.length > DISPLAY_NAME_MAX_INPUT_LENGTH) {
@@ -462,7 +473,10 @@ accountRoutes.get("/api/account/login-methods", async (c) => {
     passkeyCount: counts.passkeys,
     linkable:
       gate.accessLevel === "standard"
-        ? LINKABLE_PROVIDERS.filter(
+        ? linkableProviders({
+            telegramBotToken: c.env.TELEGRAM_BOT_TOKEN,
+            telegramBotUsername: c.env.TELEGRAM_BOT_USERNAME,
+          }).filter(
             (provider) => !linkedProviders.has(provider),
           )
         : [],

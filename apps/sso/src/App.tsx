@@ -573,6 +573,7 @@ interface LoginMethodsResponse {
  */
 const LINKABLE_PROVIDER_DETAILS = {
   google: { label: "Google" },
+  telegram: { label: "Telegram" },
 } as const;
 
 type LinkableProviderId = keyof typeof LINKABLE_PROVIDER_DETAILS;
@@ -858,6 +859,56 @@ const SOCIAL_SIGN_IN_PROVIDERS: { id: string; label: string }[] = [
   { id: "apple", label: "Apple" },
 ];
 
+const SOCIAL_PROVIDER_ICON_PATHS: Record<string, string> = {
+  discord:
+    "M20.317 4.3698a19.7913 19.7913 0 0 0-4.8851-1.5152.0741.0741 0 0 0-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 0 0-.0785-.037 19.7363 19.7363 0 0 0-4.8852 1.515.0699.0699 0 0 0-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 0 0 .0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 0 0 .0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 0 0-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 0 1-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 0 1 .0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 0 1 .0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 0 1-.0066.1276 12.2986 12.2986 0 0 1-1.873.8914.0766.0766 0 0 0-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 0 0 .0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 0 0 .0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 0 0-.0312-.0286ZM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189Zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z",
+  facebook:
+    "M9.101 23.691v-7.98H6.627v-3.667h2.474v-1.58c0-4.085 1.848-5.978 5.858-5.978.401 0 .955.042 1.468.103a8.68 8.68 0 0 1 1.141.195v3.325a8.623 8.623 0 0 0-.653-.036 26.805 26.805 0 0 0-.733-.009c-.707 0-1.259.096-1.675.309a1.686 1.686 0 0 0-.679.622c-.258.42-.374.995-.374 1.752v1.297h3.919l-.386 2.103-.287 1.564h-3.246v8.245C19.396 23.238 24 18.179 24 12.044c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.628 3.874 10.35 9.101 11.647Z",
+  github:
+    "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12",
+};
+
+function SocialProviderIcon({ provider }: { provider: string }) {
+  const path = SOCIAL_PROVIDER_ICON_PATHS[provider];
+  if (!path) return null;
+  return (
+    <svg
+      className="social-provider-icon"
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+    >
+      <path d={path} />
+    </svg>
+  );
+}
+
+function GoogleBrandIcon() {
+  return (
+    <svg
+      className="google-brand-icon"
+      aria-hidden="true"
+      viewBox="0 0 18 18"
+    >
+      <path
+        fill="#4285f4"
+        d="M17.64 9.205c0-.639-.057-1.252-.164-1.841H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.717v2.258h2.908C16.656 14.252 17.64 11.945 17.64 9.205Z"
+      />
+      <path
+        fill="#34a853"
+        d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.258c-.806.54-1.836.859-3.048.859-2.344 0-4.329-1.585-5.037-3.711H.956v2.333C2.437 15.983 5.482 18 9 18Z"
+      />
+      <path
+        fill="#fbbc05"
+        d="M3.963 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.171.281-1.71V4.957H.956A9 9 0 0 0 0 9c0 1.452.348 2.827.956 4.043l3.007-2.333Z"
+      />
+      <path
+        fill="#ea4335"
+        d="M9 3.58c1.321 0 2.508.454 3.442 1.345l2.581-2.581C13.464.892 11.426 0 9 0 5.482 0 2.437 2.017.956 4.957L3.963 7.29C4.671 5.164 6.656 3.58 9 3.58Z"
+      />
+    </svg>
+  );
+}
+
 interface TelegramConfig {
   enabled: boolean;
   botUsername: string | null;
@@ -873,9 +924,13 @@ interface TelegramConfig {
 function TelegramLogin({
   config,
   disabled,
+  mode = "sign-in",
+  onLinked,
 }: {
   config: TelegramConfig;
   disabled: boolean;
+  mode?: "sign-in" | "link";
+  onLinked?: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -884,18 +939,26 @@ function TelegramLogin({
     if (!config.enabled || !config.botUsername || !containerRef.current) return;
     const container = containerRef.current;
     // Telegram invokes this global with the signed auth payload.
-    const cbName = "onTelegramAuth";
+    const cbName = mode === "link" ? "onTelegramLinkAuth" : "onTelegramAuth";
     (window as unknown as Record<string, unknown>)[cbName] = async (
       user: Record<string, unknown>,
     ) => {
       setError(null);
       try {
         const result = await authClient.$fetch<
-          SocialRedirectPayload & { signedIn?: boolean }
-        >("/api/auth/telegram", {
+          SocialRedirectPayload & { signedIn?: boolean; linked?: boolean }
+        >(mode === "link" ? "/api/auth/telegram/link" : "/api/auth/telegram", {
           method: "POST",
           body: user,
         });
+        if (mode === "link") {
+          if (result.error || result.data?.linked !== true) {
+            setError("Telegram 連結失敗，請稍後再試。");
+          } else {
+            onLinked?.();
+          }
+          return;
+        }
         const action = telegramLoginSuccessAction(result.data);
         if (result.error || action === "invalid") {
           setError("Telegram 登入失敗，請稍後再試。");
@@ -919,16 +982,77 @@ function TelegramLogin({
       container.replaceChildren();
       delete (window as unknown as Record<string, unknown>)[cbName];
     };
-  }, [config]);
+  }, [config, mode, onLinked]);
 
   // The parent only mounts this when Telegram is configured; render nothing
   // otherwise so a stray disabled button never appears.
   if (!config.enabled) return null;
   return (
-    <div className="telegram-login" aria-disabled={disabled}>
+    <div
+      className={`telegram-login${mode === "link" ? " telegram-login-inline" : ""}`}
+      aria-disabled={disabled}
+    >
       <div ref={containerRef} />
-      {error ? <div className="notice notice-error">{error}</div> : null}
+      {error ? (
+        mode === "link" ? (
+          <span className="telegram-login-error" role="alert">{error}</span>
+        ) : (
+          <div className="notice notice-error">{error}</div>
+        )
+      ) : null}
     </div>
+  );
+}
+
+function TelegramLink({
+  disabled,
+  onLinked,
+}: {
+  disabled: boolean;
+  onLinked: () => void;
+}) {
+  const [config, setConfig] = useState<TelegramConfig | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/auth/telegram/config", {
+      cache: "no-store",
+      headers: { accept: "application/json" },
+    })
+      .then((response) =>
+        response.ok
+          ? response.json()
+          : { enabled: false, botUsername: null },
+      )
+      .then((value: TelegramConfig) => {
+        if (!cancelled) {
+          setConfig({
+            enabled: value.enabled === true,
+            botUsername: value.botUsername?.trim() || null,
+          });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setConfig({ enabled: false, botUsername: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (config === null) {
+    return <span className="telegram-link-status">正在載入...</span>;
+  }
+  if (!config.enabled || !config.botUsername) {
+    return <span className="telegram-link-status">暫時無法連結</span>;
+  }
+  return (
+    <TelegramLogin
+      config={config}
+      disabled={disabled}
+      mode="link"
+      onLinked={onLinked}
+    />
   );
 }
 
@@ -1768,12 +1892,12 @@ export function SignInView({
 
         <div className="auth-actions" aria-busy={pending || busy !== null}>
           <button
-            className="button button-primary button-wide"
+            className="button button-primary button-wide google-sign-in-button"
             type="button"
             onClick={googleSignIn}
             disabled={pending || busy !== null || !registrationReady}
           >
-            <LogIn aria-hidden="true" />
+            <GoogleBrandIcon />
             {busy === "google"
               ? "正在連線..."
               : registering
@@ -1803,11 +1927,12 @@ export function SignInView({
               {visibleSocial.map((provider) => (
                 <button
                   key={provider.id}
-                  className="button button-secondary"
+                  className={`button button-secondary social-button social-button-${provider.id}`}
                   type="button"
                   disabled={pending || busy !== null || !registrationReady}
                   onClick={() => void socialSignIn(provider.id, provider.label)}
                 >
+                  <SocialProviderIcon provider={provider.id} />
                   {busy === provider.id ? "正在連線..." : provider.label}
                 </button>
               ))}
@@ -3447,6 +3572,11 @@ export function App() {
       setLoginMethodsState("error");
     }
   }, []);
+
+  const handleTelegramLinked = useCallback(() => {
+    setNotice("Telegram 已連結。");
+    void loadLoginMethods();
+  }, [loadLoginMethods]);
 
   const loadRecoveryCodeStatus = useCallback(async () => {
     setRecoveryCodeState("loading");
@@ -6279,7 +6409,7 @@ export function App() {
                 </div>
               ) : null}
               <div
-                className="item-list"
+                className="item-list login-method-list"
                 aria-busy={loginMethodsState === "loading"}
               >
                 {loginMethodsState === "ready" && loginMethods
@@ -6353,28 +6483,38 @@ export function App() {
                 {loginMethodsState === "ready" && loginMethods
                   ? loginMethods.linkable
                       .filter(isLinkableProviderId)
-                      .map((provider) => (
-                        <div className="list-item" key={`link-${provider}`}>
-                          <span className="item-icon">
-                            <Plus aria-hidden="true" />
-                          </span>
-                          <div className="item-copy">
-                            <strong>{providerLabel(provider)}</strong>
-                            <span>尚未連結</span>
+                      .map((provider) => {
+                        const providerBusy = busy === `link:${provider}`;
+                        return (
+                          <div className="list-item" key={`link-${provider}`}>
+                            <span className="item-icon">
+                              <Plus aria-hidden="true" />
+                            </span>
+                            <div className="item-copy">
+                              <strong>{providerLabel(provider)}</strong>
+                              <span>尚未連結</span>
+                            </div>
+                            {provider === "telegram" ? (
+                              <TelegramLink
+                                disabled={providerBusy}
+                                onLinked={handleTelegramLinked}
+                              />
+                            ) : (
+                              <button
+                                type="button"
+                                className="button button-primary button-compact"
+                                disabled={providerBusy}
+                                onClick={() => void linkLoginMethod(provider)}
+                              >
+                                <LogIn aria-hidden="true" />
+                                {providerBusy
+                                  ? "前往連結..."
+                                  : `連結 ${providerLabel(provider)}`}
+                              </button>
+                            )}
                           </div>
-                          <button
-                            type="button"
-                            className="button button-primary button-compact"
-                            disabled={busy === `link:${provider}`}
-                            onClick={() => void linkLoginMethod(provider)}
-                          >
-                            <LogIn aria-hidden="true" />
-                            {busy === `link:${provider}`
-                              ? "前往連結..."
-                              : `連結 ${providerLabel(provider)}`}
-                          </button>
-                        </div>
-                      ))
+                        );
+                      })
                   : null}
                 {loginMethodsState === "loading" ? (
                   <div className="empty-state">

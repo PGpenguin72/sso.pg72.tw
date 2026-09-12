@@ -2572,6 +2572,9 @@ export function App() {
 
   const pathname = window.location.pathname;
   const isConsent = pathname === "/consent";
+  const forceReauthentication =
+    pathname === "/sign-in" &&
+    new URLSearchParams(window.location.search).get("prompt") === "login";
   const clientId = new URLSearchParams(window.location.search).get("client_id");
 
   // Per-route document title. Public/consent routes are keyed off the path;
@@ -2606,7 +2609,7 @@ export function App() {
     );
   }
 
-  if (!session || (pathname === "/sign-in" && query.get("prompt") === "login")) {
+  if (!session || forceReauthentication) {
     return <SignInView pending={sessionQuery.isPending} />;
   }
 

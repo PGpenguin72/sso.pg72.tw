@@ -55,6 +55,7 @@ interface PublicViews {
     },
   ) => Promise<T>;
   isOAuthContinuation: (payload: unknown) => boolean;
+  isFreshSessionRequired: (error: unknown) => boolean;
   signInIntentCapabilities: (
     intent: "add-account" | "default" | "reauth",
   ) => {
@@ -188,6 +189,19 @@ describe("rendered public product copy", () => {
       passkey: true,
       telegram: false,
     });
+  });
+
+  it("recognizes both fresh-session error response shapes", () => {
+    expect(
+      publicViews.isFreshSessionRequired({ code: "SESSION_NOT_FRESH" }),
+    ).toBe(true);
+    expect(
+      publicViews.isFreshSessionRequired({ error: "fresh_session_required" }),
+    ).toBe(true);
+    expect(publicViews.isFreshSessionRequired({ error: "invalid_origin" })).toBe(
+      false,
+    );
+    expect(publicViews.isFreshSessionRequired(null)).toBe(false);
   });
 
   it("uses exactly one browser operation for each account choice", async () => {

@@ -18,6 +18,11 @@ interface PublicViews {
     passkey: Passkey;
   }>;
   LegalPage: ComponentType<{ kind: "pp" | "tos" }>;
+  isFreshSessionRequired: (error: unknown) => boolean;
+  passkeyEnrollmentOptions: (
+    kind: "passkey" | "security-key",
+    dateLabel: string,
+  ) => { authenticatorAttachment?: "cross-platform"; name: string };
   SignInView: ComponentType<{ pending: boolean }>;
 }
 
@@ -65,6 +70,31 @@ async function metaContent(
 }
 
 describe("rendered public product copy", () => {
+  it("recognizes both fresh-session error response shapes", () => {
+    expect(
+      publicViews.isFreshSessionRequired({ code: "SESSION_NOT_FRESH" }),
+    ).toBe(true);
+    expect(
+      publicViews.isFreshSessionRequired({ error: "fresh_session_required" }),
+    ).toBe(true);
+    expect(publicViews.isFreshSessionRequired({ error: "invalid_origin" })).toBe(
+      false,
+    );
+    expect(publicViews.isFreshSessionRequired(null)).toBe(false);
+  });
+
+  it("targets roaming authenticators for security-key enrollment", () => {
+    expect(
+      publicViews.passkeyEnrollmentOptions("security-key", "2026/9/12"),
+    ).toEqual({
+      authenticatorAttachment: "cross-platform",
+      name: "安全金鑰 2026/9/12",
+    });
+    expect(publicViews.passkeyEnrollmentOptions("passkey", "2026/9/12")).toEqual(
+      { name: "Passkey 2026/9/12" },
+    );
+  });
+
   it("renders the invite and Passkey boundaries on login, Terms, and About", () => {
     const signIn = renderToStaticMarkup(
       createElement(publicViews.SignInView, { pending: false }),

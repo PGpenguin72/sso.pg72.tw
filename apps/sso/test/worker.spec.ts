@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 
 import { createAuth } from "../worker/auth";
 import { readRuntimeConfig } from "../worker/config";
+import { telegramLinkConfigured } from "../worker/account";
+import { isHtmlDocumentResponse } from "../worker/index";
 import {
   createAuthenticatedUser,
   createBootstrapAdmin,
@@ -124,6 +126,22 @@ async function createPasskey(userId: string, name: string): Promise<string> {
 }
 
 describe("PGID Worker", () => {
+  it("enables Telegram linking only with complete widget configuration", () => {
+    expect(telegramLinkConfigured()).toBe(false);
+    expect(telegramLinkConfigured("test-token", "   ")).toBe(false);
+    expect(telegramLinkConfigured("test-token", "pgid_test_bot")).toBe(true);
+  });
+
+  it("prevents edge transformations only for successful HTML documents", () => {
+    expect(isHtmlDocumentResponse("GET", 200, "text/html; charset=UTF-8")).toBe(
+      true,
+    );
+    expect(isHtmlDocumentResponse("HEAD", 200, "text/html")).toBe(true);
+    expect(isHtmlDocumentResponse("GET", 200, "text/javascript")).toBe(false);
+    expect(isHtmlDocumentResponse("POST", 200, "text/html")).toBe(false);
+    expect(isHtmlDocumentResponse("GET", 404, "text/html")).toBe(false);
+  });
+
   it("serves health with hardened browser headers", async () => {
     const response = await exports.default.fetch("http://sso.test/health");
 

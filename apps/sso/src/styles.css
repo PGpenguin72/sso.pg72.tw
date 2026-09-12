@@ -576,6 +576,30 @@ svg {
   background: var(--border);
 }
 
+.google-sign-in-button {
+  border-color: #747775;
+  background: #fff;
+  color: #1f1f1f;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16);
+}
+
+.google-sign-in-button:hover:not(:disabled) {
+  border-color: #5f6368;
+  background: #f8faff;
+  box-shadow: 0 1px 3px rgba(60, 64, 67, 0.3);
+}
+
+.google-sign-in-button:active:not(:disabled) {
+  background: #eef3fe;
+  box-shadow: 0 1px 2px rgba(60, 64, 67, 0.2);
+}
+
+.google-brand-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+}
+
 .social-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -590,17 +614,86 @@ svg {
   grid-column: 1 / -1;
 }
 
+.social-provider-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  fill: currentColor;
+}
+
+.social-button-discord {
+  border-color: #5865f2;
+  background: #5865f2;
+  color: #fff;
+}
+
+.social-button-discord:hover:not(:disabled) {
+  border-color: #4752c4;
+  background: #4752c4;
+}
+
+.social-button-github {
+  border-color: #57606a;
+  background: #24292f;
+  color: #fff;
+}
+
+.social-button-github:hover:not(:disabled) {
+  border-color: #6e7781;
+  background: #30363d;
+}
+
+.social-button-facebook {
+  border-color: #0866ff;
+  background: #0866ff;
+  color: #fff;
+}
+
+.social-button-facebook:hover:not(:disabled) {
+  border-color: #075acc;
+  background: #075acc;
+}
+
 .telegram-login {
-  grid-column: 1 / -1;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
+  align-items: stretch;
+}
+
+.telegram-login > div:first-child {
+  display: flex;
+  min-height: 42px;
   align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: var(--r-control);
+  background: #229ed9;
+}
+
+.telegram-login iframe {
+  max-width: 100%;
 }
 
 .telegram-login[aria-disabled="true"] {
   opacity: 0.6;
   pointer-events: none;
+}
+
+.telegram-login-inline {
+  width: min(238px, 100%);
+  justify-self: end;
+}
+
+.telegram-login-inline > div:first-child {
+  width: 100%;
+}
+
+.telegram-login-error {
+  color: var(--danger);
+  font-size: 12px;
+  text-align: right;
 }
 
 .consent-shell {
@@ -1339,6 +1432,13 @@ svg {
   margin-top: 58px;
 }
 
+.passkey-enrollment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .danger-row {
   display: flex;
   align-items: center;
@@ -1540,6 +1640,21 @@ svg {
 
   .section-heading > .button {
     width: 100%;
+  }
+
+  .login-method-list .telegram-login-inline {
+    grid-column: 1 / -1;
+    width: 100%;
+    justify-self: stretch;
+    text-align: center;
+  }
+
+  .passkey-enrollment-actions {
+    width: 100%;
+  }
+
+  .passkey-enrollment-actions .button {
+    flex: 1 1 220px;
   }
 
   .authorization-heading {

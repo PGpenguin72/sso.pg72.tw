@@ -266,6 +266,7 @@ interface CreatedAdminClientResponse {
 
 interface PasskeyStepUpChallengeResponse {
   challengeId?: string;
+  code?: string;
   error?: string;
   options?: PublicKeyCredentialRequestOptionsJSON;
   verified?: boolean;
@@ -307,6 +308,7 @@ type Tab =
   | "admin";
 type Theme = "dark" | "light";
 type LoadState = "error" | "loading" | "ready";
+type SessionLoadState = LoadState | "fresh-session-required";
 
 // Must not exceed the Worker's stored-avatar ceiling (256 KiB after decode) so
 // the client rejects oversized files before an upload the server would refuse.
@@ -362,6 +364,27 @@ function messageFrom(error: unknown, fallback: string): string {
     return error.message;
   }
   return fallback;
+}
+
+export function isFreshSessionRequired(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { code?: unknown; error?: unknown };
+  return (
+    candidate.code === "SESSION_NOT_FRESH" ||
+    candidate.error === "fresh_session_required"
+  );
+}
+
+export function passkeyEnrollmentOptions(
+  kind: "passkey" | "security-key",
+  dateLabel: string,
+): { authenticatorAttachment?: "cross-platform"; name: string } {
+  return kind === "security-key"
+    ? {
+        authenticatorAttachment: "cross-platform",
+        name: `安全金鑰 ${dateLabel}`,
+      }
+    : { name: `Passkey ${dateLabel}` };
 }
 
 function formatDate(value: string | Date): string {
@@ -461,6 +484,56 @@ const SOCIAL_SIGN_IN_PROVIDERS: { id: string; label: string }[] = [
   { id: "apple", label: "Apple" },
 ];
 
+const SOCIAL_PROVIDER_ICON_PATHS: Record<string, string> = {
+  discord:
+    "M20.317 4.3698a19.7913 19.7913 0 0 0-4.8851-1.5152.0741.0741 0 0 0-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 0 0-.0785-.037 19.7363 19.7363 0 0 0-4.8852 1.515.0699.0699 0 0 0-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 0 0 .0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 0 0 .0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 0 0-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 0 1-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 0 1 .0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 0 1 .0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 0 1-.0066.1276 12.2986 12.2986 0 0 1-1.873.8914.0766.0766 0 0 0-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 0 0 .0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 0 0 .0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 0 0-.0312-.0286ZM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189Zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z",
+  facebook:
+    "M9.101 23.691v-7.98H6.627v-3.667h2.474v-1.58c0-4.085 1.848-5.978 5.858-5.978.401 0 .955.042 1.468.103a8.68 8.68 0 0 1 1.141.195v3.325a8.623 8.623 0 0 0-.653-.036 26.805 26.805 0 0 0-.733-.009c-.707 0-1.259.096-1.675.309a1.686 1.686 0 0 0-.679.622c-.258.42-.374.995-.374 1.752v1.297h3.919l-.386 2.103-.287 1.564h-3.246v8.245C19.396 23.238 24 18.179 24 12.044c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.628 3.874 10.35 9.101 11.647Z",
+  github:
+    "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12",
+};
+
+function SocialProviderIcon({ provider }: { provider: string }) {
+  const path = SOCIAL_PROVIDER_ICON_PATHS[provider];
+  if (!path) return null;
+  return (
+    <svg
+      className="social-provider-icon"
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+    >
+      <path d={path} />
+    </svg>
+  );
+}
+
+function GoogleBrandIcon() {
+  return (
+    <svg
+      className="google-brand-icon"
+      aria-hidden="true"
+      viewBox="0 0 18 18"
+    >
+      <path
+        fill="#4285f4"
+        d="M17.64 9.205c0-.639-.057-1.252-.164-1.841H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.717v2.258h2.908C16.656 14.252 17.64 11.945 17.64 9.205Z"
+      />
+      <path
+        fill="#34a853"
+        d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.258c-.806.54-1.836.859-3.048.859-2.344 0-4.329-1.585-5.037-3.711H.956v2.333C2.437 15.983 5.482 18 9 18Z"
+      />
+      <path
+        fill="#fbbc05"
+        d="M3.963 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.171.281-1.71V4.957H.956A9 9 0 0 0 0 9c0 1.452.348 2.827.956 4.043l3.007-2.333Z"
+      />
+      <path
+        fill="#ea4335"
+        d="M9 3.58c1.321 0 2.508.454 3.442 1.345l2.581-2.581C13.464.892 11.426 0 9 0 5.482 0 2.437 2.017.956 4.957L3.963 7.29C4.671 5.164 6.656 3.58 9 3.58Z"
+      />
+    </svg>
+  );
+}
+
 interface TelegramConfig {
   enabled: boolean;
   botUsername: string | null;
@@ -477,11 +550,13 @@ function TelegramLogin({
   config,
   disabled,
   endpoint = "/api/auth/telegram",
+  inline = false,
   onSuccess,
 }: {
   config: TelegramConfig;
   disabled: boolean;
   endpoint?: string;
+  inline?: boolean;
   onSuccess?: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -537,9 +612,18 @@ function TelegramLogin({
   // otherwise so a stray disabled button never appears.
   if (!config.enabled) return null;
   return (
-    <div className="telegram-login" aria-disabled={disabled}>
+    <div
+      className={`telegram-login${inline ? " telegram-login-inline" : ""}`}
+      aria-disabled={disabled}
+    >
       <div ref={containerRef} />
-      {error ? <div className="notice notice-error">{error}</div> : null}
+      {error ? (
+        inline ? (
+          <span className="telegram-login-error" role="alert">{error}</span>
+        ) : (
+          <div className="notice notice-error">{error}</div>
+        )
+      ) : null}
     </div>
   );
 }
@@ -553,6 +637,10 @@ export function SignInView({ pending }: { pending: boolean }) {
   );
   const query = new URLSearchParams(window.location.search);
   const oauthQuery = query.has("client_id") && query.has("sig");
+  const reauthenticating = query.get("prompt") === "login";
+  const authenticationCallbackURL = reauthenticating
+    ? `${window.location.origin}/`
+    : window.location.href;
 
   useEffect(() => {
     let cancelled = false;
@@ -605,7 +693,7 @@ export function SignInView({ pending }: { pending: boolean }) {
     setError(null);
     const result = await authClient.signIn.social({
       provider: provider as SocialProviderId,
-      callbackURL: window.location.href,
+      callbackURL: authenticationCallbackURL,
     });
     if (result?.error) {
       setError(messageFrom(result.error, `${label} 登入失敗，請稍後再試。`));
@@ -621,6 +709,8 @@ export function SignInView({ pending }: { pending: boolean }) {
     const result = await authClient.signIn.passkey();
     if (result.error) {
       setError(messageFrom(result.error, "Passkey sign-in failed."));
+    } else if (reauthenticating) {
+      window.location.assign("/");
     }
     setBusy(null);
   };
@@ -638,12 +728,12 @@ export function SignInView({ pending }: { pending: boolean }) {
 
         <div className="auth-actions" aria-busy={pending || busy !== null}>
           <button
-            className="button button-primary button-wide"
+            className="button button-primary button-wide google-sign-in-button"
             type="button"
             onClick={googleSignIn}
             disabled={pending || busy !== null}
           >
-            <LogIn aria-hidden="true" />
+            <GoogleBrandIcon />
             {busy === "google" ? "正在連線..." : "使用 Google 繼續"}
           </button>
           <button
@@ -667,11 +757,12 @@ export function SignInView({ pending }: { pending: boolean }) {
               {visibleSocial.map((provider) => (
                 <button
                   key={provider.id}
-                  className="button button-secondary"
+                  className={`button button-secondary social-button social-button-${provider.id}`}
                   type="button"
                   disabled={pending || busy !== null}
                   onClick={() => void socialSignIn(provider.id, provider.label)}
                 >
+                  <SocialProviderIcon provider={provider.id} />
                   {busy === provider.id ? "正在連線..." : provider.label}
                 </button>
               ))}
@@ -2133,7 +2224,8 @@ export function App() {
   const [tab, setTab] = useState<Tab>("account");
   const [navOpen, setNavOpen] = useState(false);
   const [sessions, setSessions] = useState<DeviceSession[]>([]);
-  const [sessionsState, setSessionsState] = useState<LoadState>("loading");
+  const [sessionsState, setSessionsState] =
+    useState<SessionLoadState>("loading");
   const [activityEvents, setActivityEvents] = useState<SecurityActivityEvent[]>(
     [],
   );
@@ -2256,7 +2348,11 @@ export function App() {
     setSessionsState("loading");
     const result = await authClient.listSessions();
     if (result.error) {
-      setSessionsState("error");
+      setSessionsState(
+        isFreshSessionRequired(result.error)
+          ? "fresh-session-required"
+          : "error",
+      );
       return;
     }
     setSessions(result.data ?? []);
@@ -2381,6 +2477,11 @@ export function App() {
     }
   }, []);
 
+  const handleTelegramLinked = useCallback(() => {
+    setNotice("Telegram 已連結。");
+    void loadLoginMethods();
+  }, [loadLoginMethods]);
+
   const loadAdminClients = useCallback(async () => {
     setAdminClientsState("loading");
     try {
@@ -2471,6 +2572,9 @@ export function App() {
 
   const pathname = window.location.pathname;
   const isConsent = pathname === "/consent";
+  const forceReauthentication =
+    pathname === "/sign-in" &&
+    new URLSearchParams(window.location.search).get("prompt") === "login";
   const clientId = new URLSearchParams(window.location.search).get("client_id");
 
   // Per-route document title. Public/consent routes are keyed off the path;
@@ -2505,7 +2609,7 @@ export function App() {
     );
   }
 
-  if (!session) {
+  if (!session || forceReauthentication) {
     return <SignInView pending={sessionQuery.isPending} />;
   }
 
@@ -2524,21 +2628,34 @@ export function App() {
     );
   }
 
-  const addPasskey = async () => {
-    setBusy("passkey:add");
+  const addPasskey = async (kind: "passkey" | "security-key") => {
+    const pendingState =
+      kind === "security-key" ? "passkey:add-security-key" : "passkey:add";
+    setBusy(pendingState);
     setNotice(null);
     setPasskeyError(null);
     try {
-      const result = await authClient.passkey.addPasskey({
-        name: `Passkey ${new Date().toLocaleDateString("zh-TW")}`,
-      });
+      const result = await authClient.passkey.addPasskey(
+        passkeyEnrollmentOptions(
+          kind,
+          new Date().toLocaleDateString("zh-TW"),
+        ),
+      );
       if (result.error) {
+        if (isFreshSessionRequired(result.error)) {
+          window.location.assign("/sign-in?prompt=login");
+          return;
+        }
         setPasskeyError(messageFrom(result.error, "無法新增 Passkey。"));
         return;
       }
-      setNotice("Passkey 已新增。");
+      setNotice(kind === "security-key" ? "安全金鑰已新增。" : "Passkey 已新增。");
       await loadLoginMethods();
     } catch (addError: unknown) {
+      if (isFreshSessionRequired(addError)) {
+        window.location.assign("/sign-in?prompt=login");
+        return;
+      }
       setPasskeyError(messageFrom(addError, "無法新增 Passkey。"));
     } finally {
       setBusy(null);
@@ -3096,6 +3213,10 @@ export function App() {
     const challenge = (await challengeResponse.json().catch(() => ({}))) as
       PasskeyStepUpChallengeResponse;
     if (!challengeResponse.ok) {
+      if (isFreshSessionRequired(challenge)) {
+        window.location.assign("/sign-in?prompt=login");
+        return false;
+      }
       setAdminClientsError(
         adminClientErrorMessage(
           challenge.error,
@@ -3137,6 +3258,10 @@ export function App() {
       .json()
       .catch(() => ({}))) as PasskeyStepUpChallengeResponse;
     if (!verificationResponse.ok || verification.verified !== true) {
+      if (isFreshSessionRequired(verification)) {
+        window.location.assign("/sign-in?prompt=login");
+        return false;
+      }
       setAdminClientsError(
         verification.error === "passkey_step_up_challenge_invalid"
           ? "Passkey 驗證已過期或已使用，請再試一次。"
@@ -4710,7 +4835,7 @@ export function App() {
                 </div>
               ) : null}
               <div
-                className="item-list"
+                className="item-list login-method-list"
                 aria-busy={loginMethodsState === "loading"}
               >
                 {loginMethodsState === "ready" && loginMethods
@@ -4794,10 +4919,8 @@ export function App() {
                               config={telegramConfig}
                               disabled={busy !== null}
                               endpoint="/api/auth/telegram/link"
-                              onSuccess={() => {
-                                setNotice("Telegram 已連結。");
-                                void loadLoginMethods();
-                              }}
+                              inline
+                              onSuccess={handleTelegramLinked}
                             />
                           ) : (
                             <button
@@ -4842,15 +4965,28 @@ export function App() {
                   <span className="eyebrow">Authentication</span>
                   <h2>Passkeys</h2>
                 </div>
-                <button
-                  type="button"
-                  className="button button-primary"
-                  onClick={addPasskey}
-                  disabled={busy === "passkey:add"}
-                >
-                  <Plus aria-hidden="true" />
-                  {busy === "passkey:add" ? "新增中..." : "新增 Passkey"}
-                </button>
+                <div className="passkey-enrollment-actions">
+                  <button
+                    type="button"
+                    className="button button-secondary"
+                    onClick={() => void addPasskey("security-key")}
+                    disabled={busy?.startsWith("passkey:add") === true}
+                  >
+                    <KeyRound aria-hidden="true" />
+                    {busy === "passkey:add-security-key"
+                      ? "新增中..."
+                      : "新增安全金鑰"}
+                  </button>
+                  <button
+                    type="button"
+                    className="button button-primary"
+                    onClick={() => void addPasskey("passkey")}
+                    disabled={busy?.startsWith("passkey:add") === true}
+                  >
+                    <Plus aria-hidden="true" />
+                    {busy === "passkey:add" ? "新增中..." : "新增 Passkey"}
+                  </button>
+                </div>
               </div>
 
               {passkeyError ? (
@@ -4938,6 +5074,19 @@ export function App() {
                       <RefreshCw aria-hidden="true" />
                       重試
                     </button>
+                  </div>
+                ) : null}
+                {sessionsState === "fresh-session-required" ? (
+                  <div className="empty-state empty-state-error" role="alert">
+                    <ShieldAlert aria-hidden="true" />
+                    <span>登入時間已超過 10 分鐘，請再次驗證後查看裝置。</span>
+                    <a
+                      className="button button-secondary button-compact"
+                      href="/sign-in?prompt=login"
+                    >
+                      <LogIn aria-hidden="true" />
+                      再次驗證
+                    </a>
                   </div>
                 ) : null}
                 {sessionsState === "ready" && sessions.length === 0 ? (
